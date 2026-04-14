@@ -11,6 +11,7 @@ const {
   getMonthSummary,
   getMonthOrders,
   getRecentSyncLogs,
+  getOrderDetail,
 } = require('../services/billingService');
 
 // 所有路由需 operation_lead 以上（app.js 掛載時已套 authenticate）
@@ -100,6 +101,36 @@ router.get('/sync/logs', async (req, res) => {
   } catch (err) {
     console.error('[Billing] 取得同步記錄失敗：', err.message);
     res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+// GET /api/billing/order-detail/:sourceType/:sourceId
+// 從市場 API 取得單一訂單完整明細（Method B，含 photo_urls、completion_notes）
+// sourceType: repair | maintenance
+// sourceId:   訂單 UUID (source_id)
+// ─────────────────────────────────────────────────────────────
+router.get('/order-detail/:sourceType/:sourceId', async (req, res) => {
+  const { sourceType, sourceId } = req.params;
+  const VALID_TYPES = ['repair', 'maintenance'];
+
+  if (!VALID_TYPES.includes(sourceType)) {
+    return res.status(400).json({
+      success: false,
+      message: `sourceType 必須為 repair 或 maintenance，收到：${sourceType}`,
+    });
+  }
+  if (!sourceId || sourceId.length < 10) {
+    return res.status(400).json({ success: false, message: 'sourceId 格式錯誤' });
+  }
+
+  try {
+    const data = await getOrderDetail(sourceType, sourceId);
+    res.json({ success: true, data });
+  } catch (err) {
+    const httpStatus = err.response?.status;
+    console.error(`[Billing] 取得訂單明細失敗 (${sourceType}/${sourceId})：`, err.message);
+    res.status(httpStatus || 500).json({ success: false, message: err.message });
   }
 });
 

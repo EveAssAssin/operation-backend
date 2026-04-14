@@ -7,6 +7,12 @@ const supabase = require('../config/supabase');
 const MARKET_BILLING_URL = process.env.MARKET_BILLING_URL
   || 'https://market-backend-0544.onrender.com/api/billing';
 
+// source_type → 部門分類 對應表
+const BILLING_CATEGORY_MAP = {
+  repair:      '工程部',
+  maintenance: '工程部',
+};
+
 /**
  * 取得市場系統帳單 API 的 axios instance（帶 x-api-key）
  */
@@ -44,14 +50,18 @@ async function upsertOrders(orders) {
 
   const rows = orders.map((o) => ({
     // 市場 API 的訂單唯一識別碼欄位為 source_id（UUID）
-    order_id: o.source_id || o.order_id || o.id,
-    source_type:   o.source_type,
-    store_erpid:   o.store_erpid,
-    amount:        Number(o.amount) || 0,
-    signed_at:     o.signed_at,
-    billing_month: toBillingMonth(o.signed_at),
-    raw_data:      o,
-    updated_at:    new Date().toISOString(),
+    order_id:         o.source_id || o.order_id || o.id,
+    source_type:      o.source_type,
+    store_erpid:      o.store_erpid,
+    amount:           Number(o.amount) || 0,
+    signed_at:        o.signed_at,
+    billing_month:    toBillingMonth(o.signed_at),
+    raw_data:         o,
+    // 明細項目（include=items 時才有，否則保留空陣列）
+    items:            Array.isArray(o.items) ? o.items : [],
+    remark:           o.remark || null,
+    billing_category: BILLING_CATEGORY_MAP[o.source_type] || o.source_type || null,
+    updated_at:       new Date().toISOString(),
   }));
 
   const { error } = await supabase
@@ -94,7 +104,7 @@ async function syncMonth(month, syncType = 'manual') {
 
   try {
     const client = getBillingApiClient();
-    const resp   = await client.get('/completed-orders', { params: { month } });
+    const resp   = await client.get('/completed-orders', { params: { month, include: 'items' } });
 
     // 診斷 log — 確認 status + 回傳結構
     console.log(`[BillingService] HTTP status: ${resp.status}`);
@@ -169,7 +179,7 @@ async function incrementalSync() {
   let ordersCount = 0;
   try {
     const client = getBillingApiClient();
-    const resp   = await client.get('/completed-orders', { params: { since } });
+    const resp   = await client.get('/completed-orders', { params: { since, include: 'items' } });
     const orders = resp.data?.data || resp.data || [];
 
     ordersCount = await upsertOrders(orders);
@@ -203,7 +213,7 @@ async function incrementalSync() {
 async function getMonthSummary(month) {
   const { data, error } = await supabase
     .from('billing_orders')
-    .select('store_erpid, source_type, amount')
+    .select('store_erpid, source_type, amount, billing_category')
     .eq('billing_month', month);
 
   if (error) throw new Error(`[BillingService] 查詢彙總失敗：${error.message}`);
@@ -214,6 +224,7 @@ async function getMonthSummary(month) {
     if (!map[row.store_erpid]) {
       map[row.store_erpid] = {
         store_erpid:         row.store_erpid,
+        billing_category:    row.billing_category || null,
         maintenance_count:   0,
         maintenance_amount:  0,
         repair_count:        0,
@@ -223,6 +234,10 @@ async function getMonthSummary(month) {
       };
     }
     const s = map[row.store_erpid];
+    // 若有 billing_category，以最新非 null 的值為主
+    if (row.billing_category && !s.billing_category) {
+      s.billing_category = row.billing_category;
+    }
     if (row.source_type === 'maintenance') {
       s.maintenance_count  += 1;
       s.maintenance_amount += Number(row.amount);
@@ -248,7 +263,7 @@ async function getMonthSummary(month) {
 async function getMonthOrders(month, storeErpid) {
   let query = supabase
     .from('billing_orders')
-    .select('id, order_id, source_type, store_erpid, amount, signed_at, billing_month')
+    .select('id, order_id, source_type, store_erpid, amount, signed_at, billing_month, billing_category, items, remark')
     .eq('billing_month', month)
     .order('signed_at', { ascending: true });
 
@@ -276,10 +291,30 @@ async function getRecentSyncLogs(limit = 10) {
   return data || [];
 }
 
+/**
+ * 從市場 API 取得單一訂單完整明細（Method B：含 photo_urls、completion_notes）
+ * @param {'repair'|'maintenance'} sourceType
+ * @param {string} sourceId - order UUID (source_id)
+ * @returns {Object} 市場 API 回傳的原始訂單明細
+ */
+async function getOrderDetail(sourceType, sourceId) {
+  const client = getBillingApiClient();
+  const baseUrl = process.env.MARKET_BILLING_URL
+    || 'https://market-backend-0544.onrender.com/api/billing';
+
+  // Method B endpoint: /api/billing/order-items/{sourceType}/{sourceId}
+  const resp = await client.get(`/order-items/${sourceType}/${sourceId}`);
+
+  // 市場 API 回傳 { success, data: {...} } 或直接 {...}
+  const raw = resp.data;
+  return raw?.data ?? raw;
+}
+
 module.exports = {
   syncMonth,
   incrementalSync,
   getMonthSummary,
   getMonthOrders,
   getRecentSyncLogs,
+  getOrderDetail,
 };
