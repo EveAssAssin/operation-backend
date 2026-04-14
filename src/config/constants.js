@@ -14,6 +14,9 @@ const MODULE_PERMISSIONS = {
   'personnel.sync':    ROLES.dept_head,
   'system_user.view':  ROLES.dept_head,
   'system_user.edit':  ROLES.super_admin,
+  // 開帳系統
+  'billing.view':      ROLES.operation_lead,
+  'billing.sync':      ROLES.operation_lead,
 };
 
 // 同步類型

@@ -57,6 +57,9 @@ app.use('/api/system',     authenticate, require('./routes/system'));
 // 通用 QR Code 簽收（不需 SSO，由 LINE UID / app_number 驗證）
 app.use('/api/sign/universal', require('./routes/sign/universal'));
 
+// 開帳系統（需登入，operation_lead 以上）
+app.use('/api/billing', authenticate, require('./routes/billing'));
+
 // ── 內部同步觸發（部署初期用，確認正常後可移除）──────
 app.post('/api/internal/sync', async (req, res) => {
   const { runEmployeeSync } = require('./services/personnelSync');
@@ -84,9 +87,11 @@ app.post('/api/internal/sync-line-uid', async (req, res) => {
 // ── 排程任務 ──────────────────────────────────────────────
 const { startScheduledSync }        = require('./jobs/syncEmployees');
 const { startLineUidScheduledSync } = require('./jobs/syncLineUid');
+const { startBillingScheduledSync } = require('./jobs/syncBilling');
 
 startScheduledSync();
 startLineUidScheduledSync();
+startBillingScheduledSync();
 
 // ── 錯誤處理 ──────────────────────────────────────────────
 app.use((req, res) => {
