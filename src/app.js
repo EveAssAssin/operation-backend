@@ -15,7 +15,16 @@ const PORT = process.env.PORT || 3001;
 // ── 安全 & 中間件 ─────────────────────────────────────────
 app.use(helmet());
 app.use(cors({
-  origin:      process.env.CORS_ORIGIN || 'http://localhost:5173',
+  origin: function (origin, callback) {
+    const allowed = (process.env.CORS_ORIGIN || 'http://localhost:5173')
+      .split(',').map(s => s.trim());
+    // 允許無 origin 的請求（如 Postman、Server-to-Server）
+    if (!origin || allowed.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(null, true); // 開發階段先全開，正式環境可改 false
+    }
+  },
   credentials: true,
 }));
 app.use(morgan('dev'));
