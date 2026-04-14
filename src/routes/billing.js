@@ -103,4 +103,48 @@ router.get('/sync/logs', async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────
+// GET /api/billing/debug?month=YYYY-MM
+// 直接打市場 API，回傳原始結果，不寫 DB（除錯用）
+// ─────────────────────────────────────────────────────────────
+router.get('/debug', async (req, res) => {
+  const { month } = req.query;
+  const axios = require('axios');
+
+  const apiKey = process.env.BILLING_API_KEY;
+  if (!apiKey) {
+    return res.status(503).json({ success: false, message: 'BILLING_API_KEY 未設定' });
+  }
+
+  try {
+    const resp = await axios.get(
+      `${process.env.MARKET_BILLING_URL || 'https://market-backend-0544.onrender.com/api/billing'}/completed-orders`,
+      {
+        params:  { month: month || new Date().toISOString().slice(0, 7) },
+        headers: { 'x-api-key': apiKey },
+        timeout: 15000,
+      }
+    );
+
+    const raw    = resp.data;
+    const orders = Array.isArray(raw) ? raw : Array.isArray(raw?.data) ? raw.data : [];
+
+    res.json({
+      success:      true,
+      http_status:  resp.status,
+      resp_data_type: Array.isArray(raw) ? 'array' : typeof raw,
+      resp_data_keys: raw && typeof raw === 'object' && !Array.isArray(raw) ? Object.keys(raw) : null,
+      orders_count: orders.length,
+      first_order:  orders[0] || null,
+    });
+  } catch (err) {
+    res.status(500).json({
+      success:     false,
+      http_status: err.response?.status || null,
+      message:     err.message,
+      resp_data:   err.response?.data || null,
+    });
+  }
+});
+
 module.exports = router;

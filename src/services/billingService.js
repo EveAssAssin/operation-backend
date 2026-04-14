@@ -43,7 +43,10 @@ async function upsertOrders(orders) {
   if (!orders || orders.length === 0) return 0;
 
   const rows = orders.map((o) => ({
-    order_id:      o.order_id || o.id,
+    // HANDOFF 未明確說明 ID 欄位名稱；用多欄位 fallback 確保 upsert 不會因 null 失敗
+    // 若市場 API 有提供 order_id / id / ticket_id 就用它，否則組合 deterministic key
+    order_id: o.order_id || o.id || o.ticket_id
+      || `${o.store_erpid}_${o.source_type}_${o.signed_at}`,
     source_type:   o.source_type,
     store_erpid:   o.store_erpid,
     amount:        Number(o.amount) || 0,
@@ -94,7 +97,21 @@ async function syncMonth(month, syncType = 'manual') {
   try {
     const client = getBillingApiClient();
     const resp   = await client.get('/completed-orders', { params: { month } });
-    const orders = resp.data?.data || resp.data || [];
+
+    // 診斷 log — 確認 status + 回傳結構
+    console.log(`[BillingService] HTTP status: ${resp.status}`);
+    console.log(`[BillingService] resp.data type: ${Array.isArray(resp.data) ? 'array' : typeof resp.data}`);
+
+    // 市場 API 回傳格式：{ success: true, total_count: N, data: [...] }
+    // 後端 axios 無 interceptor，resp.data 是完整物件，陣列在 resp.data.data
+    const raw    = resp.data;
+    const orders = Array.isArray(raw)       ? raw       :
+                   Array.isArray(raw?.data) ? raw.data  : [];
+
+    console.log(`[BillingService] 解析到訂單數：${orders.length}`);
+    if (orders.length > 0) {
+      console.log(`[BillingService] 第一筆 keys:`, Object.keys(orders[0]));
+    }
 
     ordersCount = await upsertOrders(orders);
 
@@ -108,7 +125,12 @@ async function syncMonth(month, syncType = 'manual') {
     console.log(`[BillingService] 月份 ${month} 同步完成，共 ${ordersCount} 筆`);
     return { orders_synced: ordersCount };
   } catch (err) {
-    console.error(`[BillingService] 月份 ${month} 同步失敗：`, err.message);
+    // 若是 HTTP 錯誤，加上 status code（503=key未設定 / 401=key錯誤）
+    const httpStatus = err.response?.status;
+    const errMsg = httpStatus
+      ? `HTTP ${httpStatus} — ${JSON.stringify(err.response?.data)}`
+      : err.message;
+    console.error(`[BillingService] 月份 ${month} 同步失敗：`, errMsg);
     await writeSyncLog({
       sync_type:     syncType,
       target_month:  month,
