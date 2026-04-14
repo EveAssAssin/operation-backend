@@ -57,6 +57,30 @@ app.use('/api/system',     authenticate, require('./routes/system'));
 // 通用 QR Code 簽收（不需 SSO，由 LINE UID / app_number 驗證）
 app.use('/api/sign/universal', require('./routes/sign/universal'));
 
+// ── 內部同步觸發（部署初期用，確認正常後可移除）──────
+app.post('/api/internal/sync', async (req, res) => {
+  const { runEmployeeSync } = require('./services/personnelSync');
+  const { SYNC_TYPE } = require('./config/constants');
+  try {
+    res.json({ success: true, message: '同步已啟動，背景執行中' });
+    const result = await runEmployeeSync(SYNC_TYPE.MANUAL, null);
+    console.log('[內部同步] 完成：', JSON.stringify(result));
+  } catch (err) {
+    console.error('[內部同步] 失敗：', err.message);
+  }
+});
+
+app.post('/api/internal/sync-line-uid', async (req, res) => {
+  const { runLineUidSync } = require('./services/lineUidSync');
+  try {
+    res.json({ success: true, message: 'LINE UID 同步已啟動，背景執行中' });
+    const result = await runLineUidSync(null);
+    console.log('[內部LINE UID同步] 完成：', JSON.stringify(result));
+  } catch (err) {
+    console.error('[內部LINE UID同步] 失敗：', err.message);
+  }
+});
+
 // ── 排程任務 ──────────────────────────────────────────────
 const { startScheduledSync }        = require('./jobs/syncEmployees');
 const { startLineUidScheduledSync } = require('./jobs/syncLineUid');
