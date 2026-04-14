@@ -1,6 +1,12 @@
 // routes/system.js
 // 系統用戶管理 API — 從 employees 匯入，賦予系統權限
 // 統一使用 app_number 作為跨系統識別碼（= system_users.member_id）
+//
+// 權限說明：
+//   GET  /employees  → operation_lead 以上可查看（system_user.view）
+//   POST /grant      → super_admin 才能授權（system_user.edit）
+//   PUT  /:id/role   → super_admin 才能修改角色
+//   PUT  /:id/revoke → super_admin 才能撤銷
 
 const express  = require('express');
 const router   = express.Router();
@@ -8,34 +14,35 @@ const supabase = require('../config/supabase');
 const { authenticate, authorize } = require('../middleware/auth');
 
 router.use(authenticate);
-router.use(authorize('system_user.edit'));
 
-const VALID_ROLES = ['super_admin', 'dept_head', 'works_engineer', 'auditor', 'marketing_staff'];
+// 營運部系統的有效角色
+const VALID_ROLES = ['super_admin', 'operation_lead', 'operation_staff'];
 
 /**
  * GET /api/system/employees
  * 列出所有在職員工，並標示是否已有系統權限
+ * 需要 operation_lead 以上
  */
-router.get('/employees', async (req, res) => {
+router.get('/employees', authorize('system_user.view'), async (req, res) => {
   try {
     const {
       keyword,
       store_name,
       has_access,
       page  = 1,
-      limit = 30,
+      limit = 50,
     } = req.query;
 
     const pageNum  = Math.max(1, parseInt(page));
     const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
 
-    // 1. 取得所有在職員工（app_number = member_id）
+    // 1. 取得所有在職員工
     let empQuery = supabase
       .from('employees')
-      .select('id, erpid, app_number, name, jobtitle, store_name, is_active', { count: 'exact' })
+      .select('id, erpid, app_number, name, jobtitle, store_name, store_erpid, is_active')
       .eq('is_active', true)
       .order('store_name', { ascending: true })
-      .order('name', { ascending: true });
+      .order('name',       { ascending: true });
 
     if (keyword) {
       empQuery = empQuery.or(`name.ilike.%${keyword}%,erpid.ilike.%${keyword}%,app_number.ilike.%${keyword}%`);
@@ -47,7 +54,7 @@ router.get('/employees', async (req, res) => {
     const { data: allEmployees, error: empErr } = await empQuery;
     if (empErr) throw empErr;
 
-    // 2. 取得所有 system_users（用 member_id = app_number 做 map）
+    // 2. 取得所有 system_users
     const { data: sysUsers, error: sysErr } = await supabase
       .from('system_users')
       .select('id, member_id, erpid, name, role, is_active, last_login_at');
@@ -57,21 +64,20 @@ router.get('/employees', async (req, res) => {
     const sysUserMap = {};
     (sysUsers || []).forEach(su => { sysUserMap[su.member_id] = su; });
 
-    // 3. 合併資料（用 member_id = app_number 做比對）
+    // 3. 合併（app_number = member_id）
     let merged = (allEmployees || []).map(emp => {
       const su = sysUserMap[emp.app_number];
       return {
         employee_id:    emp.id,
         erpid:          emp.erpid,
         app_number:     emp.app_number,
-        member_id:      emp.app_number,  // app_number 就是 member_id
         name:           emp.name,
         jobtitle:       emp.jobtitle,
         store_name:     emp.store_name,
+        store_erpid:    emp.store_erpid,
         has_access:     !!su && su.is_active,
         system_user_id: su?.id || null,
-        role:           su?.role || null,
-        sys_active:     su?.is_active ?? null,
+        role:           su?.is_active ? su.role : null,
         last_login_at:  su?.last_login_at || null,
       };
     });
@@ -81,18 +87,18 @@ router.get('/employees', async (req, res) => {
     if (has_access === 'false') merged = merged.filter(m => !m.has_access);
 
     // 5. 分頁
-    const filteredTotal = merged.length;
-    const from = (pageNum - 1) * limitNum;
+    const total = merged.length;
+    const from  = (pageNum - 1) * limitNum;
     const paged = merged.slice(from, from + limitNum);
 
     res.json({
       success: true,
       data: paged,
       pagination: {
-        total: filteredTotal,
+        total,
         page:  pageNum,
         limit: limitNum,
-        pages: Math.ceil(filteredTotal / limitNum),
+        pages: Math.ceil(total / limitNum),
       },
     });
   } catch (err) {
@@ -102,21 +108,20 @@ router.get('/employees', async (req, res) => {
 
 /**
  * POST /api/system/grant
- * 賦予員工系統權限
+ * 賦予員工系統權限（僅 super_admin）
  * body: { app_number, role }
- * app_number = member_id（從 employees 表自動帶入）
  */
-router.post('/grant', async (req, res) => {
+router.post('/grant', authorize('system_user.edit'), async (req, res) => {
   try {
     const { app_number, role } = req.body;
     if (!app_number || !role) {
       return res.status(400).json({ success: false, message: '缺少 app_number 或 role' });
     }
     if (!VALID_ROLES.includes(role)) {
-      return res.status(400).json({ success: false, message: `無效角色：${role}` });
+      return res.status(400).json({ success: false, message: `無效角色，有效值：${VALID_ROLES.join(', ')}` });
     }
 
-    // 查員工資料
+    // 查員工
     const { data: emp, error: empErr } = await supabase
       .from('employees')
       .select('erpid, app_number, name')
@@ -127,7 +132,7 @@ router.post('/grant', async (req, res) => {
       return res.status(404).json({ success: false, message: '找不到此員工' });
     }
 
-    // 檢查是否已存在（member_id = app_number）
+    // 已存在則更新
     const { data: existing } = await supabase
       .from('system_users')
       .select('id')
@@ -160,7 +165,7 @@ router.post('/grant', async (req, res) => {
       .single();
 
     if (error) throw error;
-    res.status(201).json({ success: true, data });
+    res.status(201).json({ success: true, data, message: `已授權：${emp.name}（${role}）` });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -168,14 +173,14 @@ router.post('/grant', async (req, res) => {
 
 /**
  * PUT /api/system/:id/role
+ * 修改角色（僅 super_admin）
  */
-router.put('/:id/role', async (req, res) => {
+router.put('/:id/role', authorize('system_user.edit'), async (req, res) => {
   try {
     const { role } = req.body;
     if (!role || !VALID_ROLES.includes(role)) {
-      return res.status(400).json({ success: false, message: '無效角色' });
+      return res.status(400).json({ success: false, message: `無效角色，有效值：${VALID_ROLES.join(', ')}` });
     }
-
     const { data, error } = await supabase
       .from('system_users')
       .update({ role, updated_at: new Date().toISOString() })
@@ -192,8 +197,9 @@ router.put('/:id/role', async (req, res) => {
 
 /**
  * PUT /api/system/:id/revoke
+ * 撤銷系統權限（僅 super_admin）
  */
-router.put('/:id/revoke', async (req, res) => {
+router.put('/:id/revoke', authorize('system_user.edit'), async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('system_users')
@@ -203,7 +209,7 @@ router.put('/:id/revoke', async (req, res) => {
       .single();
 
     if (error || !data) return res.status(404).json({ success: false, message: '找不到此用戶' });
-    res.json({ success: true, data });
+    res.json({ success: true, data, message: '已撤銷系統權限' });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }

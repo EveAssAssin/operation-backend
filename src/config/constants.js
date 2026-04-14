@@ -17,6 +17,9 @@ const MODULE_PERMISSIONS = {
   // 開帳系統
   'billing.view':      ROLES.operation_lead,
   'billing.sync':      ROLES.operation_lead,
+  // 系統用戶管理
+  'system_user.view':  ROLES.operation_lead,  // 查看（主管以上）
+  'system_user.edit':  ROLES.super_admin,      // 授權/撤銷（超管）
 };
 
 // 同步類型
