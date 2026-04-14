@@ -162,11 +162,14 @@ router.patch('/messages/:id/status', async (req, res) => {
       .update(updates)
       .eq('id', id)
       .select()
-      .single();
+      .maybeSingle();
 
     if (error) {
       console.error('[Hub] 更新狀態失敗:', error.message);
       return res.status(500).json({ success: false, message: '更新失敗：' + error.message });
+    }
+    if (!data) {
+      return res.status(404).json({ success: false, message: `找不到訊息 id=${id}` });
     }
 
     res.json({ success: true, data });
