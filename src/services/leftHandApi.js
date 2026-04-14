@@ -102,11 +102,11 @@ async function getEmployeeByErpId(erpid) {
 }
 
 // ── 有效員工過濾規則 ──────────────────────────────────────────
-function isValidEmployee(emp, appNumberMap) {
-  const appNumber = appNumberMap[emp.erpid];
+// ⚠️ 營運部系統包含所有部門（含行政：總經理室、企劃部等）
+//    不以 app_number 為必要條件，行政部門員工無 app_number 仍應同步
+function isValidEmployee(emp) {
   return (
     emp.erpid &&
-    appNumber &&
     !emp.isleave &&
     !emp.isfreeze &&
     !emp.name?.includes('不指定') &&
@@ -157,13 +157,13 @@ async function syncAllEmployees() {
     }
 
     storeEmps
-      .filter(emp => isValidEmployee(emp, appNumberMap))
+      .filter(emp => isValidEmployee(emp))
       .forEach(emp => {
         employees.push({
           store_erpid: store.erpid,
           store_name:  store.name,
           erpid:       emp.erpid,
-          app_number:  appNumberMap[emp.erpid],
+          app_number:  appNumberMap[emp.erpid] || null,  // 無推播帳號者為 null，仍寫入
           name:        emp.name,
           jobtitle:    emp.jobtitle || null,
           is_active:   true,
@@ -176,10 +176,9 @@ async function syncAllEmployees() {
   let supplementCount = 0;
 
   for (const emp of allEmps) {
-    if (syncedErpIds.has(emp.employeeerpid)) continue;
-    if (!emp.employeeappnumber)              continue;
+    if (syncedErpIds.has(emp.employeeerpid))   continue;
     if (emp.employeeerpid?.startsWith('9999')) continue;
-    if (emp.employeename?.includes('不指定')) continue;
+    if (emp.employeename?.includes('不指定'))  continue;
 
     try {
       const details = await getEmployeeByErpId(emp.employeeerpid);
@@ -198,7 +197,7 @@ async function syncAllEmployees() {
         store_erpid: storeErpid,
         store_name:  storeName,
         erpid:       detail.erpid,
-        app_number:  emp.employeeappnumber,
+        app_number:  emp.employeeappnumber || null,
         name:        detail.name,
         jobtitle:    detail.jobtitle || null,
         is_active:   true,

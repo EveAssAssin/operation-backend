@@ -10,8 +10,8 @@ const ROLES = {
 
 const MODULE_PERMISSIONS = {
   'personnel.view':    ROLES.operation_staff,
-  'personnel.edit':    ROLES.dept_head,
-  'personnel.sync':    ROLES.dept_head,
+  'personnel.edit':    ROLES.operation_lead,
+  'personnel.sync':    ROLES.operation_lead,   // 主管以上可手動觸發人員同步
   'system_user.view':  ROLES.dept_head,
   'system_user.edit':  ROLES.super_admin,
   // 開帳系統
