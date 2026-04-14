@@ -60,6 +60,9 @@ app.use('/api/sign/universal', require('./routes/sign/universal'));
 // 開帳系統（需登入，operation_lead 以上）
 app.use('/api/billing', authenticate, require('./routes/billing'));
 
+// AI Hub 跨系統訊息中樞（API Key 驗證，供所有 Cowork AI 使用）
+app.use('/api/hub', require('./routes/hub'));
+
 // ── 內部同步觸發（部署初期用，確認正常後可移除）──────
 app.post('/api/internal/sync', async (req, res) => {
   const { runEmployeeSync } = require('./services/personnelSync');
