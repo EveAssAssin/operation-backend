@@ -43,10 +43,8 @@ async function upsertOrders(orders) {
   if (!orders || orders.length === 0) return 0;
 
   const rows = orders.map((o) => ({
-    // HANDOFF 未明確說明 ID 欄位名稱；用多欄位 fallback 確保 upsert 不會因 null 失敗
-    // 若市場 API 有提供 order_id / id / ticket_id 就用它，否則組合 deterministic key
-    order_id: o.order_id || o.id || o.ticket_id
-      || `${o.store_erpid}_${o.source_type}_${o.signed_at}`,
+    // 市場 API 的訂單唯一識別碼欄位為 source_id（UUID）
+    order_id: o.source_id || o.order_id || o.id,
     source_type:   o.source_type,
     store_erpid:   o.store_erpid,
     amount:        Number(o.amount) || 0,
