@@ -186,11 +186,7 @@ router.get('/sync/status', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('sync_logs')
-      .select(`
-        id, sync_type, status, total_count, success_count, error_count,
-        started_at, completed_at,
-        system_users!triggered_by ( name )
-      `)
+      .select('id, sync_type, status, total_count, success_count, error_count, error_details, started_at, completed_at, triggered_by')
       .order('started_at', { ascending: false })
       .limit(10);
 
