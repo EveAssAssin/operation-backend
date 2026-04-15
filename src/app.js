@@ -102,12 +102,14 @@ const { startLineUidScheduledSync } = require('./jobs/syncLineUid');
 const { startBillingScheduledSync } = require('./jobs/syncBilling');
 const { startHubPoller }            = require('./jobs/hubPoller');
 const { startCheckNotifyJob }       = require('./jobs/checkNotify');
+const { init: initHolidays }        = require('./services/taiwanHolidayService');
 
 startScheduledSync();
 startLineUidScheduledSync();
 startBillingScheduledSync();
 startHubPoller();         // 每 5 分鐘自動掃 Hub 收件匣
 startCheckNotifyJob();    // 每天 10:00 支票到期通知
+initHolidays();           // 預載台灣假日快取（本年 + 明年）
 
 // ── 錯誤處理 ──────────────────────────────────────────────
 app.use((req, res) => {

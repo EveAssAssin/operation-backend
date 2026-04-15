@@ -1,252 +1,381 @@
 // routes/checks.js
-// 支票紀錄系統 API
+// 支票紀錄系統 API（v2）
 
-const express = require('express');
-const router  = express.Router();
+const express  = require('express');
+const router   = express.Router();
+const multer   = require('multer');
+const XLSX     = require('xlsx');
 const { authenticate, authorize } = require('../middleware/auth');
-const svc = require('../services/checkService');
+const svc      = require('../services/checkService');
+const { fetchAndCacheYear } = require('../services/taiwanHolidayService');
 
 // 所有路由需登入
 router.use(authenticate);
 
-// ============================================================
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+
+// ── 工具 ─────────────────────────────────────────────────
+function ok(res, data)  { res.json({ success: true, data }); }
+function err(res, e, code = 400) {
+  res.status(code).json({ success: false, message: e.message || e });
+}
+
+// ══════════════════════════════════════════════════════════
+// 支票科目
+// ══════════════════════════════════════════════════════════
+router.get('/subjects', async (req, res) => {
+  try { ok(res, await svc.getSubjects()); } catch(e) { err(res, e, 500); }
+});
+
+router.post('/subjects', async (req, res) => {
+  try {
+    const { name } = req.body;
+    if (!name) return err(res, { message: '請填寫科目名稱' });
+    ok(res, await svc.createSubject(name));
+  } catch(e) { err(res, e); }
+});
+
+router.patch('/subjects/:id', async (req, res) => {
+  try { ok(res, await svc.updateSubject(req.params.id, req.body)); } catch(e) { err(res, e); }
+});
+
+// ══════════════════════════════════════════════════════════
 // 支票批次
-// ============================================================
-
-/**
- * GET /api/checks/batches
- * 查詢批次列表
- * query: payee_type, status, q, page, limit
- */
+// ══════════════════════════════════════════════════════════
 router.get('/batches', async (req, res) => {
-  try {
-    const { payee_type, status, q, page = 1, limit = 20 } = req.query;
-    const result = await svc.getBatches({
-      payee_type, status, q,
-      page: parseInt(page), limit: parseInt(limit),
-    });
-    res.json({ success: true, ...result });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
+  try { ok(res, await svc.getBatches(req.query)); } catch(e) { err(res, e, 500); }
 });
 
-/**
- * GET /api/checks/batches/:id
- * 取得批次詳情（含所有支票）
- */
 router.get('/batches/:id', async (req, res) => {
+  try { ok(res, await svc.getBatchById(req.params.id)); } catch(e) { err(res, e, 500); }
+});
+
+router.post('/batches', async (req, res) => {
+  try { ok(res, await svc.createBatch(req.body)); } catch(e) { err(res, e); }
+});
+
+router.patch('/batches/:id', async (req, res) => {
+  try { ok(res, await svc.updateBatch(req.params.id, req.body)); } catch(e) { err(res, e); }
+});
+
+// ══════════════════════════════════════════════════════════
+// 個別支票操作
+// ══════════════════════════════════════════════════════════
+router.patch('/checks/:id', async (req, res) => {
+  try { ok(res, await svc.updateCheck(req.params.id, req.body)); } catch(e) { err(res, e); }
+});
+
+router.post('/checks/:id/pay', async (req, res) => {
+  try { ok(res, await svc.payCheck(req.params.id)); } catch(e) { err(res, e); }
+});
+
+router.post('/checks/:id/bounce', async (req, res) => {
+  try { ok(res, await svc.bounceCheck(req.params.id)); } catch(e) { err(res, e); }
+});
+
+router.post('/checks/:id/void', async (req, res) => {
   try {
-    const data = await svc.getBatchById(req.params.id);
-    res.json({ success: true, data });
-  } catch (err) {
-    res.status(404).json({ success: false, message: err.message });
+    const { void_reason } = req.body;
+    ok(res, await svc.voidCheck(req.params.id, void_reason));
+  } catch(e) { err(res, e); }
+});
+
+// ══════════════════════════════════════════════════════════
+// 出款清單
+// ══════════════════════════════════════════════════════════
+router.get('/today', async (req, res) => {
+  try { ok(res, await svc.getTodayDueChecks()); } catch(e) { err(res, e, 500); }
+});
+
+router.get('/upcoming', async (req, res) => {
+  try {
+    const days = parseInt(req.query.days) || 7;
+    ok(res, await svc.getUpcomingChecks(days));
+  } catch(e) { err(res, e, 500); }
+});
+
+// ══════════════════════════════════════════════════════════
+// 台灣假日手動更新
+// ══════════════════════════════════════════════════════════
+router.post('/holidays/refresh', async (req, res) => {
+  try {
+    const year = parseInt(req.query.year) || new Date().getFullYear();
+    await fetchAndCacheYear(year);
+    ok(res, { message: `${year} 年假日已更新` });
+  } catch(e) { err(res, e, 500); }
+});
+
+// ══════════════════════════════════════════════════════════
+// 通知名單
+// ══════════════════════════════════════════════════════════
+router.get('/notify-targets', async (req, res) => {
+  try { ok(res, await svc.getNotifyTargets()); } catch(e) { err(res, e, 500); }
+});
+
+router.post('/notify-targets', async (req, res) => {
+  try {
+    const { name, app_number, notes } = req.body;
+    if (!name || !app_number) return err(res, { message: '請填寫姓名與員工編號' });
+    ok(res, await svc.createNotifyTarget({ name, app_number, notes }));
+  } catch(e) { err(res, e); }
+});
+
+router.patch('/notify-targets/:id', async (req, res) => {
+  try { ok(res, await svc.updateNotifyTarget(req.params.id, req.body)); } catch(e) { err(res, e); }
+});
+
+router.delete('/notify-targets/:id', async (req, res) => {
+  try {
+    await svc.deleteNotifyTarget(req.params.id);
+    ok(res, { message: '已刪除' });
+  } catch(e) { err(res, e); }
+});
+
+// ══════════════════════════════════════════════════════════
+// Excel 匯入
+// ══════════════════════════════════════════════════════════
+
+// ── 解析出款戶名 ─────────────────────────────────────────
+function parseDrawer(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  const s = raw.trim();
+
+  // 特殊：董事長高銀票10643 → 黃志雄/高銀
+  if (s.includes('董事長')) return { drawer_name: '黃志雄', bank_name: '高銀' };
+
+  // 標準：黃信儒高銀 / 黃志雄高銀 / 黃志雄三信
+  const match = s.match(/^(黃信儒|黃志雄)(高銀|三信)/);
+  if (match) return { drawer_name: match[1], bank_name: match[2] };
+
+  return null; // 非標準 → 跳過
+}
+
+// ── 解析支票日期（民國/西元混合）────────────────────────
+function parseDate(raw) {
+  if (!raw) return null;
+
+  // 若是 Excel datetime（number）
+  if (typeof raw === 'number') {
+    // xlsx 序列日期
+    const d = XLSX.SSF.parse_date_code(raw);
+    if (!d) return null;
+    const year = d.y < 1900 ? d.y + 1911 : d.y; // 民國年轉換
+    return `${year}-${String(d.m).padStart(2,'0')}-${String(d.d).padStart(2,'0')}`;
+  }
+
+  const s = String(raw).trim();
+
+  // 民國年格式：107.10.30 或 107/10/30
+  const roc = s.match(/^(\d{2,3})[./](\d{1,2})[./](\d{1,2})$/);
+  if (roc) {
+    const [, y, m, d] = roc;
+    const year = parseInt(y) < 1000 ? parseInt(y) + 1911 : parseInt(y);
+    return `${year}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+  }
+
+  // 西元格式：2018.10.10 / 2018/10/10 / 2018-10-10
+  const ce = s.match(/^(\d{4})[./-](\d{1,2})[./-](\d{1,2})$/);
+  if (ce) {
+    const [, y, m, d] = ce;
+    return `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+  }
+
+  return null;
+}
+
+// ── 解析備註 → 科目 & 序號 ──────────────────────────────
+// 格式：東山12-1 → subject=東山, totalInNote=12, seq=1
+function parseNote(raw) {
+  if (!raw) return { subject: null, seq: null, rawNote: null };
+  const s = String(raw).trim();
+
+  // 過濾特殊標記
+  if (s.includes('請續票') || s.includes('作廢')) {
+    return { subject: null, seq: null, rawNote: s, specialFlag: s };
+  }
+
+  // 格式：{中文地點}{數字}-{序號}
+  const m = s.match(/^([\u4e00-\u9fff\w]+?)(\d+)-(\d+)$/);
+  if (m) {
+    return {
+      subject:      m[1],
+      totalInNote:  parseInt(m[2]),
+      seq:          parseInt(m[3]),
+      rawNote:      s,
+    };
+  }
+
+  return { subject: null, seq: null, rawNote: s };
+}
+
+// ── Step 1：Parse（POST /checks/import/parse）──────────
+// 上傳 Excel → 回傳解析預覽，不寫 DB
+router.post('/import/parse', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return err(res, { message: '請上傳 Excel 檔案' });
+
+    const wb  = XLSX.read(req.file.buffer, { type: 'buffer', cellDates: false });
+    const ws  = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
+
+    const today = new Date().toISOString().slice(0, 10);
+
+    // 找標題列（包含「出款月份」的那列）
+    let headerRow = -1;
+    for (let i = 0; i < Math.min(rows.length, 10); i++) {
+      if (rows[i] && rows[i].some(c => c && String(c).includes('出款月份'))) {
+        headerRow = i;
+        break;
+      }
+    }
+    if (headerRow < 0) return err(res, { message: '找不到標題列（含「出款月份」）' });
+
+    const headers = rows[headerRow].map(h => h ? String(h).trim() : '');
+    const colIdx  = {};
+    headers.forEach((h, i) => {
+      if (h.includes('出款月份'))  colIdx.month      = i;
+      if (h.includes('出款戶名'))  colIdx.drawer     = i;
+      if (h.includes('支票日期'))  colIdx.dueDate    = i;
+      if (h.includes('支票備註'))  colIdx.note       = i;
+      if (h.includes('出款金額') || h.includes('金額')) colIdx.amount = i;
+      if (h.includes('支票號碼') || h.includes('票號'))  colIdx.checkNo = i;
+    });
+
+    const batches = {}; // key = `${subject}_${totalInNote}_${drawer}_${bank}` → batch group
+    const skipped = [];
+    let parsedCount = 0;
+
+    for (let i = headerRow + 1; i < rows.length; i++) {
+      const row = rows[i];
+      if (!row || !row[colIdx.month]) continue; // 空列跳過
+
+      // 解析出款戶名
+      const drawerInfo = parseDrawer(row[colIdx.drawer]);
+      if (!drawerInfo) {
+        skipped.push({ row: i + 1, reason: '出款戶名非標準格式', raw: row[colIdx.drawer] });
+        continue;
+      }
+
+      // 解析支票日期
+      const dueDate = parseDate(row[colIdx.dueDate]);
+      if (!dueDate) {
+        skipped.push({ row: i + 1, reason: '日期無法解析', raw: row[colIdx.dueDate] });
+        continue;
+      }
+
+      // 解析備註
+      const noteInfo = parseNote(row[colIdx.note]);
+
+      // 批次 key
+      const batchKey = `${noteInfo.subject || 'unknown'}_${noteInfo.totalInNote || 0}_${drawerInfo.drawer_name}_${drawerInfo.bank_name}`;
+
+      if (!batches[batchKey]) {
+        batches[batchKey] = {
+          subject:      noteInfo.subject,
+          totalInNote:  noteInfo.totalInNote,
+          drawer_name:  drawerInfo.drawer_name,
+          bank_name:    drawerInfo.bank_name,
+          checks:       [],
+        };
+      }
+
+      const isPast     = dueDate < today;
+      const amount     = colIdx.amount != null ? parseFloat(row[colIdx.amount]) || null : null;
+      const checkNo    = colIdx.checkNo != null ? row[colIdx.checkNo] || null : null;
+
+      batches[batchKey].checks.push({
+        seq_no:   noteInfo.seq || batches[batchKey].checks.length + 1,
+        due_date: dueDate,
+        amount,
+        check_no: checkNo ? String(checkNo).trim() : null,
+        status:   isPast ? 'paid' : 'pending',
+        notes:    noteInfo.rawNote || null,
+      });
+
+      parsedCount++;
+    }
+
+    const batchList = Object.values(batches).map(b => ({
+      ...b,
+      check_count: b.checks.length,
+      pending_count: b.checks.filter(c => c.status === 'pending').length,
+      paid_count:    b.checks.filter(c => c.status === 'paid').length,
+    }));
+
+    res.json({
+      success: true,
+      data: {
+        total_rows:    parsedCount,
+        skipped_count: skipped.length,
+        batch_count:   batchList.length,
+        batches:       batchList,
+        skipped:       skipped.slice(0, 50), // 只回前 50 筆給預覽
+      },
+    });
+  } catch (e) {
+    console.error('[Excel Parse]', e);
+    err(res, { message: `解析失敗：${e.message}` }, 500);
   }
 });
 
-/**
- * POST /api/checks/batches
- * 建立支票批次（含個別支票）
- * body: {
- *   payee_name, payee_type, purpose, notes,
- *   checks: [{ check_no, bank_name, bank_account, amount, due_date, notes }]
- * }
- */
-router.post('/batches', authorize('billing.create'), async (req, res) => {
+// ── Step 2：Confirm（POST /checks/import/confirm）──────
+// 接收 parse 後的批次資料 → 寫入 DB
+router.post('/import/confirm', async (req, res) => {
   try {
-    const { payee_name, payee_type, purpose, notes, checks = [] } = req.body;
-
-    if (!payee_name) {
-      return res.status(400).json({ success: false, message: '缺少必填欄位：payee_name' });
-    }
-    if (checks.length === 0) {
-      return res.status(400).json({ success: false, message: '至少需要一張支票' });
+    const { batches } = req.body;
+    if (!batches || !Array.isArray(batches) || batches.length === 0) {
+      return err(res, { message: '沒有可匯入的批次' });
     }
 
-    // 驗證每張支票
-    for (let i = 0; i < checks.length; i++) {
-      const c = checks[i];
-      if (!c.amount || !c.due_date) {
-        return res.status(400).json({
-          success: false,
-          message: `第 ${i + 1} 張支票缺少 amount 或 due_date`,
-        });
+    // 先確保所有科目存在
+    const subjectMap = {};
+    const uniqueSubjects = [...new Set(batches.map(b => b.subject).filter(Boolean))];
+    for (const name of uniqueSubjects) {
+      try {
+        const s = await svc.createSubject(name);
+        subjectMap[name] = s.id;
+      } catch (e) {
+        // 已存在：查詢
+        const all = await svc.getSubjects();
+        const found = all.find(s => s.name === name);
+        if (found) subjectMap[name] = found.id;
       }
     }
 
-    const data = await svc.createBatch(
-      { payee_name, payee_type: payee_type || 'vendor', purpose, notes },
-      checks,
-      req.user.id,
-    );
+    let importedBatches = 0;
+    let importedChecks  = 0;
+    const errors = [];
 
-    res.status(201).json({ success: true, data });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
+    for (const b of batches) {
+      try {
+        const batch = await svc.createBatch({
+          subject_id:    b.subject ? (subjectMap[b.subject] || null) : null,
+          drawer_name:   b.drawer_name,
+          bank_name:     b.bank_name,
+          check_count:   b.checks.length,
+          renewal_needed: false,
+          checks:        b.checks,
+        });
+        importedBatches++;
+        importedChecks += b.checks.length;
 
-/**
- * PATCH /api/checks/batches/:id
- * 更新批次基本資訊（payee_name, purpose, notes）
- */
-router.patch('/batches/:id', authorize('billing.create'), async (req, res) => {
-  try {
-    const data = await svc.updateBatch(req.params.id, req.body);
-    res.json({ success: true, data });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
+        // 歷史批次：若所有票都是 paid，批次標為 completed
+        const allPaid = b.checks.every(c => c.status === 'paid');
+        if (allPaid) {
+          await svc.updateBatch(batch.id, { status: 'completed' });
+        }
+      } catch (e) {
+        errors.push({ batch: `${b.drawer_name}/${b.subject}`, error: e.message });
+      }
+    }
 
-// ============================================================
-// 個別支票操作
-// ============================================================
-
-/**
- * PATCH /api/checks/:id
- * 更新支票資訊（僅 pending 狀態）
- */
-router.patch('/:id', authorize('billing.create'), async (req, res) => {
-  try {
-    const data = await svc.updateCheck(req.params.id, req.body);
-    res.json({ success: true, data });
-  } catch (err) {
-    const code = err.message.includes('只有待兌現') ? 422 : 500;
-    res.status(code).json({ success: false, message: err.message });
-  }
-});
-
-/**
- * POST /api/checks/:id/pay
- * 標記支票為已付款
- */
-router.post('/:id/pay', authorize('billing.create'), async (req, res) => {
-  try {
-    const data = await svc.payCheck(req.params.id, req.user.id);
-    res.json({ success: true, data });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-/**
- * POST /api/checks/:id/void
- * 作廢支票
- * body: { void_reason }
- */
-router.post('/:id/void', authorize('billing.confirm'), async (req, res) => {
-  try {
-    const { void_reason } = req.body;
-    const data = await svc.voidCheck(req.params.id, void_reason, req.user.id);
-    res.json({ success: true, data });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-// ============================================================
-// 到期查詢
-// ============================================================
-
-/**
- * GET /api/checks/due
- * 取得今日（或指定日期）到期的支票
- * query: date=YYYY-MM-DD（不填則今天）
- */
-router.get('/due', async (req, res) => {
-  try {
-    const data = await svc.getDueChecks(req.query.date || null);
-    const total = data.reduce((s, c) => s + parseFloat(c.amount), 0);
-    res.json({ success: true, data, total_amount: total });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-/**
- * GET /api/checks/upcoming
- * 取得近 N 天內到期的支票
- * query: days=7
- */
-router.get('/upcoming', async (req, res) => {
-  try {
-    const days = parseInt(req.query.days || '7');
-    const data = await svc.getUpcomingChecks(days);
-    res.json({ success: true, data });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-// ============================================================
-// LINE 通知名單
-// ============================================================
-
-/**
- * GET /api/checks/notify-targets
- * 取得通知名單
- */
-router.get('/notify-targets', authorize('billing.manage'), async (req, res) => {
-  try {
-    const data = await svc.getNotifyTargets();
-    res.json({ success: true, data });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-/**
- * POST /api/checks/notify-targets
- * 新增通知目標
- * body: { name, app_number, notes }
- */
-router.post('/notify-targets', authorize('billing.manage'), async (req, res) => {
-  try {
-    const data = await svc.createNotifyTarget(req.body);
-    res.status(201).json({ success: true, data });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-/**
- * PATCH /api/checks/notify-targets/:id
- * 更新通知目標（啟用/停用）
- */
-router.patch('/notify-targets/:id', authorize('billing.manage'), async (req, res) => {
-  try {
-    const data = await svc.updateNotifyTarget(req.params.id, req.body);
-    res.json({ success: true, data });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-/**
- * DELETE /api/checks/notify-targets/:id
- * 刪除通知目標
- */
-router.delete('/notify-targets/:id', authorize('billing.manage'), async (req, res) => {
-  try {
-    await svc.deleteNotifyTarget(req.params.id);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-/**
- * POST /api/checks/notify-targets/test
- * 手動觸發今日通知（測試用）
- */
-router.post('/notify-targets/test', authorize('billing.manage'), async (req, res) => {
-  try {
-    const { sendCheckDueNotification } = require('../jobs/checkNotify');
-    const result = await sendCheckDueNotification();
-    res.json({ success: true, ...result });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    res.json({
+      success: true,
+      data: { imported_batches: importedBatches, imported_checks: importedChecks, errors },
+    });
+  } catch (e) {
+    console.error('[Excel Confirm]', e);
+    err(res, { message: `匯入失敗：${e.message}` }, 500);
   }
 });
 

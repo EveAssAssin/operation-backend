@@ -1,350 +1,365 @@
 // services/checkService.js
-// 支票紀錄系統：批次 / 個別支票 / 通知名單
+// 支票紀錄系統服務層（v2 schema）
 
-const supabase = require('../config/supabase');
+const { createClient } = require('@supabase/supabase-js');
+const { prevWorkingDay } = require('./taiwanHolidayService');
 
-// ============================================================
-// 支票批次（check_batches）
-// ============================================================
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_KEY
+);
 
-/**
- * 查詢批次列表
- * @param {object} opts - { payee_type, status, q（關鍵字）, page, limit }
- */
-async function getBatches(opts = {}) {
-  const { payee_type, status, q, page = 1, limit = 20 } = opts;
-  const from = (Math.max(1, page) - 1) * Math.min(100, limit);
-
-  let query = supabase
-    .from('check_batches')
-    .select('*, checks(id, status)', { count: 'exact' })
-    .order('created_at', { ascending: false })
-    .range(from, from + Math.min(100, limit) - 1);
-
-  if (payee_type) query = query.eq('payee_type', payee_type);
-  if (status)     query = query.eq('status', status);
-  if (q)          query = query.ilike('payee_name', `%${q}%`);
-
-  const { data, error, count } = await query;
-  if (error) throw new Error(`查詢批次失敗：${error.message}`);
-
-  return {
-    data,
-    pagination: {
-      total: count,
-      page:  Math.max(1, page),
-      limit: Math.min(100, limit),
-      pages: Math.ceil(count / Math.min(100, limit)),
-    },
-  };
+// ── 工具：今天台北日期 ────────────────────────────────────
+function todayTaipei() {
+  return new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Taipei' });
 }
 
-/**
- * 取得單一批次（含所有支票）
- */
+// ── 工具：計算每張票的 display_date ──────────────────────
+async function enrichCheckWithDisplayDate(check) {
+  check.display_date = await prevWorkingDay(check.due_date);
+  return check;
+}
+
+// ══════════════════════════════════════════════════════════
+// 支票科目
+// ══════════════════════════════════════════════════════════
+async function getSubjects() {
+  const { data, error } = await supabase
+    .from('check_subjects')
+    .select('*')
+    .order('name');
+  if (error) throw error;
+  return data;
+}
+
+async function createSubject(name) {
+  const { data, error } = await supabase
+    .from('check_subjects')
+    .insert({ name: name.trim() })
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+async function updateSubject(id, updates) {
+  const { data, error } = await supabase
+    .from('check_subjects')
+    .update(updates)
+    .eq('id', id)
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+// ══════════════════════════════════════════════════════════
+// 支票批次
+// ══════════════════════════════════════════════════════════
+async function getBatches(params = {}) {
+  let q = supabase
+    .from('check_batches')
+    .select(`
+      *,
+      subject:check_subjects(id, name),
+      checks(id, seq_no, amount, due_date, status, paid_at)
+    `)
+    .order('created_at', { ascending: false });
+
+  if (params.status)      q = q.eq('status', params.status);
+  if (params.drawer_name) q = q.eq('drawer_name', params.drawer_name);
+  if (params.subject_id)  q = q.eq('subject_id', params.subject_id);
+
+  const { data, error } = await q;
+  if (error) throw error;
+  return data;
+}
+
 async function getBatchById(id) {
   const { data, error } = await supabase
     .from('check_batches')
     .select(`
       *,
-      checks (
-        id, seq_no, check_no, bank_name, bank_account,
-        amount, due_date, status, paid_at, void_reason, notes
-      )
+      subject:check_subjects(id, name),
+      checks(id, seq_no, check_no, amount, due_date, status, paid_at, void_reason, notes)
     `)
     .eq('id', id)
     .single();
+  if (error) throw error;
 
-  if (error) throw new Error(`找不到批次：${error.message}`);
-
-  // 支票依 seq_no 排序
   if (data.checks) {
-    data.checks.sort((a, b) => a.seq_no - b.seq_no);
+    data.checks = await Promise.all(
+      data.checks
+        .sort((a, b) => a.seq_no - b.seq_no)
+        .map(c => enrichCheckWithDisplayDate(c))
+    );
   }
   return data;
 }
 
-/**
- * 建立支票批次（含個別支票）
- * @param {object} batchData  - 批次欄位
- * @param {Array}  checkItems - [{ seq_no, check_no, bank_name, bank_account, amount, due_date, notes }]
- * @param {string} createdBy  - system_users.id
- */
-async function createBatch(batchData, checkItems, createdBy) {
-  const now = new Date().toISOString();
+async function createBatch(payload) {
+  const {
+    subject_id, drawer_name, bank_name = '高銀',
+    total_amount, renewal_needed = false, prev_batch_id = null,
+    notes, checks: checkList,
+  } = payload;
 
-  // 計算總金額（若前端沒帶就自動加總）
-  const totalAmount = batchData.total_amount
-    || checkItems.reduce((s, c) => s + parseFloat(c.amount || 0), 0);
+  if (!drawer_name) throw new Error('請填寫出款人');
+  if (!checkList || checkList.length === 0) throw new Error('請至少填寫一張支票');
 
-  // 建立批次
-  const { data: batch, error: bErr } = await supabase
+  const { data: batch, error: batchErr } = await supabase
     .from('check_batches')
     .insert({
-      ...batchData,
-      total_amount: totalAmount,
-      check_count:  checkItems.length,
-      status:       'active',
-      created_by:   createdBy,
-      created_at:   now,
-      updated_at:   now,
+      subject_id: subject_id || null,
+      drawer_name,
+      bank_name,
+      total_amount: total_amount || null,
+      check_count: checkList.length,
+      renewal_needed,
+      prev_batch_id: prev_batch_id || null,
+      notes: notes || null,
     })
     .select()
     .single();
+  if (batchErr) throw batchErr;
 
-  if (bErr) throw new Error(`建立批次失敗：${bErr.message}`);
+  const checksToInsert = checkList.map((c, i) => ({
+    batch_id: batch.id,
+    seq_no:   c.seq_no ?? i + 1,
+    check_no: c.check_no || null,
+    amount:   c.amount || null,
+    due_date: c.due_date,
+    notes:    c.notes || null,
+  }));
 
-  // 建立個別支票
-  if (checkItems.length > 0) {
-    const rows = checkItems.map((c, i) => ({
-      batch_id:     batch.id,
-      seq_no:       c.seq_no || (i + 1),
-      check_no:     c.check_no || null,
-      bank_name:    c.bank_name || null,
-      bank_account: c.bank_account || null,
-      amount:       parseFloat(c.amount),
-      due_date:     c.due_date,
-      status:       'pending',
-      notes:        c.notes || null,
-      created_at:   now,
-      updated_at:   now,
-    }));
-
-    const { error: cErr } = await supabase.from('checks').insert(rows);
-    if (cErr) throw new Error(`建立支票明細失敗：${cErr.message}`);
-  }
+  const { error: chkErr } = await supabase
+    .from('checks')
+    .insert(checksToInsert);
+  if (chkErr) throw chkErr;
 
   return getBatchById(batch.id);
 }
 
-/**
- * 更新批次基本資訊
- */
-async function updateBatch(id, payload) {
-  const allowed = ['payee_name','payee_type','purpose','notes'];
-  const update  = { updated_at: new Date().toISOString() };
-  allowed.forEach(k => { if (payload[k] !== undefined) update[k] = payload[k]; });
+async function updateBatch(id, updates) {
+  const allowed = ['subject_id','drawer_name','bank_name','total_amount',
+                   'renewal_needed','status','notes','prev_batch_id'];
+  const clean = Object.fromEntries(
+    Object.entries(updates).filter(([k]) => allowed.includes(k))
+  );
 
   const { data, error } = await supabase
     .from('check_batches')
-    .update(update)
+    .update(clean)
     .eq('id', id)
     .select()
     .single();
-
-  if (error) throw new Error(`更新批次失敗：${error.message}`);
+  if (error) throw error;
   return data;
 }
 
-/**
- * 自動同步批次狀態（依子支票狀態推算）
- * - 全部 paid → completed
- * - 含有 pending → active
- */
+// 自動同步批次狀態，並回傳是否需要續票提醒
 async function syncBatchStatus(batchId) {
-  const { data: items } = await supabase
+  const { data: checks } = await supabase
     .from('checks')
     .select('status')
     .eq('batch_id', batchId);
 
-  if (!items || items.length === 0) return;
+  if (!checks || checks.length === 0) return null;
 
-  const nonVoided = items.filter(c => c.status !== 'voided');
-  const allPaid   = nonVoided.length > 0 && nonVoided.every(c => c.status === 'paid');
-  const newStatus = allPaid ? 'completed' : 'active';
+  const allDone = checks.every(c => c.status === 'paid' || c.status === 'voided');
+  const allVoid = checks.every(c => c.status === 'voided');
+  const newStatus = allVoid ? 'voided' : allDone ? 'completed' : 'active';
 
-  await supabase
-    .from('check_batches')
-    .update({ status: newStatus, updated_at: new Date().toISOString() })
-    .eq('id', batchId);
+  await supabase.from('check_batches').update({ status: newStatus }).eq('id', batchId);
+
+  if (newStatus === 'active') {
+    const pendingCount = checks.filter(c => c.status === 'pending').length;
+    if (pendingCount === 1) {
+      const { data: batch } = await supabase
+        .from('check_batches')
+        .select('renewal_needed, batch_no, drawer_name')
+        .eq('id', batchId)
+        .single();
+      if (batch?.renewal_needed) {
+        return { renewalAlert: true, batchNo: batch.batch_no, drawerName: batch.drawer_name };
+      }
+    }
+  }
+  return null;
 }
 
-// ============================================================
-// 個別支票（checks）
-// ============================================================
-
-/**
- * 標記支票為已付款
- * @param {string} checkId - 支票 id
- * @param {string} userId  - 操作者 id
- */
-async function payCheck(checkId, userId) {
-  const now = new Date().toISOString();
+// ══════════════════════════════════════════════════════════
+// 個別支票操作
+// ══════════════════════════════════════════════════════════
+async function payCheck(id) {
+  const { data: check, error: fetchErr } = await supabase
+    .from('checks').select('id, batch_id, status').eq('id', id).single();
+  if (fetchErr) throw fetchErr;
+  if (check.status !== 'pending') throw new Error('只有 pending 狀態的支票可以標記付款');
 
   const { data, error } = await supabase
     .from('checks')
-    .update({ status: 'paid', paid_at: now, paid_by: userId, updated_at: now })
-    .eq('id', checkId)
-    .select()
-    .single();
+    .update({ status: 'paid', paid_at: new Date().toISOString() })
+    .eq('id', id).select().single();
+  if (error) throw error;
 
-  if (error) throw new Error(`標記付款失敗：${error.message}`);
-  await syncBatchStatus(data.batch_id);
-  return data;
+  const renewal = await syncBatchStatus(check.batch_id);
+  return { check: data, renewal };
 }
 
-/**
- * 作廢支票
- */
-async function voidCheck(checkId, reason, userId) {
-  const now = new Date().toISOString();
+async function bounceCheck(id) {
+  const { data: check, error: fetchErr } = await supabase
+    .from('checks').select('id, batch_id, status').eq('id', id).single();
+  if (fetchErr) throw fetchErr;
+  if (check.status !== 'paid') throw new Error('只有 paid 狀態的支票可以標記退票');
 
   const { data, error } = await supabase
     .from('checks')
-    .update({ status: 'voided', void_reason: reason || null, paid_by: userId, updated_at: now })
-    .eq('id', checkId)
-    .select()
-    .single();
+    .update({ status: 'bounced' })
+    .eq('id', id).select().single();
+  if (error) throw error;
 
-  if (error) throw new Error(`作廢支票失敗：${error.message}`);
-  await syncBatchStatus(data.batch_id);
+  await syncBatchStatus(check.batch_id);
   return data;
 }
 
-/**
- * 更新支票基本資訊（僅 pending 狀態可改）
- */
-async function updateCheck(id, payload) {
-  const allowed = ['check_no','bank_name','bank_account','amount','due_date','notes'];
-  const update  = { updated_at: new Date().toISOString() };
-  allowed.forEach(k => { if (payload[k] !== undefined) update[k] = payload[k]; });
-
-  // 確認狀態
-  const { data: existing } = await supabase
-    .from('checks').select('status').eq('id', id).single();
-  if (existing?.status !== 'pending') throw new Error('只有待兌現的支票可以修改');
+async function voidCheck(id, reason) {
+  const { data: check, error: fetchErr } = await supabase
+    .from('checks').select('id, batch_id, status').eq('id', id).single();
+  if (fetchErr) throw fetchErr;
+  if (check.status === 'paid') throw new Error('已付款的支票無法作廢，請用退票');
 
   const { data, error } = await supabase
-    .from('checks').update(update).eq('id', id).select().single();
+    .from('checks')
+    .update({ status: 'voided', void_reason: reason || null })
+    .eq('id', id).select().single();
+  if (error) throw error;
 
-  if (error) throw new Error(`更新支票失敗：${error.message}`);
+  await syncBatchStatus(check.batch_id);
   return data;
 }
 
-// ============================================================
-// 今日到期 & 通知相關
-// ============================================================
-
-/**
- * 取得指定日期的到期支票（status=pending）
- * @param {string} date - YYYY-MM-DD，預設今天
- */
-async function getDueChecks(date) {
-  const targetDate = date || new Date().toLocaleDateString('sv-SE'); // YYYY-MM-DD
-
+async function updateCheck(id, updates) {
+  const allowed = ['check_no','amount','due_date','notes'];
+  const clean = Object.fromEntries(
+    Object.entries(updates).filter(([k]) => allowed.includes(k))
+  );
   const { data, error } = await supabase
+    .from('checks').update(clean).eq('id', id).select().single();
+  if (error) throw error;
+  return data;
+}
+
+// ══════════════════════════════════════════════════════════
+// 今日出款清單
+// 找出 pending 支票中，prevWorkingDay(due_date) === today 的票
+// ══════════════════════════════════════════════════════════
+async function getTodayDueChecks() {
+  const today = todayTaipei();
+
+  // 抓候選範圍（due_date 在 today ~ today+60天）
+  const from = new Date(today);
+  from.setDate(from.getDate() - 3);
+  const to = new Date(today);
+  to.setDate(to.getDate() + 60);
+
+  const { data: checks, error } = await supabase
     .from('checks')
     .select(`
-      id, seq_no, check_no, bank_name, bank_account,
-      amount, due_date, status, notes,
-      check_batches!batch_id (
-        id, batch_no, payee_name, payee_type, purpose
-      )
+      id, batch_id, seq_no, check_no, amount, due_date, status, notes,
+      batch:check_batches(id, batch_no, drawer_name, bank_name,
+        subject:check_subjects(name))
     `)
-    .eq('due_date', targetDate)
     .eq('status', 'pending')
-    .order('amount', { ascending: false });
+    .gte('due_date', from.toISOString().slice(0, 10))
+    .lte('due_date', to.toISOString().slice(0, 10));
 
-  if (error) throw new Error(`查詢到期支票失敗：${error.message}`);
-  return data || [];
+  if (error) throw error;
+
+  const result = [];
+  for (const c of checks) {
+    const disp = await prevWorkingDay(c.due_date);
+    if (disp === today) {
+      result.push({ ...c, display_date: disp });
+    }
+  }
+
+  // 依出款人分群
+  const grouped = {};
+  for (const c of result) {
+    const key = c.batch?.drawer_name || '未知';
+    if (!grouped[key]) grouped[key] = [];
+    grouped[key].push(c);
+  }
+
+  return { date: today, total: result.length, grouped };
 }
 
-/**
- * 取得近 N 天內到期的支票清單（用於儀表板預覽）
- * @param {number} days - 幾天內
- */
 async function getUpcomingChecks(days = 7) {
-  const today   = new Date();
-  const from    = today.toLocaleDateString('sv-SE');
-  const toDate  = new Date(today);
-  toDate.setDate(toDate.getDate() + days - 1);
-  const to      = toDate.toLocaleDateString('sv-SE');
+  const today = todayTaipei();
+  const to = new Date(today);
+  to.setDate(to.getDate() + days + 5);
 
-  const { data, error } = await supabase
+  const { data: checks, error } = await supabase
     .from('checks')
     .select(`
-      id, seq_no, check_no, bank_name, amount, due_date, status, notes,
-      check_batches!batch_id (
-        id, batch_no, payee_name, payee_type
-      )
+      id, batch_id, seq_no, amount, due_date, status,
+      batch:check_batches(batch_no, drawer_name, bank_name,
+        subject:check_subjects(name))
     `)
     .eq('status', 'pending')
-    .gte('due_date', from)
-    .lte('due_date', to)
-    .order('due_date')
-    .order('amount', { ascending: false });
+    .gte('due_date', today)
+    .lte('due_date', to.toISOString().slice(0, 10))
+    .order('due_date');
 
-  if (error) throw new Error(`查詢即將到期支票失敗：${error.message}`);
-  return data || [];
+  if (error) throw error;
+
+  const result = [];
+  for (const c of checks) {
+    const disp = await prevWorkingDay(c.due_date);
+    const diffMs = new Date(disp) - new Date(today);
+    const diffDays = Math.ceil(diffMs / 86400000);
+    if (diffDays >= 0 && diffDays <= days) {
+      result.push({ ...c, display_date: disp, days_until: diffDays });
+    }
+  }
+  return result;
 }
 
-// ============================================================
-// LINE 通知目標
-// ============================================================
-
-async function getNotifyTargets(onlyActive = false) {
-  let query = supabase
-    .from('check_notify_targets')
-    .select('*')
-    .order('created_at');
-
-  if (onlyActive) query = query.eq('is_active', true);
-
-  const { data, error } = await query;
-  if (error) throw new Error(`取得通知名單失敗：${error.message}`);
-  return data || [];
+// ══════════════════════════════════════════════════════════
+// 通知名單
+// ══════════════════════════════════════════════════════════
+async function getNotifyTargets() {
+  const { data, error } = await supabase
+    .from('check_notify_targets').select('*').order('created_at');
+  if (error) throw error;
+  return data;
 }
 
 async function createNotifyTarget(payload) {
-  const { name, app_number, notes } = payload;
-  if (!name || !app_number) throw new Error('缺少必填欄位：name, app_number');
-
   const { data, error } = await supabase
-    .from('check_notify_targets')
-    .insert({ name, app_number, notes, is_active: true, created_at: new Date().toISOString() })
-    .select()
-    .single();
-
-  if (error) throw new Error(`新增通知目標失敗：${error.message}`);
+    .from('check_notify_targets').insert(payload).select().single();
+  if (error) throw error;
   return data;
 }
 
-async function updateNotifyTarget(id, payload) {
-  const allowed = ['name','app_number','is_active','notes'];
-  const update  = {};
-  allowed.forEach(k => { if (payload[k] !== undefined) update[k] = payload[k]; });
-
+async function updateNotifyTarget(id, updates) {
   const { data, error } = await supabase
-    .from('check_notify_targets')
-    .update(update).eq('id', id).select().single();
-
-  if (error) throw new Error(`更新通知目標失敗：${error.message}`);
+    .from('check_notify_targets').update(updates).eq('id', id).select().single();
+  if (error) throw error;
   return data;
 }
 
 async function deleteNotifyTarget(id) {
   const { error } = await supabase
     .from('check_notify_targets').delete().eq('id', id);
-  if (error) throw new Error(`刪除通知目標失敗：${error.message}`);
+  if (error) throw error;
 }
 
 module.exports = {
-  // 批次
-  getBatches,
-  getBatchById,
-  createBatch,
-  updateBatch,
-  syncBatchStatus,
-  // 個別支票
-  payCheck,
-  voidCheck,
-  updateCheck,
-  // 到期查詢
-  getDueChecks,
-  getUpcomingChecks,
-  // 通知名單
-  getNotifyTargets,
-  createNotifyTarget,
-  updateNotifyTarget,
-  deleteNotifyTarget,
+  getSubjects, createSubject, updateSubject,
+  getBatches, getBatchById, createBatch, updateBatch, syncBatchStatus,
+  payCheck, bounceCheck, voidCheck, updateCheck,
+  getTodayDueChecks, getUpcomingChecks,
+  getNotifyTargets, createNotifyTarget, updateNotifyTarget, deleteNotifyTarget,
 };
