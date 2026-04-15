@@ -393,24 +393,28 @@ async function deleteNotifyTarget(id) {
 
 // ── 合併科目 ──────────────────────────────────────────────
 async function mergeSubjects(keepId, mergeIds) {
-  // 把 merge_ids 的批次全部改掛到 keepId
+  // 防呆：確保 keepId 不在被刪清單內
+  const safeIds = mergeIds.filter(id => id !== keepId);
+  if (safeIds.length === 0) throw new Error('沒有可合併的科目（不能將科目合併到自己）');
+
+  // 把 safeIds 的批次全部改掛到 keepId
   const { error: updateErr } = await supabase
     .from('check_batches')
     .update({ subject_id: keepId })
-    .in('subject_id', mergeIds);
+    .in('subject_id', safeIds);
   if (updateErr) throw updateErr;
 
-  // 刪除被合併的科目
+  // 刪除被合併的科目（已確保不包含 keepId）
   const { error: delErr } = await supabase
     .from('check_subjects')
     .delete()
-    .in('id', mergeIds);
+    .in('id', safeIds);
   if (delErr) throw delErr;
 
   // 回傳保留的科目
   const { data: kept } = await supabase
     .from('check_subjects').select('*').eq('id', keepId).single();
-  return { kept, merged_count: mergeIds.length };
+  return { kept, merged_count: safeIds.length };
 }
 
 async function deleteBatch(id) {
