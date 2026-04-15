@@ -387,10 +387,60 @@ async function deleteNotifyTarget(id) {
   if (error) throw error;
 }
 
+// ══════════════════════════════════════════════════════════
+// 刪除 / 清除 / 批次補付款
+// ══════════════════════════════════════════════════════════
+
+async function deleteBatch(id) {
+  // 先刪子票（保險起見，DB 若有 cascade 也無妨）
+  await supabase.from('checks').delete().eq('batch_id', id);
+  const { error } = await supabase.from('check_batches').delete().eq('id', id);
+  if (error) throw error;
+  return { message: '批次已刪除' };
+}
+
+async function clearAll() {
+  // 刪全部支票，再刪全部批次
+  await supabase.from('checks').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+  const { error } = await supabase.from('check_batches').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+  if (error) throw error;
+  return { message: '所有支票資料已清除' };
+}
+
+async function bulkPayPast() {
+  const today = todayTaipei();
+
+  // 先查出要更新的支票
+  const { data: targets, error: qErr } = await supabase
+    .from('checks')
+    .select('id, batch_id')
+    .eq('status', 'pending')
+    .lt('due_date', today);
+  if (qErr) throw qErr;
+  if (!targets || targets.length === 0) return { count: 0, message: '沒有需要補標的過期票' };
+
+  // 批次更新
+  const ids = targets.map(c => c.id);
+  const { error: updErr } = await supabase
+    .from('checks')
+    .update({ status: 'paid', paid_at: new Date().toISOString() })
+    .in('id', ids);
+  if (updErr) throw updErr;
+
+  // 同步各批次狀態
+  const uniqueBatchIds = [...new Set(targets.map(c => c.batch_id).filter(Boolean))];
+  for (const bid of uniqueBatchIds) {
+    await syncBatchStatus(bid);
+  }
+
+  return { count: ids.length, message: `已將 ${ids.length} 張過期票標記為已付款` };
+}
+
 module.exports = {
   getSubjects, createSubject, updateSubject,
   getBatches, getBatchById, createBatch, updateBatch, syncBatchStatus,
   payCheck, bounceCheck, voidCheck, updateCheck,
   getTodayDueChecks, getUpcomingChecks,
   getNotifyTargets, createNotifyTarget, updateNotifyTarget, deleteNotifyTarget,
+  deleteBatch, clearAll, bulkPayPast,
 };
