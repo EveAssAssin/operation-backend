@@ -252,47 +252,83 @@ async function updateCheck(id, updates) {
 
 // ══════════════════════════════════════════════════════════
 // 今日出款清單
-// 找出 pending 支票中，prevWorkingDay(due_date) === today 的票
+// 包含：① 今日到期（prevWorkingDay(due_date) === today）
+//       ② 逾期未消除（due_date < today，status=pending）
 // ══════════════════════════════════════════════════════════
+const CHECK_SELECT = `
+  id, batch_id, seq_no, check_no, amount, due_date, status, notes,
+  batch:check_batches(id, batch_no, drawer_name, bank_name,
+    subject:check_subjects(name))
+`;
+
 async function getTodayDueChecks() {
   const today = todayTaipei();
 
-  // 抓候選範圍（due_date 在 today ~ today+60天）
+  // ── ① 今日到期：due_date 在 today-3 ~ today+60 之間的 pending ──
   const from = new Date(today);
   from.setDate(from.getDate() - 3);
   const to = new Date(today);
   to.setDate(to.getDate() + 60);
 
-  const { data: checks, error } = await supabase
+  const { data: candidates, error: e1 } = await supabase
     .from('checks')
-    .select(`
-      id, batch_id, seq_no, check_no, amount, due_date, status, notes,
-      batch:check_batches(id, batch_no, drawer_name, bank_name,
-        subject:check_subjects(name))
-    `)
+    .select(CHECK_SELECT)
     .eq('status', 'pending')
     .gte('due_date', from.toISOString().slice(0, 10))
     .lte('due_date', to.toISOString().slice(0, 10));
+  if (e1) throw e1;
 
-  if (error) throw error;
-
-  const result = [];
-  for (const c of checks) {
+  const todayChecks = [];
+  for (const c of candidates) {
     const disp = await prevWorkingDay(c.due_date);
-    if (disp === today) {
-      result.push({ ...c, display_date: disp });
-    }
+    if (disp === today) todayChecks.push({ ...c, display_date: disp, is_overdue: false });
   }
 
-  // 依出款人分群
+  // ── ② 逾期未消除：due_date < today（一定已過前一工作天）──
+  const { data: overdueRaw, error: e2 } = await supabase
+    .from('checks')
+    .select(CHECK_SELECT)
+    .eq('status', 'pending')
+    .lt('due_date', today);
+  if (e2) throw e2;
+
+  const overdueChecks = (overdueRaw || []).map(c => ({
+    ...c, display_date: c.due_date, is_overdue: true,
+  }));
+
+  // ── 合併並依出款人分群 ────────────────────────────────
+  const all = [...todayChecks, ...overdueChecks];
   const grouped = {};
-  for (const c of result) {
+  for (const c of all) {
     const key = c.batch?.drawer_name || '未知';
-    if (!grouped[key]) grouped[key] = [];
-    grouped[key].push(c);
+    if (!grouped[key]) grouped[key] = { today: [], overdue: [] };
+    if (c.is_overdue) grouped[key].overdue.push(c);
+    else              grouped[key].today.push(c);
   }
 
-  return { date: today, total: result.length, grouped };
+  // ── 各出款人小計 ─────────────────────────────────────
+  const summary = Object.entries(grouped).map(([drawer, g]) => {
+    const todayAmt   = g.today.reduce((s, c)   => s + (parseFloat(c.amount) || 0), 0);
+    const overdueAmt = g.overdue.reduce((s, c) => s + (parseFloat(c.amount) || 0), 0);
+    return {
+      drawer_name:   drawer,
+      today_count:   g.today.length,
+      today_amount:  todayAmt,
+      overdue_count: g.overdue.length,
+      overdue_amount: overdueAmt,
+      total_amount:  todayAmt + overdueAmt,
+      checks:        [...g.today, ...g.overdue],
+    };
+  });
+
+  return {
+    date:          today,
+    total:         all.length,
+    today_count:   todayChecks.length,
+    overdue_count: overdueChecks.length,
+    grouped,
+    summary,
+  };
 }
 
 async function getUpcomingChecks(days = 7) {

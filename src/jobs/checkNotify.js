@@ -7,7 +7,7 @@ const { getTodayDueChecks, getNotifyTargets } = require('../services/checkServic
 const { pushToUsers } = require('../services/linePushService');
 
 const fmtAmt = (n) =>
-  n != null
+  n != null && n > 0
     ? new Intl.NumberFormat('zh-TW', {
         style: 'currency', currency: 'TWD', maximumFractionDigits: 0,
       }).format(n)
@@ -15,35 +15,45 @@ const fmtAmt = (n) =>
 
 /**
  * 組成出款通知訊息
+ * 格式：
+ *   有 黃信儒 戶名，NT$150,000 要出款（共 3 張）
+ *   有 黃志雄 戶名，NT$80,000 要出款（共 2 張）
+ *   ⚠ 逾期未消除：有 黃信儒 戶名，NT$50,000 待出款
+ *
  * @param {object} todayData - getTodayDueChecks() 回傳值
  */
 function buildMessage(todayData) {
-  const { date, total, grouped } = todayData;
-
+  const { date, today_count, overdue_count, summary } = todayData;
+  const total = today_count + overdue_count;
   if (total === 0) return null;
 
-  let msg = `🏦 今日應付票據提醒\n📅 ${date}（共 ${total} 張）\n`;
-  msg += '─'.repeat(24) + '\n';
+  let msg = `🏦 應付票據提醒 ${date}\n`;
+  msg += '─'.repeat(26) + '\n';
 
-  for (const [drawerName, checks] of Object.entries(grouped)) {
-    const subtotal = checks.reduce((s, c) => s + (parseFloat(c.amount) || 0), 0);
-    msg += `\n【${drawerName}】`;
-    if (subtotal > 0) msg += ` 合計 ${fmtAmt(subtotal)}`;
-    msg += '\n';
-
-    checks.forEach((c, i) => {
-      const subject = c.batch?.subject?.name || '—';
-      const seq     = c.seq_no || '';
-      msg += `  ${i + 1}. ${subject}`;
-      if (seq) msg += ` 第${seq}張`;
-      msg += ` ${fmtAmt(c.amount)}`;
-      if (c.check_no) msg += `（票號：${c.check_no}）`;
-      msg += ` 到期：${c.due_date}\n`;
-    });
+  // ── 今日到期 ─────────────────────────────────────────
+  const todaySummary = summary.filter(s => s.today_count > 0);
+  if (todaySummary.length > 0) {
+    msg += '\n📋 今日應出款：\n';
+    for (const s of todaySummary) {
+      msg += `有 ${s.drawer_name} 戶名，${fmtAmt(s.today_amount)} 要出款`;
+      if (s.today_count > 1) msg += `（共 ${s.today_count} 張）`;
+      msg += '\n';
+    }
   }
 
-  msg += '\n' + '─'.repeat(24) + '\n';
-  msg += '請確認已出款並在系統標記完成。';
+  // ── 逾期未消除 ───────────────────────────────────────
+  const overdueSummary = summary.filter(s => s.overdue_count > 0);
+  if (overdueSummary.length > 0) {
+    msg += '\n⚠ 逾期尚未出款：\n';
+    for (const s of overdueSummary) {
+      msg += `有 ${s.drawer_name} 戶名，${fmtAmt(s.overdue_amount)} 待出款`;
+      if (s.overdue_count > 1) msg += `（共 ${s.overdue_count} 張）`;
+      msg += '\n';
+    }
+  }
+
+  msg += '\n' + '─'.repeat(26) + '\n';
+  msg += '請至系統確認出款並標記完成。';
   return msg;
 }
 
