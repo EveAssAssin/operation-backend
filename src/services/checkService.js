@@ -1,13 +1,8 @@
 // services/checkService.js
 // 支票紀錄系統服務層（v2 schema）
 
-const { createClient } = require('@supabase/supabase-js');
+const supabase = require('../config/supabase');
 const { prevWorkingDay } = require('./taiwanHolidayService');
-
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_KEY
-);
 
 // ── 工具：今天台北日期 ────────────────────────────────────
 function todayTaipei() {

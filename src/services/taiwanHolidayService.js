@@ -3,12 +3,8 @@
 // 資料來源：https://cdn.jsdelivr.net/gh/ruyut/TaiwanCalendar/data/{year}.json
 // 格式：[{ date:"2024-01-01", isHoliday:true, description:"..." }]
 
-const axios   = require('axios');
-const { createClient } = require('@supabase/supabase-js');
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_KEY
-);
+const axios    = require('axios');
+const supabase = require('../config/supabase');
 
 const CDN_BASE = 'https://cdn.jsdelivr.net/gh/ruyut/TaiwanCalendar/data';
 
