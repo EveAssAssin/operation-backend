@@ -27,10 +27,27 @@ async function getSubjects() {
   return data;
 }
 
-async function createSubject(name) {
+// 回傳樹狀結構：[{ ...category, children: [...subjects] }]
+async function getSubjectsTree() {
   const { data, error } = await supabase
     .from('check_subjects')
-    .insert({ name: name.trim() })
+    .select('*')
+    .order('name');
+  if (error) throw error;
+
+  const categories = (data || []).filter(s => !s.parent_id);
+  const children   = (data || []).filter(s => !!s.parent_id);
+
+  return categories.map(cat => ({
+    ...cat,
+    children: children.filter(c => c.parent_id === cat.id),
+  }));
+}
+
+async function createSubject(name, parentId = null) {
+  const { data, error } = await supabase
+    .from('check_subjects')
+    .insert({ name: name.trim(), parent_id: parentId || null })
     .select()
     .single();
   if (error) throw error;
@@ -477,4 +494,5 @@ module.exports = {
   getTodayDueChecks, getUpcomingChecks,
   getNotifyTargets, createNotifyTarget, updateNotifyTarget, deleteNotifyTarget,
   deleteBatch, clearAll, bulkPayPast, mergeSubjects,
+  getSubjectsTree,
 };

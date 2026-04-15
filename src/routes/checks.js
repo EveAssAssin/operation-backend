@@ -27,11 +27,16 @@ router.get('/subjects', async (req, res) => {
   try { ok(res, await svc.getSubjects()); } catch(e) { err(res, e, 500); }
 });
 
+// 樹狀結構：母分類 + 子科目
+router.get('/subjects/tree', async (req, res) => {
+  try { ok(res, await svc.getSubjectsTree()); } catch(e) { err(res, e, 500); }
+});
+
 router.post('/subjects', async (req, res) => {
   try {
-    const { name } = req.body;
+    const { name, parent_id } = req.body;
     if (!name) return err(res, { message: '請填寫科目名稱' });
-    ok(res, await svc.createSubject(name));
+    ok(res, await svc.createSubject(name, parent_id || null));
   } catch(e) { err(res, e); }
 });
 
