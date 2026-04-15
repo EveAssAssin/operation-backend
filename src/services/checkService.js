@@ -489,7 +489,7 @@ async function bulkPayPast() {
 
 // ══════════════════════════════════════════════════════════
 // 續票提醒
-// renewal_needed=true 且尚未被銷除（renewal_resolved != true）
+// 條件：renewal_needed=true + 進行中 + 剩最後 1 張待出款
 // ══════════════════════════════════════════════════════════
 async function getRenewalReminders() {
   const { data, error } = await supabase
@@ -500,10 +500,15 @@ async function getRenewalReminders() {
       checks(id, seq_no, amount, due_date, status)
     `)
     .eq('renewal_needed', true)
-    .neq('status', 'voided')
+    .eq('status', 'active')   // 只看進行中的批次
     .order('created_at', { ascending: false });
   if (error) throw error;
-  return data || [];
+
+  // 只回傳「剩最後 1 張待出款」的批次
+  return (data || []).filter(b => {
+    const pendingCount = (b.checks || []).filter(c => c.status === 'pending').length;
+    return pendingCount === 1;
+  });
 }
 
 module.exports = {
