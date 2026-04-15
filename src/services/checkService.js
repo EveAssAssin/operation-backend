@@ -373,8 +373,11 @@ async function getNotifyTargets() {
 }
 
 async function createNotifyTarget(payload) {
+  // upsert：同一 app_number 重複新增時改為更新，不報錯
   const { data, error } = await supabase
-    .from('check_notify_targets').insert(payload).select().single();
+    .from('check_notify_targets')
+    .upsert(payload, { onConflict: 'app_number' })
+    .select().single();
   if (error) throw error;
   return data;
 }
