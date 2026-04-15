@@ -403,10 +403,12 @@ router.post('/import/confirm', async (req, res) => {
     const allChecks = [];
     insertedBatches.forEach((batch, i) => {
       const b = batches[i];
-      b.checks.forEach(c => {
+      // 依 due_date 排序後強制重新編號，避免 Excel 備註解析出重複 seq_no
+      const sorted = [...b.checks].sort((a, z) => (a.due_date || '').localeCompare(z.due_date || ''));
+      sorted.forEach((c, idx) => {
         allChecks.push({
           batch_id: batch.id,
-          seq_no:   c.seq_no   || 1,
+          seq_no:   idx + 1,          // 強制 1,2,3... 不信任原始 seq
           check_no: c.check_no || null,
           amount:   c.amount   || null,
           due_date: c.due_date,
