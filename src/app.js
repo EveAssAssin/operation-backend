@@ -69,6 +69,9 @@ app.use('/api/billing-v2', authenticate, require('./routes/billingV2'));
 // 廠商後台入口（獨立 JWT，不共用 SSO）
 app.use('/api/vendor', require('./routes/vendor'));
 
+// 支票紀錄系統（需登入）
+app.use('/api/checks', require('./routes/checks'));
+
 // ── 內部同步觸發（部署初期用，確認正常後可移除）──────
 app.post('/api/internal/sync', async (req, res) => {
   const { runEmployeeSync } = require('./services/personnelSync');
@@ -98,11 +101,13 @@ const { startScheduledSync }        = require('./jobs/syncEmployees');
 const { startLineUidScheduledSync } = require('./jobs/syncLineUid');
 const { startBillingScheduledSync } = require('./jobs/syncBilling');
 const { startHubPoller }            = require('./jobs/hubPoller');
+const { startCheckNotifyJob }       = require('./jobs/checkNotify');
 
 startScheduledSync();
 startLineUidScheduledSync();
 startBillingScheduledSync();
-startHubPoller(); // 每 5 分鐘自動掃 Hub 收件匣
+startHubPoller();         // 每 5 分鐘自動掃 Hub 收件匣
+startCheckNotifyJob();    // 每天 10:00 支票到期通知
 
 // ── 錯誤處理 ──────────────────────────────────────────────
 app.use((req, res) => {
