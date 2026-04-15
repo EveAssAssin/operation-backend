@@ -88,6 +88,18 @@ async function runEmployeeSync(syncType = SYNC_TYPE.MANUAL, triggeredBy = null) 
       console.log(`[Sync] 部門更新完成：${allDepts.length} 筆`);
     }
 
+    // ── 去除重複 app_number（同一 app_number 只保留第一筆，其餘設 null）──
+    const seenAppNumbers = new Set();
+    employees.forEach(emp => {
+      if (!emp.app_number) return;
+      if (seenAppNumbers.has(emp.app_number)) {
+        console.warn(`[Sync] 重複 app_number ${emp.app_number}，員工 ${emp.erpid}(${emp.name}) 設為 null`);
+        emp.app_number = null;
+      } else {
+        seenAppNumbers.add(emp.app_number);
+      }
+    });
+
     // ── 同步 employees 表（upsert by erpid）───────────────────
     let successCount = 0;
     const employeeErrors = [...apiErrors];
