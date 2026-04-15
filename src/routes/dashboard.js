@@ -15,15 +15,27 @@ router.use(authenticate);
 // 聚合所有模組的今日重點
 // ══════════════════════════════════════════════════════════
 router.get('/highlights', async (req, res) => {
-  const { date } = req.query;
-  const params   = date ? { date } : {};
-  const results  = {};
+  const { date, month } = req.query;
+  const dateParams  = date  ? { date }  : {};
+  const monthParams = month ? { month } : {};
+  const results = {};
+
+  // ── 業績系統（sales-backend）──────────────────────────
+  try {
+    const r = await axios.get(
+      'https://sales-backend.onrender.com/api/sales/highlight',
+      { headers: { 'x-api-key': 'lohas-highlight-2026' }, params: monthParams, timeout: 10000 }
+    );
+    results.sales = { success: true, data: r.data };
+  } catch (e) {
+    results.sales = { success: false, message: e.response?.data?.message || e.message };
+  }
 
   // ── 教育訓練（外部 API）────────────────────────────────
   try {
     const r = await axios.get(
       'https://lohas-lms-backend.onrender.com/external/training-highlight',
-      { headers: { 'x-api-key': 'lohas-highlight-2026' }, params, timeout: 10000 }
+      { headers: { 'x-api-key': 'lohas-highlight-2026' }, params: dateParams, timeout: 10000 }
     );
     results.training = { success: true, data: r.data };
   } catch (e) {
@@ -34,7 +46,7 @@ router.get('/highlights', async (req, res) => {
   try {
     const r = await axios.get(
       'https://market-backend-0544.onrender.com/external/engineering-highlight',
-      { headers: { 'x-api-key': 'lohas-engineering-highlight-2026' }, params, timeout: 10000 }
+      { headers: { 'x-api-key': 'lohas-engineering-highlight-2026' }, params: dateParams, timeout: 10000 }
     );
     results.engineering = { success: true, data: r.data };
   } catch (e) {
