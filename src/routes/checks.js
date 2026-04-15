@@ -169,9 +169,19 @@ function parseDrawer(raw) {
   return null; // 非標準 → 跳過
 }
 
+// ── 驗證日期是否真實存在 ─────────────────────────────────
+function isValidDate(dateStr) {
+  // dateStr 格式：YYYY-MM-DD
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  return dt.getFullYear() === y && dt.getMonth() === m - 1 && dt.getDate() === d;
+}
+
 // ── 解析支票日期（民國/西元混合）────────────────────────
 function parseDate(raw) {
   if (!raw) return null;
+
+  let result = null;
 
   // 若是 Excel datetime（number）
   if (typeof raw === 'number') {
@@ -179,27 +189,32 @@ function parseDate(raw) {
     const d = XLSX.SSF.parse_date_code(raw);
     if (!d) return null;
     const year = d.y < 1900 ? d.y + 1911 : d.y; // 民國年轉換
-    return `${year}-${String(d.m).padStart(2,'0')}-${String(d.d).padStart(2,'0')}`;
+    result = `${year}-${String(d.m).padStart(2,'0')}-${String(d.d).padStart(2,'0')}`;
+  } else {
+    const s = String(raw).trim();
+
+    // 民國年格式：107.10.30 或 107/10/30
+    const roc = s.match(/^(\d{2,3})[./](\d{1,2})[./](\d{1,2})$/);
+    if (roc) {
+      const [, y, m, d] = roc;
+      const year = parseInt(y) < 1000 ? parseInt(y) + 1911 : parseInt(y);
+      result = `${year}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    }
+
+    if (!result) {
+      // 西元格式：2018.10.10 / 2018/10/10 / 2018-10-10
+      const ce = s.match(/^(\d{4})[./-](\d{1,2})[./-](\d{1,2})$/);
+      if (ce) {
+        const [, y, m, d] = ce;
+        result = `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      }
+    }
   }
 
-  const s = String(raw).trim();
+  // 額外驗證：確認該日期真實存在（例如排除 2019-02-30）
+  if (result && !isValidDate(result)) return null;
 
-  // 民國年格式：107.10.30 或 107/10/30
-  const roc = s.match(/^(\d{2,3})[./](\d{1,2})[./](\d{1,2})$/);
-  if (roc) {
-    const [, y, m, d] = roc;
-    const year = parseInt(y) < 1000 ? parseInt(y) + 1911 : parseInt(y);
-    return `${year}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
-  }
-
-  // 西元格式：2018.10.10 / 2018/10/10 / 2018-10-10
-  const ce = s.match(/^(\d{4})[./-](\d{1,2})[./-](\d{1,2})$/);
-  if (ce) {
-    const [, y, m, d] = ce;
-    return `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
-  }
-
-  return null;
+  return result;
 }
 
 // ── 解析備註 → 科目 & 序號 ──────────────────────────────
