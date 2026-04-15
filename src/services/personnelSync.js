@@ -37,8 +37,7 @@ async function runEmployeeSync(syncType = SYNC_TYPE.MANUAL, triggeredBy = null) 
     // ── 取得已知部門清單，補入行政部門 erpid ────────────────
     const { data: knownDepts } = await supabase
       .from('departments')
-      .select('store_erpid')
-      .eq('is_active', true);
+      .select('store_erpid');
 
     const extraGroupErpIds = (knownDepts || []).map(d => d.store_erpid).filter(Boolean);
     console.log(`[Sync] 已知部門數：${extraGroupErpIds.length}，將補入 syncAllEmployees`);
