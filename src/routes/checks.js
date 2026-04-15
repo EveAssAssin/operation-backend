@@ -56,6 +56,14 @@ router.post('/subjects/merge', authorize('operation_lead', 'super_admin'), async
 });
 
 // ══════════════════════════════════════════════════════════
+// 續票提醒
+// ══════════════════════════════════════════════════════════
+// GET /checks/renewal-reminders — 取得所有需續票的批次
+router.get('/renewal-reminders', async (req, res) => {
+  try { ok(res, await svc.getRenewalReminders()); } catch(e) { err(res, e, 500); }
+});
+
+// ══════════════════════════════════════════════════════════
 // 支票批次
 // ══════════════════════════════════════════════════════════
 router.get('/batches', async (req, res) => {

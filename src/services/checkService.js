@@ -487,6 +487,25 @@ async function bulkPayPast() {
   return { count: ids.length, message: `已將 ${ids.length} 張過期票標記為已付款` };
 }
 
+// ══════════════════════════════════════════════════════════
+// 續票提醒
+// renewal_needed=true 且尚未被銷除（renewal_resolved != true）
+// ══════════════════════════════════════════════════════════
+async function getRenewalReminders() {
+  const { data, error } = await supabase
+    .from('check_batches')
+    .select(`
+      *,
+      subject:check_subjects(id, name),
+      checks(id, seq_no, amount, due_date, status)
+    `)
+    .eq('renewal_needed', true)
+    .neq('status', 'voided')
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  return data || [];
+}
+
 module.exports = {
   getSubjects, createSubject, updateSubject,
   getBatches, getBatchById, createBatch, updateBatch, syncBatchStatus,
@@ -494,5 +513,5 @@ module.exports = {
   getTodayDueChecks, getUpcomingChecks,
   getNotifyTargets, createNotifyTarget, updateNotifyTarget, deleteNotifyTarget,
   deleteBatch, clearAll, bulkPayPast, mergeSubjects,
-  getSubjectsTree,
+  getSubjectsTree, getRenewalReminders,
 };
