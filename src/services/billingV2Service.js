@@ -139,7 +139,7 @@ async function getBills(opts = {}) {
       source_id, accounting_category_id,
       invoice_no, invoice_date, submitted_at, confirmed_at,
       created_by_type, created_at,
-      billing_sources!source_id ( id, name, source_type ),
+      billing_sources!source_id ( id, name, source_type, sync_method ),
       accounting_categories!accounting_category_id ( id, name, code )
     `, { count: 'exact' })
     .order('created_at', { ascending: false })
