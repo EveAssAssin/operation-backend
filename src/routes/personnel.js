@@ -186,7 +186,7 @@ router.get('/sync/status', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('sync_logs')
-      .select('id, sync_type, status, total_count, success_count, error_count, error_details, started_at, completed_at, triggered_by')
+      .select('id, sync_type, status, total_count, success_count, error_count, error_details, started_at, finished_at, triggered_by')
       .order('started_at', { ascending: false })
       .limit(10);
 
@@ -264,7 +264,7 @@ router.get('/sync-line-uid/status', async (req, res) => {
       .from('line_uid_sync_logs')
       .select(`
         id, status, total_count, updated_count, error_count,
-        started_at, completed_at,
+        started_at, finished_at,
         system_users!triggered_by ( name )
       `)
       .order('started_at', { ascending: false })

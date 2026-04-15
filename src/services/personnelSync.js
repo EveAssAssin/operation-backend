@@ -132,7 +132,7 @@ async function runEmployeeSync(syncType = SYNC_TYPE.MANUAL, triggeredBy = null) 
         success_count: successCount,
         error_count:   employeeErrors.length,
         error_details: employeeErrors.length > 0 ? employeeErrors : null,
-        completed_at:  new Date().toISOString(),
+        finished_at:  new Date().toISOString(),
       })
       .eq('id', logId);
 
@@ -154,7 +154,7 @@ async function runEmployeeSync(syncType = SYNC_TYPE.MANUAL, triggeredBy = null) 
       .update({
         status:       SYNC_STATUS.FAILED,
         error_details: [{ error: err.message }],
-        completed_at:  new Date().toISOString(),
+        finished_at:  new Date().toISOString(),
       })
       .eq('id', logId);
 
