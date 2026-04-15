@@ -277,4 +277,70 @@ router.get('/sync-line-uid/status', async (req, res) => {
   }
 });
 
+// ============================================================
+// 除錯端點（確認左手 API 回傳）
+// ============================================================
+
+/**
+ * GET /api/personnel/debug/stores
+ * 查看 getstoredatas 回傳的所有門市/部門 erpid
+ */
+router.get('/debug/stores', async (req, res) => {
+  try {
+    const { syncAllEmployees, ...leftHand } = require('../services/leftHandApi');
+    // 直接呼叫 getStoreDatas（透過 require 繞進去）
+    const leftHandApi = require('../services/leftHandApi');
+    // 用 internal 方式呼叫
+    const crypto = require('crypto');
+    const axios  = require('axios');
+
+    const AES_KEY  = process.env.LEFTHAND_AES_KEY || 'GmAOoS003d5OJ2G2';
+    const AES_IV   = process.env.LEFTHAND_AES_IV  || 'bgfDcfWdWG6NSUr5';
+    const BASE_URL = process.env.LEFTHAND_API_URL  || 'https://map.lohasglasses.com/_api/v1.ashx';
+
+    const resp = await axios.post(BASE_URL, { method: 'getstoredatas' }, { timeout: 15000 });
+    const raw  = resp.data;
+    const data = typeof raw.data === 'string' ? JSON.parse(raw.data) : (raw.data || []);
+
+    res.json({
+      success: true,
+      count:   data.length,
+      erpids:  data.map(s => ({ erpid: s.erpid, name: s.name })),
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * GET /api/personnel/debug/group/:erpid
+ * 查看指定部門 erpid 的員工清單（直接打左手 API）
+ */
+router.get('/debug/group/:erpid', async (req, res) => {
+  try {
+    const { aesEncrypt } = require('../services/leftHandApi');
+    const axios  = require('axios');
+    const BASE_URL = process.env.LEFTHAND_API_URL || 'https://map.lohasglasses.com/_api/v1.ashx';
+
+    const encrypted = aesEncrypt(req.params.erpid);
+    const resp = await axios.post(BASE_URL, {
+      method:  'getemployeebygroup',
+      groupid: encrypted,
+    }, { timeout: 15000 });
+
+    const raw  = resp.data;
+    const data = typeof raw.data === 'string' ? JSON.parse(raw.data) : (raw.data || []);
+
+    res.json({
+      success:   true,
+      erpid:     req.params.erpid,
+      encrypted,
+      count:     data.length,
+      employees: data,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 module.exports = router;
