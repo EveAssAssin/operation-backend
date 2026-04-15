@@ -34,8 +34,17 @@ async function runEmployeeSync(syncType = SYNC_TYPE.MANUAL, triggeredBy = null) 
   console.log(`[Sync] 開始同步（${syncType}），Log ID：${logId}`);
 
   try {
+    // ── 取得已知部門清單，補入行政部門 erpid ────────────────
+    const { data: knownDepts } = await supabase
+      .from('departments')
+      .select('store_erpid')
+      .eq('is_active', true);
+
+    const extraGroupErpIds = (knownDepts || []).map(d => d.store_erpid).filter(Boolean);
+    console.log(`[Sync] 已知部門數：${extraGroupErpIds.length}，將補入 syncAllEmployees`);
+
     // ── 從左手 API 取得完整資料 ─────────────────────────────
-    const { departments, employees, errors: apiErrors } = await syncAllEmployees();
+    const { departments, employees, errors: apiErrors } = await syncAllEmployees(extraGroupErpIds);
 
     // ── 補齊所有員工引用的部門（避免 FK 約束失敗）─────────────
     // 從員工資料收集所有 store_erpid，確保 departments 表中都有對應記錄

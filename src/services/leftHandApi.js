@@ -124,7 +124,10 @@ function isValidEmployee(emp) {
  *
  * @returns {{ departments: [], employees: [], errors: [] }}
  */
-async function syncAllEmployees() {
+/**
+ * @param {string[]} extraGroupErpIds - 額外要掃的部門 erpid（行政部門等不在 getstoredatas 的群組）
+ */
+async function syncAllEmployees(extraGroupErpIds = []) {
   const errors = [];
 
   // Step 1
@@ -169,6 +172,42 @@ async function syncAllEmployees() {
           is_active:   true,
         });
       });
+  }
+
+  // Step 2b：掃額外傳入的行政部門（不在 getstoredatas 中）
+  const storeErpIdSet = new Set(stores.map(s => s.erpid));
+  const extraToScan   = extraGroupErpIds.filter(id => id && !storeErpIdSet.has(id));
+  console.log(`[左手API] Step2b 額外行政部門數：${extraToScan.length}`);
+
+  for (const deptErpid of extraToScan) {
+    let deptEmps = [];
+    try {
+      deptEmps = await getEmployeesByGroup(deptErpid);
+    } catch (err) {
+      errors.push({ store_erpid: deptErpid, error: `Step2b失敗: ${err.message}` });
+      continue;
+    }
+
+    const validEmps = deptEmps.filter(emp => isValidEmployee(emp));
+    console.log(`[左手API] Step2b ${deptErpid} 取得 ${deptEmps.length} 人，有效 ${validEmps.length} 人`);
+
+    // 部門名稱：從員工資料取，或用 erpid 代替
+    const deptName = deptEmps[0]?.groupname || departmentsMap[deptErpid]?.store_name || deptErpid;
+    if (!departmentsMap[deptErpid]) {
+      departmentsMap[deptErpid] = { store_erpid: deptErpid, store_name: deptName };
+    }
+
+    validEmps.forEach(emp => {
+      employees.push({
+        store_erpid: deptErpid,
+        store_name:  departmentsMap[deptErpid].store_name,
+        erpid:       emp.erpid,
+        app_number:  appNumberMap[emp.erpid] || null,
+        name:        emp.name,
+        jobtitle:    emp.jobtitle || null,
+        is_active:   true,
+      });
+    });
   }
 
   // Step 5：補撈特殊部門人員（不在 getstoredatas 中）
