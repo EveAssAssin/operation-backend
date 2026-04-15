@@ -171,9 +171,15 @@ async function syncAllEmployees() {
       });
   }
 
-  // Step 5：補撈特殊部門人員（grouperpid 為空，不在 getstoredatas 中）
+  // Step 5：補撈特殊部門人員（不在 getstoredatas 中）
+  // Step 5a：找出有 app_number 的漏網員工，取得其 grouperpid
+  // Step 5b：對每個新發現的行政部門 erpid 呼叫 getEmployeesByGroup，撈出整組人員
+  //          （包含沒有 app_number 的行政同仁）
   const syncedErpIds = new Set(employees.map(e => e.erpid));
   let supplementCount = 0;
+
+  // 5a：透過有 app_number 的漏網者找到行政部門 erpid
+  const adminDeptErpIds = new Set(); // 尚未被 Step2 處理的部門 erpid
 
   for (const emp of allEmps) {
     if (syncedErpIds.has(emp.employeeerpid))   continue;
@@ -191,20 +197,56 @@ async function syncAllEmployees() {
       // 補充部門清單
       if (storeErpid && !departmentsMap[storeErpid]) {
         departmentsMap[storeErpid] = { store_erpid: storeErpid, store_name: storeName };
+        adminDeptErpIds.add(storeErpid); // 標記為待整組撈取的行政部門
       }
 
-      employees.push({
-        store_erpid: storeErpid,
-        store_name:  storeName,
-        erpid:       detail.erpid,
-        app_number:  emp.employeeappnumber || null,
-        name:        detail.name,
-        jobtitle:    detail.jobtitle || null,
-        is_active:   true,
-      });
-      supplementCount++;
+      // 暫時加入（5b 會再去重）
+      if (!syncedErpIds.has(detail.erpid)) {
+        employees.push({
+          store_erpid: storeErpid,
+          store_name:  storeName,
+          erpid:       detail.erpid,
+          app_number:  emp.employeeappnumber || null,
+          name:        detail.name,
+          jobtitle:    detail.jobtitle || null,
+          is_active:   true,
+        });
+        syncedErpIds.add(detail.erpid);
+        supplementCount++;
+      }
     } catch (err) {
-      errors.push({ erpid: emp.employeeerpid, error: `Step5補撈失敗: ${err.message}` });
+      errors.push({ erpid: emp.employeeerpid, error: `Step5a補撈失敗: ${err.message}` });
+    }
+  }
+
+  // 5b：對每個行政部門呼叫 getEmployeesByGroup，補入沒有 app_number 的成員
+  console.log(`[左手API] Step5b 需補撈的行政部門數：${adminDeptErpIds.size}`);
+  for (const deptErpid of adminDeptErpIds) {
+    const deptInfo = departmentsMap[deptErpid];
+    try {
+      const deptEmps = await getEmployeesByGroup(deptErpid);
+      let addedCount = 0;
+      deptEmps
+        .filter(emp => isValidEmployee(emp) && !syncedErpIds.has(emp.erpid))
+        .forEach(emp => {
+          employees.push({
+            store_erpid: deptErpid,
+            store_name:  deptInfo?.store_name || '特殊部門',
+            erpid:       emp.erpid,
+            app_number:  appNumberMap[emp.erpid] || null,
+            name:        emp.name,
+            jobtitle:    emp.jobtitle || null,
+            is_active:   true,
+          });
+          syncedErpIds.add(emp.erpid);
+          addedCount++;
+          supplementCount++;
+        });
+      if (addedCount > 0) {
+        console.log(`[左手API] Step5b 補入 ${deptInfo?.store_name}（${deptErpid}）：${addedCount} 人`);
+      }
+    } catch (err) {
+      errors.push({ store_erpid: deptErpid, error: `Step5b補撈失敗: ${err.message}` });
     }
   }
 
