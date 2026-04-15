@@ -20,7 +20,7 @@ router.get('/highlights/sales', async (req, res) => {
   try {
     const { month } = req.query;
     const r = await axios.get(
-      'https://sales-backend.onrender.com/api/sales/highlight',
+      'https://sales-analysis-backend-vc4f.onrender.com/sales/highlight',
       { headers: { 'x-api-key': 'lohas-highlight-2026' },
         params: month ? { month } : {},
         timeout: 30000 }   // 業績系統可能冷啟動，給較長 timeout
