@@ -279,17 +279,22 @@ async function getTodayDueChecks() {
     if (disp === today) todayChecks.push({ ...c, display_date: disp, is_overdue: false });
   }
 
-  // ── ② 逾期未消除：due_date < today（一定已過前一工作天）──
+  // ── ② 逾期＋今日到期：due_date <= today 且不在 todayChecks 裡（避免重複）──
+  const todayCheckIds = new Set(todayChecks.map(c => c.id));
   const { data: overdueRaw, error: e2 } = await supabase
     .from('checks')
     .select(CHECK_SELECT)
     .eq('status', 'pending')
-    .lt('due_date', today);
+    .lte('due_date', today);   // <= 包含今天到期的票
   if (e2) throw e2;
 
-  const overdueChecks = (overdueRaw || []).map(c => ({
-    ...c, display_date: c.due_date, is_overdue: true,
-  }));
+  const overdueChecks = (overdueRaw || [])
+    .filter(c => !todayCheckIds.has(c.id))  // 已出現在 todayChecks 的不重複
+    .map(c => ({
+      ...c,
+      display_date: c.due_date,
+      is_overdue: c.due_date < today,  // 嚴格過期才貼「逾期」標籤，今日到期不貼
+    }));
 
   // ── 合併並依出款人分群 ────────────────────────────────
   const all = [...todayChecks, ...overdueChecks];
