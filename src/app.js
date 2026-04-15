@@ -91,10 +91,12 @@ app.post('/api/internal/sync-line-uid', async (req, res) => {
 const { startScheduledSync }        = require('./jobs/syncEmployees');
 const { startLineUidScheduledSync } = require('./jobs/syncLineUid');
 const { startBillingScheduledSync } = require('./jobs/syncBilling');
+const { startHubPoller }            = require('./jobs/hubPoller');
 
 startScheduledSync();
 startLineUidScheduledSync();
 startBillingScheduledSync();
+startHubPoller(); // 每 5 分鐘自動掃 Hub 收件匣
 
 // ── 錯誤處理 ──────────────────────────────────────────────
 app.use((req, res) => {
