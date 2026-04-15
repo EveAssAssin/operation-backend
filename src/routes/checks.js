@@ -135,6 +135,15 @@ router.patch('/notify-targets/:id', async (req, res) => {
   try { ok(res, await svc.updateNotifyTarget(req.params.id, req.body)); } catch(e) { err(res, e); }
 });
 
+// 測試推播：立即發送今日出款通知
+router.post('/notify-targets/test', authorize('operation_lead', 'super_admin'), async (req, res) => {
+  try {
+    const { sendCheckDueNotification } = require('../jobs/checkNotify');
+    const result = await sendCheckDueNotification();
+    ok(res, { ...result, message: result.skipped ? '今日無應付票據，未推播' : `已推播給 ${result.notified} 人` });
+  } catch(e) { err(res, e, 500); }
+});
+
 router.delete('/notify-targets/:id', async (req, res) => {
   try {
     await svc.deleteNotifyTarget(req.params.id);
