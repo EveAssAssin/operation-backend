@@ -136,17 +136,17 @@ router.delete('/notify-targets/:id', async (req, res) => {
 // ══════════════════════════════════════════════════════════
 
 // 刪除單一批次（含其下所有支票）
-router.delete('/batches/:id', authorize('operation_lead'), async (req, res) => {
+router.delete('/batches/:id', authorize('operation_lead', 'super_admin'), async (req, res) => {
   try { ok(res, await svc.deleteBatch(req.params.id)); } catch(e) { err(res, e, 500); }
 });
 
 // 清除全部支票資料
-router.post('/clear-all', authorize('operation_lead'), async (req, res) => {
+router.post('/clear-all', authorize('operation_lead', 'super_admin'), async (req, res) => {
   try { ok(res, await svc.clearAll()); } catch(e) { err(res, e, 500); }
 });
 
 // 批次補標已付款：到期日 < 今天 且 status=pending → paid
-router.post('/bulk-pay-past', authorize('operation_lead'), async (req, res) => {
+router.post('/bulk-pay-past', authorize('operation_lead', 'super_admin'), async (req, res) => {
   try { ok(res, await svc.bulkPayPast()); } catch(e) { err(res, e, 500); }
 });
 
