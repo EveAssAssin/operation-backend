@@ -73,6 +73,45 @@ router.post('/login', async (req, res) => {
  * GET /api/auth/me
  * 取得當前登入用戶資訊（需帶 Token）
  */
+/**
+ * GET /api/auth/sso?app_number=XXXXX
+ * 統一入口 SSO 登入：帶會員編號進來，系統自行判斷角色並回傳 token
+ */
+router.get('/sso', async (req, res) => {
+  try {
+    const { app_number } = req.query;
+    if (!app_number) {
+      return res.status(400).json({ success: false, message: '缺少 app_number 參數' });
+    }
+
+    const { data: user, error } = await supabase
+      .from('system_users')
+      .select('id, member_id, erpid, name, role, is_active')
+      .eq('member_id', app_number)
+      .eq('is_active', true)
+      .single();
+
+    if (error || !user) {
+      return res.status(403).json({ success: false, message: '您沒有此系統的操作權限' });
+    }
+
+    await supabase
+      .from('system_users')
+      .update({ last_login_at: new Date().toISOString() })
+      .eq('id', user.id);
+
+    const modules = getModulesForRole(user.role);
+    res.json({
+      success: true,
+      user: { id: user.id, memberId: user.member_id, erpid: user.erpid, name: user.name, role: user.role },
+      modules,
+      token: app_number,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 router.get('/me', authenticate, async (req, res) => {
   const modules = getModulesForRole(req.user.role);
   res.json({
