@@ -63,6 +63,12 @@ app.use('/api/billing', authenticate, require('./routes/billing'));
 // AI Hub 跨系統訊息中樞（API Key 驗證，供所有 Cowork AI 使用）
 app.use('/api/hub', require('./routes/hub'));
 
+// 開帳系統 v2（需登入）
+app.use('/api/billing-v2', authenticate, require('./routes/billingV2'));
+
+// 廠商後台入口（獨立 JWT，不共用 SSO）
+app.use('/api/vendor', require('./routes/vendor'));
+
 // ── 內部同步觸發（部署初期用，確認正常後可移除）──────
 app.post('/api/internal/sync', async (req, res) => {
   const { runEmployeeSync } = require('./services/personnelSync');

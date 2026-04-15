@@ -14,9 +14,13 @@ const MODULE_PERMISSIONS = {
   'personnel.sync':    ROLES.operation_lead,   // 主管以上可手動觸發人員同步
   'system_user.view':  ROLES.dept_head,
   'system_user.edit':  ROLES.super_admin,
-  // 開帳系統
+  // 開帳系統（v1）
   'billing.view':      ROLES.operation_lead,
   'billing.sync':      ROLES.operation_lead,
+  // 開帳系統 v2
+  'billing.create':    ROLES.operation_staff,  // 建立帳單（所有人員）
+  'billing.confirm':   ROLES.operation_lead,   // 確認 / 分配 / 作廢
+  'billing.manage':    ROLES.operation_lead,   // 管理來源單位 / 會計科目
   // 系統用戶管理
   'system_user.view':  ROLES.operation_lead,  // 查看（主管以上）
   'system_user.edit':  ROLES.super_admin,      // 授權/撤銷（超管）
