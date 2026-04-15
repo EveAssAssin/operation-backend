@@ -39,6 +39,17 @@ router.patch('/subjects/:id', async (req, res) => {
   try { ok(res, await svc.updateSubject(req.params.id, req.body)); } catch(e) { err(res, e); }
 });
 
+// 合併科目：把 merge_ids 的批次全部改成 keep_id，再刪除 merge_ids
+router.post('/subjects/merge', authorize('operation_lead', 'super_admin'), async (req, res) => {
+  try {
+    const { keep_id, merge_ids } = req.body;
+    if (!keep_id || !Array.isArray(merge_ids) || merge_ids.length === 0) {
+      return err(res, { message: '請提供 keep_id 與 merge_ids' });
+    }
+    ok(res, await svc.mergeSubjects(keep_id, merge_ids));
+  } catch(e) { err(res, e); }
+});
+
 // ══════════════════════════════════════════════════════════
 // 支票批次
 // ══════════════════════════════════════════════════════════

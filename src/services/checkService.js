@@ -391,6 +391,28 @@ async function deleteNotifyTarget(id) {
 // 刪除 / 清除 / 批次補付款
 // ══════════════════════════════════════════════════════════
 
+// ── 合併科目 ──────────────────────────────────────────────
+async function mergeSubjects(keepId, mergeIds) {
+  // 把 merge_ids 的批次全部改掛到 keepId
+  const { error: updateErr } = await supabase
+    .from('check_batches')
+    .update({ subject_id: keepId })
+    .in('subject_id', mergeIds);
+  if (updateErr) throw updateErr;
+
+  // 刪除被合併的科目
+  const { error: delErr } = await supabase
+    .from('check_subjects')
+    .delete()
+    .in('id', mergeIds);
+  if (delErr) throw delErr;
+
+  // 回傳保留的科目
+  const { data: kept } = await supabase
+    .from('check_subjects').select('*').eq('id', keepId).single();
+  return { kept, merged_count: mergeIds.length };
+}
+
 async function deleteBatch(id) {
   // 先刪子票（保險起見，DB 若有 cascade 也無妨）
   await supabase.from('checks').delete().eq('batch_id', id);
@@ -442,5 +464,5 @@ module.exports = {
   payCheck, bounceCheck, voidCheck, updateCheck,
   getTodayDueChecks, getUpcomingChecks,
   getNotifyTargets, createNotifyTarget, updateNotifyTarget, deleteNotifyTarget,
-  deleteBatch, clearAll, bulkPayPast,
+  deleteBatch, clearAll, bulkPayPast, mergeSubjects,
 };
