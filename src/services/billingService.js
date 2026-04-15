@@ -123,6 +123,11 @@ async function syncMonth(month, syncType = 'manual') {
 
     ordersCount = await upsertOrders(orders);
 
+    // 同步完後，自動彙總寫入 bills v2
+    await syncOrdersToBills(month).catch(err =>
+      console.warn(`[BillingV2Sync] syncOrdersToBills 失敗（不影響主流程）：${err.message}`)
+    );
+
     await writeSyncLog({
       sync_type:     syncType,
       target_month:  month,
@@ -183,6 +188,16 @@ async function incrementalSync() {
     const orders = resp.data?.data || resp.data || [];
 
     ordersCount = await upsertOrders(orders);
+
+    // 增量同步：找出本批訂單涉及的月份，各自同步到 bills
+    if (orders.length > 0) {
+      const months = [...new Set(orders.map(o => toBillingMonth(o.signed_at)))];
+      for (const m of months) {
+        await syncOrdersToBills(m).catch(err =>
+          console.warn(`[BillingV2Sync] 增量 syncOrdersToBills(${m}) 失敗：${err.message}`)
+        );
+      }
+    }
 
     await writeSyncLog({
       sync_type:     'incremental',
@@ -310,6 +325,108 @@ async function getOrderDetail(sourceType, sourceId) {
   return raw?.data ?? raw;
 }
 
+// ─────────────────────────────────────────────────────────────
+// bills 整合：將 billing_orders 同步寫入 v2 bills 表
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * 把指定月份的 billing_orders 彙總寫入 bills + bill_allocations
+ * - 每個門市產生一張 bill（source_ref: mkt-{store_erpid}-{month}）
+ * - 狀態直接設為 confirmed（已由市場系統驗收）
+ * - 若金額有變化（re-sync），直接更新
+ *
+ * @param {string} month - YYYY-MM
+ */
+async function syncOrdersToBills(month) {
+  // 1. 取得 DEPT-ENGINEERING 的 source_id
+  const { data: source, error: srcErr } = await supabase
+    .from('billing_sources')
+    .select('id, name')
+    .eq('code', 'DEPT-ENGINEERING')
+    .maybeSingle();
+
+  if (srcErr || !source) {
+    console.warn('[BillingV2Sync] 找不到 DEPT-ENGINEERING 來源單位，跳過 bills 同步');
+    return;
+  }
+
+  // 2. 取得該月份所有訂單
+  const { data: orders, error: ordErr } = await supabase
+    .from('billing_orders')
+    .select('store_erpid, amount')
+    .eq('billing_month', month);
+
+  if (ordErr || !orders || orders.length === 0) return;
+
+  // 3. 取得門市名稱
+  const { data: depts } = await supabase
+    .from('departments')
+    .select('store_erpid, store_name');
+  const deptMap = {};
+  (depts || []).forEach(d => { deptMap[d.store_erpid] = d.store_name; });
+
+  // 4. 依門市彙總金額
+  const storeMap = {};
+  for (const o of orders) {
+    if (!storeMap[o.store_erpid]) storeMap[o.store_erpid] = 0;
+    storeMap[o.store_erpid] += Number(o.amount) || 0;
+  }
+
+  // 5. 對每個門市 upsert bills + bill_allocations
+  for (const [store_erpid, total] of Object.entries(storeMap)) {
+    const store_name = deptMap[store_erpid] || store_erpid;
+    const sourceRef  = `mkt-${store_erpid}-${month}`;
+    const now        = new Date().toISOString();
+
+    // upsert bill（以 source_ref 為唯一鍵）
+    const { data: bill, error: billErr } = await supabase
+      .from('bills')
+      .upsert(
+        {
+          source_id:        source.id,
+          period:           month,
+          title:            `工程部費用 ${month} ${store_name}`,
+          total_amount:     total,
+          status:           'confirmed',
+          source_ref:       sourceRef,
+          created_by_type:  'system',
+          confirmed_at:     now,
+          notes:            `自動同步自市場系統（${month}）`,
+          updated_at:       now,
+        },
+        { onConflict: 'source_ref', ignoreDuplicates: false }
+      )
+      .select('id')
+      .single();
+
+    if (billErr || !bill) {
+      console.error(`[BillingV2Sync] bills upsert 失敗 ${store_erpid}:`, billErr?.message);
+      continue;
+    }
+
+    // upsert bill_allocation
+    const { error: allocErr } = await supabase
+      .from('bill_allocations')
+      .upsert(
+        {
+          bill_id:          bill.id,
+          store_erpid,
+          store_name,
+          allocated_amount: total,
+          confirm_status:   'confirmed',
+          updated_at:       now,
+        },
+        { onConflict: 'bill_id, store_erpid', ignoreDuplicates: false }
+      );
+
+    if (allocErr) {
+      console.error(`[BillingV2Sync] allocations upsert 失敗 ${store_erpid}:`, allocErr.message);
+    }
+  }
+
+  console.log(`[BillingV2Sync] ${month} 完成，共 ${Object.keys(storeMap).length} 個門市 bills 已同步`);
+}
+
 module.exports = {
   syncMonth,
   incrementalSync,
@@ -317,4 +434,5 @@ module.exports = {
   getMonthOrders,
   getRecentSyncLogs,
   getOrderDetail,
+  syncOrdersToBills,
 };
