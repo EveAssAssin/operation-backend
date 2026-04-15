@@ -1,10 +1,12 @@
 // routes/billingV2.js
-// 開帳系統 v2 API：來源單位 / 會計科目 / 帳單 / 分配 / 月報
+// 開帳系統 v2 API：來源單位 / 會計科目 / 帳單 / 分配 / 月報 / 廠商帳號
 
 const express = require('express');
 const router  = express.Router();
+const bcrypt  = require('bcryptjs');
 const { authenticate, authorize } = require('../middleware/auth');
-const svc = require('../services/billingV2Service');
+const svc      = require('../services/billingV2Service');
+const supabase = require('../config/supabase');
 
 // 所有路由需登入
 router.use(authenticate);
@@ -317,6 +319,137 @@ router.get('/report/:period', async (req, res) => {
     }
     const data = await svc.getMonthSummaryV2(period);
     res.json({ success: true, period, data });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ============================================================
+// 廠商帳號管理（/vendors，後台管理員用）
+// ============================================================
+
+/**
+ * GET /api/billing-v2/vendors
+ * 取得所有廠商帳號（含對應來源單位）
+ * query: source_id, is_active
+ */
+router.get('/vendors', authorize('billing.manage'), async (req, res) => {
+  try {
+    const { source_id, is_active } = req.query;
+
+    let query = supabase
+      .from('vendor_accounts')
+      .select(`
+        id, username, is_active, last_login_at, created_at, notes,
+        billing_sources!source_id ( id, name, source_type )
+      `)
+      .order('created_at', { ascending: false });
+
+    if (source_id) query = query.eq('source_id', source_id);
+    if (is_active !== undefined) query = query.eq('is_active', is_active === 'true');
+
+    const { data, error } = await query;
+    if (error) throw new Error(error.message);
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * POST /api/billing-v2/vendors
+ * 建立廠商帳號
+ * body: { source_id, username, password, notes }
+ */
+router.post('/vendors', authorize('billing.manage'), async (req, res) => {
+  try {
+    const { source_id, username, password, notes } = req.body;
+    if (!source_id || !username || !password) {
+      return res.status(400).json({
+        success: false,
+        message: '缺少必填欄位：source_id, username, password',
+      });
+    }
+
+    // 確認來源單位存在且為 vendor 類型
+    const { data: source, error: srcErr } = await supabase
+      .from('billing_sources')
+      .select('id, name, source_type')
+      .eq('id', source_id)
+      .single();
+
+    if (srcErr || !source) {
+      return res.status(400).json({ success: false, message: '找不到此來源單位' });
+    }
+    if (source.source_type !== 'vendor') {
+      return res.status(400).json({ success: false, message: '只有廠商類型的來源單位可建立登入帳號' });
+    }
+
+    // 確認帳號不重複
+    const { data: existing } = await supabase
+      .from('vendor_accounts')
+      .select('id')
+      .eq('username', username)
+      .maybeSingle();
+
+    if (existing) {
+      return res.status(400).json({ success: false, message: '帳號名稱已被使用' });
+    }
+
+    const password_hash = await bcrypt.hash(password, 10);
+
+    const { data, error } = await supabase
+      .from('vendor_accounts')
+      .insert({
+        source_id, username, password_hash, notes,
+        is_active:  true,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .select(`
+        id, username, is_active, last_login_at, created_at, notes,
+        billing_sources!source_id ( id, name, source_type )
+      `)
+      .single();
+
+    if (error) throw new Error(error.message);
+    res.status(201).json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+/**
+ * PATCH /api/billing-v2/vendors/:id
+ * 更新廠商帳號（啟用/停用、重設密碼、備註）
+ * body: { is_active, password, notes }
+ */
+router.patch('/vendors/:id', authorize('billing.manage'), async (req, res) => {
+  try {
+    const { is_active, password, notes } = req.body;
+    const update = { updated_at: new Date().toISOString() };
+
+    if (is_active !== undefined) update.is_active = is_active;
+    if (notes     !== undefined) update.notes     = notes;
+    if (password) {
+      if (password.length < 6) {
+        return res.status(400).json({ success: false, message: '密碼至少 6 個字元' });
+      }
+      update.password_hash = await bcrypt.hash(password, 10);
+    }
+
+    const { data, error } = await supabase
+      .from('vendor_accounts')
+      .update(update)
+      .eq('id', req.params.id)
+      .select(`
+        id, username, is_active, last_login_at, created_at, notes,
+        billing_sources!source_id ( id, name, source_type )
+      `)
+      .single();
+
+    if (error) throw new Error(error.message);
+    res.json({ success: true, data });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
