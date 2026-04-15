@@ -158,11 +158,24 @@ router.post('/sync', authorize('personnel.sync'), async (req, res) => {
       .limit(1);
 
     if (running && running.length > 0) {
-      return res.status(409).json({
-        success: false,
-        message: '已有同步作業進行中，請稍後再試',
-        runningLogId: running[0].id,
-      });
+      const startedAt = new Date(running[0].started_at);
+      const minutesElapsed = (Date.now() - startedAt.getTime()) / 60000;
+
+      // 超過 15 分鐘視為卡住，自動清除並允許重新同步
+      if (minutesElapsed < 15) {
+        return res.status(409).json({
+          success: false,
+          message: '已有同步作業進行中，請稍後再試',
+          runningLogId: running[0].id,
+        });
+      }
+
+      // 清除卡住的鎖
+      await supabase
+        .from('sync_logs')
+        .update({ status: 'failed', error_details: '超時自動清除（逾 15 分鐘未完成）' })
+        .eq('id', running[0].id);
+      console.warn('[Sync] 清除卡住的 in_progress 鎖：', running[0].id);
     }
 
     // 非同步執行（立即回應，背景同步）
