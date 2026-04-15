@@ -72,6 +72,9 @@ app.use('/api/vendor', require('./routes/vendor'));
 // 支票紀錄系統（需登入）
 app.use('/api/checks', require('./routes/checks'));
 
+// 首頁今日重點（代理外部系統 Highlight API，需登入）
+app.use('/api/dashboard', require('./routes/dashboard'));
+
 // ── 內部同步觸發（部署初期用，確認正常後可移除）──────
 app.post('/api/internal/sync', async (req, res) => {
   const { runEmployeeSync } = require('./services/personnelSync');
