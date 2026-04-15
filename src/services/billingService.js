@@ -338,15 +338,22 @@ async function getOrderDetail(sourceType, sourceId) {
  * @param {string} month - YYYY-MM
  */
 async function syncOrdersToBills(month) {
-  // 1. 取得 DEPT-ENGINEERING 的 source_id
+  // 1. 取得 DEPT-ENGINEERING 的 source_id 與 api_start_period
   const { data: source, error: srcErr } = await supabase
     .from('billing_sources')
-    .select('id, name')
+    .select('id, name, api_start_period')
     .eq('code', 'DEPT-ENGINEERING')
     .maybeSingle();
 
   if (srcErr || !source) {
     console.warn('[BillingV2Sync] 找不到 DEPT-ENGINEERING 來源單位，跳過 bills 同步');
+    return;
+  }
+
+  // 若有設定 api_start_period，只同步 >= 該月份的資料
+  // 避免覆蓋比 api_start_period 更早的手動帳單
+  if (source.api_start_period && month < source.api_start_period) {
+    console.log(`[BillingV2Sync] ${month} < api_start_period(${source.api_start_period})，跳過以保留手動帳單`);
     return;
   }
 

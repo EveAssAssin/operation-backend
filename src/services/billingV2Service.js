@@ -56,6 +56,11 @@ async function createSource(payload) {
  * 更新來源單位
  */
 async function updateSource(id, payload) {
+  // 若切換為 api 且沒設 api_start_period，自動設為當月
+  if (payload.sync_method === 'api' && !payload.api_start_period) {
+    const d = new Date();
+    payload.api_start_period = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+  }
   const { data, error } = await supabase
     .from('billing_sources')
     .update({ ...payload, updated_at: new Date().toISOString() })
