@@ -319,7 +319,8 @@ router.post('/import/parse', upload.single('file'), async (req, res) => {
 });
 
 // ── Step 2：Confirm（POST /checks/import/confirm）──────
-// 接收 parse 後的批次資料 → 寫入 DB
+// 批量寫入：subjects upsert → batches bulk insert → checks bulk insert（分批500筆）
+// 從原本逐筆（300+ DB calls）壓縮到 ~5 次 DB 呼叫
 router.post('/import/confirm', async (req, res) => {
   try {
     const { batches } = req.body;
@@ -327,51 +328,76 @@ router.post('/import/confirm', async (req, res) => {
       return err(res, { message: '沒有可匯入的批次' });
     }
 
-    // 先確保所有科目存在
+    const supabase = require('../config/supabase');
+
+    // ── 1. 科目：一次 upsert 全部 ─────────────────────────
     const subjectMap = {};
-    const uniqueSubjects = [...new Set(batches.map(b => b.subject).filter(Boolean))];
-    for (const name of uniqueSubjects) {
-      try {
-        const s = await svc.createSubject(name);
-        subjectMap[name] = s.id;
-      } catch (e) {
-        // 已存在：查詢
-        const all = await svc.getSubjects();
-        const found = all.find(s => s.name === name);
-        if (found) subjectMap[name] = found.id;
-      }
+    const uniqueSubjectNames = [...new Set(batches.map(b => b.subject).filter(Boolean))];
+
+    if (uniqueSubjectNames.length > 0) {
+      // upsert（已存在的不動）
+      await supabase
+        .from('check_subjects')
+        .upsert(uniqueSubjectNames.map(name => ({ name })), { onConflict: 'name', ignoreDuplicates: true });
+
+      // 一次查回所有科目 ID
+      const { data: subRows } = await supabase
+        .from('check_subjects')
+        .select('id, name')
+        .in('name', uniqueSubjectNames);
+      (subRows || []).forEach(s => { subjectMap[s.name] = s.id; });
     }
 
-    let importedBatches = 0;
-    let importedChecks  = 0;
-    const errors = [];
+    // ── 2. 批次：一次 bulk insert ─────────────────────────
+    // batch_no 由 DB trigger 自動填入（WHEN batch_no IS NULL）
+    const batchRows = batches.map(b => ({
+      subject_id:    b.subject ? (subjectMap[b.subject] || null) : null,
+      drawer_name:   b.drawer_name,
+      bank_name:     b.bank_name,
+      check_count:   b.checks.length,
+      renewal_needed: false,
+      status: b.checks.every(c => c.status === 'paid') ? 'completed' : 'active',
+    }));
 
-    for (const b of batches) {
-      try {
-        const batch = await svc.createBatch({
-          subject_id:    b.subject ? (subjectMap[b.subject] || null) : null,
-          drawer_name:   b.drawer_name,
-          bank_name:     b.bank_name,
-          check_count:   b.checks.length,
-          renewal_needed: false,
-          checks:        b.checks,
+    const { data: insertedBatches, error: batchErr } = await supabase
+      .from('check_batches')
+      .insert(batchRows)
+      .select('id, status');
+    if (batchErr) throw new Error(`批次寫入失敗：${batchErr.message}`);
+
+    // ── 3. 支票：收集全部後分 500 筆 bulk insert ──────────
+    const allChecks = [];
+    insertedBatches.forEach((batch, i) => {
+      const b = batches[i];
+      b.checks.forEach(c => {
+        allChecks.push({
+          batch_id: batch.id,
+          seq_no:   c.seq_no   || 1,
+          check_no: c.check_no || null,
+          amount:   c.amount   || null,
+          due_date: c.due_date,
+          status:   c.status   || 'pending',
+          notes:    c.notes    || null,
         });
-        importedBatches++;
-        importedChecks += b.checks.length;
+      });
+    });
 
-        // 歷史批次：若所有票都是 paid，批次標為 completed
-        const allPaid = b.checks.every(c => c.status === 'paid');
-        if (allPaid) {
-          await svc.updateBatch(batch.id, { status: 'completed' });
-        }
-      } catch (e) {
-        errors.push({ batch: `${b.drawer_name}/${b.subject}`, error: e.message });
-      }
+    const CHUNK = 500;
+    for (let i = 0; i < allChecks.length; i += CHUNK) {
+      const { error: chkErr } = await supabase
+        .from('checks')
+        .insert(allChecks.slice(i, i + CHUNK));
+      if (chkErr) throw new Error(`支票寫入失敗（第 ${i}~${i + CHUNK} 筆）：${chkErr.message}`);
     }
 
+    console.log(`[Import] 完成：${insertedBatches.length} 批次，${allChecks.length} 張支票`);
     res.json({
       success: true,
-      data: { imported_batches: importedBatches, imported_checks: importedChecks, errors },
+      data: {
+        imported_batches: insertedBatches.length,
+        imported_checks:  allChecks.length,
+        errors: [],
+      },
     });
   } catch (e) {
     console.error('[Excel Confirm]', e);
