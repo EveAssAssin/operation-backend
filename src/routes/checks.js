@@ -135,12 +135,49 @@ router.patch('/notify-targets/:id', async (req, res) => {
   try { ok(res, await svc.updateNotifyTarget(req.params.id, req.body)); } catch(e) { err(res, e); }
 });
 
-// 測試推播：立即發送今日出款通知
+// 測試推播：立即發送今日出款通知（回傳詳細結果供前端顯示）
 router.post('/notify-targets/test', authorize('operation_lead', 'super_admin'), async (req, res) => {
   try {
-    const { sendCheckDueNotification } = require('../jobs/checkNotify');
-    const result = await sendCheckDueNotification();
-    ok(res, { ...result, message: result.skipped ? '今日無應付票據，未推播' : `已推播給 ${result.notified} 人` });
+    const { getTodayDueChecks, getNotifyTargets } = require('../services/checkService');
+    const { pushToUsers } = require('../services/linePushService');
+    const { buildMessage } = require('../jobs/checkNotify');
+
+    const todayData = await getTodayDueChecks();
+    const allTargets = await getNotifyTargets();
+    const targets = allTargets.filter(t => t.is_active !== false);
+
+    if (todayData.total === 0) {
+      return ok(res, {
+        success_push: false,
+        reason: '今日無應付票據（包含逾期未付）',
+        check_count: 0,
+        targets: targets.map(t => t.name),
+        message_preview: null,
+        line_response: null,
+      });
+    }
+    if (targets.length === 0) {
+      return ok(res, {
+        success_push: false,
+        reason: '通知名單為空，請先新增通知對象',
+        check_count: todayData.total,
+        targets: [],
+        message_preview: null,
+        line_response: null,
+      });
+    }
+
+    const message = buildMessage(todayData);
+    const appNumbers = targets.map(t => t.app_number);
+    const lineResp = await pushToUsers(appNumbers, message);
+
+    ok(res, {
+      success_push: true,
+      check_count: todayData.total,
+      targets: targets.map(t => t.name),
+      message_preview: message,
+      line_response: lineResp,
+    });
   } catch(e) { err(res, e, 500); }
 });
 

@@ -103,4 +103,4 @@ function startCheckNotifyJob() {
   console.log('[CheckNotify] 支票到期通知排程已啟動（每天 10:00）');
 }
 
-module.exports = { startCheckNotifyJob, sendCheckDueNotification };
+module.exports = { startCheckNotifyJob, sendCheckDueNotification, buildMessage };
