@@ -159,6 +159,28 @@ router.post('/sync/education', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
+// POST /api/billing/sync/ad
+// 僅同步企劃部廣告費（不觸發其他來源同步）
+// Body: { month: 'YYYY-MM' }（必填）
+// ─────────────────────────────────────────────────────────────
+router.post('/sync/ad', async (req, res) => {
+  const { month } = req.body || {};
+  if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+    return res.status(400).json({ success: false, message: 'month 必填，格式 YYYY-MM' });
+  }
+
+  res.json({ success: true, message: `企劃部廣告費同步已啟動（${month}）` });
+
+  try {
+    const { syncAdBudget } = require('../services/adBudgetSync');
+    const result = await syncAdBudget(month);
+    console.log(`[Billing] 廣告費同步完成（${month}）：${result.synced} 筆`);
+  } catch (err) {
+    console.error('[Billing] 廣告費同步失敗：', err.message);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
 // GET /api/billing/debug?month=YYYY-MM
 // 直接打市場 API，回傳原始結果，不寫 DB（除錯用）
 // ─────────────────────────────────────────────────────────────

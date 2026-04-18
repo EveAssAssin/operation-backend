@@ -129,6 +129,12 @@ async function syncMonth(month, syncType = 'manual') {
       console.warn(`[EducationBonus] 月份 ${month} 同步失敗（不影響主流程）：${err.message}`)
     );
 
+    // 同步企劃部廣告費（AD_BUDGET_API_URL 未設定時自動跳過）
+    const { syncAdBudget } = require('./adBudgetSync');
+    await syncAdBudget(month).catch(err =>
+      console.warn(`[AdBudget] 月份 ${month} 同步失敗（不影響主流程）：${err.message}`)
+    );
+
     // 同步完後，自動彙總寫入 bills v2
     await syncOrdersToBills(month).catch(err =>
       console.warn(`[BillingV2Sync] syncOrdersToBills 失敗（不影響主流程）：${err.message}`)
@@ -252,6 +258,8 @@ async function getMonthSummary(month) {
         repair_amount:       0,
         education_count:     0,
         education_amount:    0,
+        ad_count:            0,
+        ad_amount:           0,
         total_count:         0,
         total_amount:        0,
       };
@@ -274,6 +282,9 @@ async function getMonthSummary(month) {
     } else if (row.source_type === 'education_bonus') {
       s.education_count  += 1;
       s.education_amount += Number(row.amount);
+    } else if (row.source_type === 'ad_budget') {
+      s.ad_count  += 1;
+      s.ad_amount += Number(row.amount);
     }
     s.total_count  += 1;
     s.total_amount += Number(row.amount);
