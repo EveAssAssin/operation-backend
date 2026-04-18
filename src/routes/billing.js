@@ -135,6 +135,30 @@ router.get('/order-detail/:sourceType/:sourceId', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
+// POST /api/billing/sync/education
+// 僅同步教育訓練獎金（不觸發工程部同步）
+// Body: { month?: 'YYYY-MM' }
+// ─────────────────────────────────────────────────────────────
+router.post('/sync/education', async (req, res) => {
+  const { month } = req.body || {};
+  const target = month || new Date().toISOString().slice(0, 7);
+
+  if (month && !/^\d{4}-\d{2}$/.test(month)) {
+    return res.status(400).json({ success: false, message: 'month 格式錯誤，請使用 YYYY-MM' });
+  }
+
+  res.json({ success: true, message: `教育訓練獎金同步已啟動（${target}）` });
+
+  try {
+    const { syncEducationBonus } = require('../services/educationBonusSync');
+    const result = await syncEducationBonus(target);
+    console.log(`[Billing] 教育訓練同步完成（${target}）：${result.synced} 筆`);
+  } catch (err) {
+    console.error('[Billing] 教育訓練同步失敗：', err.message);
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
 // GET /api/billing/debug?month=YYYY-MM
 // 直接打市場 API，回傳原始結果，不寫 DB（除錯用）
 // ─────────────────────────────────────────────────────────────

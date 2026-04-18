@@ -123,6 +123,12 @@ async function syncMonth(month, syncType = 'manual') {
 
     ordersCount = await upsertOrders(orders);
 
+    // 同步教育訓練獎金（與工程部並行，互不影響）
+    const { syncEducationBonus } = require('./educationBonusSync');
+    await syncEducationBonus(month).catch(err =>
+      console.warn(`[EducationBonus] 月份 ${month} 同步失敗（不影響主流程）：${err.message}`)
+    );
+
     // 同步完後，自動彙總寫入 bills v2
     await syncOrdersToBills(month).catch(err =>
       console.warn(`[BillingV2Sync] syncOrdersToBills 失敗（不影響主流程）：${err.message}`)
@@ -244,21 +250,30 @@ async function getMonthSummary(month) {
         maintenance_amount:  0,
         repair_count:        0,
         repair_amount:       0,
+        education_count:     0,
+        education_amount:    0,
         total_count:         0,
         total_amount:        0,
       };
     }
     const s = map[row.store_erpid];
-    // 若有 billing_category，以最新非 null 的值為主
-    if (row.billing_category && !s.billing_category) {
-      s.billing_category = row.billing_category;
+    // 若有多種 billing_category，用逗號合併顯示（不重複）
+    if (row.billing_category) {
+      const existing = s.billing_category ? s.billing_category.split('、') : [];
+      if (!existing.includes(row.billing_category)) {
+        existing.push(row.billing_category);
+        s.billing_category = existing.join('、');
+      }
     }
     if (row.source_type === 'maintenance') {
       s.maintenance_count  += 1;
       s.maintenance_amount += Number(row.amount);
-    } else {
+    } else if (row.source_type === 'repair') {
       s.repair_count  += 1;
       s.repair_amount += Number(row.amount);
+    } else if (row.source_type === 'education_bonus') {
+      s.education_count  += 1;
+      s.education_amount += Number(row.amount);
     }
     s.total_count  += 1;
     s.total_amount += Number(row.amount);
