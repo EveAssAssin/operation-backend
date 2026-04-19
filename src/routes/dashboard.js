@@ -46,6 +46,22 @@ router.get('/highlights/training', async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════
+// 稽察
+// ══════════════════════════════════════════════════════════
+router.get('/highlights/audit', async (req, res) => {
+  try {
+    const { date } = req.query;
+    const r = await axios.get(
+      'https://market-backend-0544.onrender.com/api/dashboard/highlight/audit',
+      { headers: { Authorization: req.headers['authorization'] || '' },
+        params: date ? { date } : {},
+        timeout: 15000 }
+    );
+    ok(res, r.data?.data ?? r.data);
+  } catch (e) { fail(res, e); }
+});
+
+// ══════════════════════════════════════════════════════════
 // 工務部
 // ══════════════════════════════════════════════════════════
 router.get('/highlights/engineering', async (req, res) => {
