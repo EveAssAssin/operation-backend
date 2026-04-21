@@ -171,31 +171,17 @@ router.patch('/applicants/:id', async (req, res) => {
 
     // 邀請面試時自動建立面試紀錄
     if (status === 'invited') {
-      console.log(`[Recruitment] 邀請面試：applicant_id=${id}，開始建立 interview record`);
-
-      const { data: existing, error: checkErr } = await supabase
+      const { data: existing } = await supabase
         .from('recruitment_interviews')
         .select('id')
         .eq('applicant_id', id)
         .maybeSingle();
 
-      if (checkErr) console.error('[Recruitment] 查詢 existing interview 失敗:', checkErr);
-      console.log(`[Recruitment] 既有 interview record:`, existing);
-
       if (!existing) {
-        const { data: inserted, error: e2 } = await supabase
+        const { error: e2 } = await supabase
           .from('recruitment_interviews')
-          .insert({ applicant_id: id })
-          .select()
-          .single();
-
-        if (e2) {
-          console.error('[Recruitment] 建立 interview record 失敗:', e2);
-          throw e2;
-        }
-        console.log(`[Recruitment] interview record 建立成功:`, inserted?.id);
-      } else {
-        console.log(`[Recruitment] interview record 已存在，略過`);
+          .insert({ applicant_id: id });
+        if (e2) throw e2;
       }
     }
 
@@ -211,8 +197,6 @@ router.patch('/applicants/:id', async (req, res) => {
 router.get('/interviews', async (req, res) => {
   try {
     const { result } = req.query;
-    console.log(`[Recruitment] GET interviews, filter result=${result}`);
-
     let q = supabase
       .from('recruitment_interviews')
       .select(`
@@ -228,11 +212,7 @@ router.get('/interviews', async (req, res) => {
     else if (result)          q = q.eq('result', result);
 
     const { data, error } = await q;
-    if (error) {
-      console.error('[Recruitment] GET interviews 查詢失敗:', error);
-      throw error;
-    }
-    console.log(`[Recruitment] GET interviews 回傳 ${data?.length ?? 0} 筆`);
+    if (error) throw error;
     ok(res, data);
   } catch (e) { fail(res, e); }
 });
