@@ -75,7 +75,8 @@ app.use('/api/checks', require('./routes/checks'));
 // 首頁今日重點（代理外部系統 Highlight API，需登入）
 app.use('/api/dashboard', require('./routes/dashboard'));
 
-// 人力招募模組
+// 人力招募模組（公開跨系統端點先掛，內部端點需登入）
+app.use('/api/recruitment/external', require('./routes/recruitmentExternal'));
 app.use('/api/recruitment', authenticate, require('./routes/recruitment'));
 
 // ── 內部同步觸發（部署初期用，確認正常後可移除）──────
