@@ -12,6 +12,9 @@ const rateLimit  = require('express-rate-limit');
 const app  = express();
 const PORT = process.env.PORT || 3001;
 
+// Render / 反向代理環境：信任第一層 proxy（修正 express-rate-limit X-Forwarded-For 警告）
+app.set('trust proxy', 1);
+
 // ── 安全 & 中間件 ─────────────────────────────────────────
 app.use(helmet());
 app.use(cors({
