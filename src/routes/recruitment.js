@@ -177,9 +177,10 @@ router.patch('/applicants/:id', async (req, res) => {
         .maybeSingle();
 
       if (!existing) {
-        await supabase
+        const { error: e2 } = await supabase
           .from('recruitment_interviews')
-          .insert({ applicant_id: id, interview_date });
+          .insert({ applicant_id: id });
+        if (e2) throw e2;
       }
     }
 
