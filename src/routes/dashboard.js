@@ -67,7 +67,7 @@ router.get('/highlights/audit', async (req, res) => {
 router.get('/highlights/evaluation', async (req, res) => {
   try {
     const r = await axios.get(
-      'https://review-system-backend-3zs3.onrender.com/daily-digest/today',
+      'https://review-system-backend-3zs3.onrender.com/api/daily-digest/today',
       { headers: { 'x-hub-key': 'lohas-ai-hub-2026' },
         timeout: 15000 }
     );
