@@ -62,6 +62,20 @@ router.get('/highlights/audit', async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════
+// 人員評價系統
+// ══════════════════════════════════════════════════════════
+router.get('/highlights/evaluation', async (req, res) => {
+  try {
+    const r = await axios.get(
+      'https://review-system-backend-3zs3.onrender.com/daily-digest/today',
+      { headers: { 'x-hub-key': 'lohas-ai-hub-2026' },
+        timeout: 15000 }
+    );
+    ok(res, r.data);
+  } catch (e) { fail(res, e); }
+});
+
+// ══════════════════════════════════════════════════════════
 // 工務部
 // ══════════════════════════════════════════════════════════
 router.get('/highlights/engineering', async (req, res) => {
