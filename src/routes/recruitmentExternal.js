@@ -1,20 +1,33 @@
 // routes/recruitmentExternal.js
 // 人力招募模組：跨系統公開端點（API Key 驗證，不需 SSO 登入）
-// 供市場部後端直接呼叫，通知營運部門市缺人需求
+// 供市場部後端 / 教育訓練系統直接呼叫
 
 const express  = require('express');
 const router   = express.Router();
 const supabase = require('../config/supabase');
 
-const MARKET_API_KEY = process.env.MARKET_RECRUITMENT_API_KEY || '';
+const MARKET_API_KEY    = process.env.MARKET_RECRUITMENT_API_KEY    || '';
+const EDUCATION_API_KEY = process.env.EDUCATION_RECRUITMENT_API_KEY || '';
 
-// ── API Key 驗證 middleware ───────────────────────────────
-function verifyApiKey(req, res, next) {
+// ── API Key 驗證 middleware（市場部）──────────────────────
+function verifyMarketKey(req, res, next) {
   if (!MARKET_API_KEY) {
     return res.status(503).json({ success: false, message: '尚未設定 MARKET_RECRUITMENT_API_KEY' });
   }
   const key = req.headers['x-api-key'];
   if (!key || key !== MARKET_API_KEY) {
+    return res.status(401).json({ success: false, message: 'API Key 無效' });
+  }
+  next();
+}
+
+// ── API Key 驗證 middleware（教育訓練系統）──────────────────
+function verifyEducationKey(req, res, next) {
+  if (!EDUCATION_API_KEY) {
+    return res.status(503).json({ success: false, message: '尚未設定 EDUCATION_RECRUITMENT_API_KEY' });
+  }
+  const key = req.headers['x-api-key'];
+  if (!key || key !== EDUCATION_API_KEY) {
     return res.status(401).json({ success: false, message: 'API Key 無效' });
   }
   next();
@@ -39,7 +52,7 @@ function verifyApiKey(req, res, next) {
 //   { success: true, data: { id, store_name, total_needed, ... } }
 //   重複的 request_id 回傳 { success: true, duplicate: true, data: 既有記錄 }
 // ════════════════════════════════════════════════════════════
-router.post('/needs', verifyApiKey, async (req, res) => {
+router.post('/needs', verifyMarketKey, async (req, res) => {
   const { store_erpid, store_name, total_needed, urgent_needed, note, request_id } = req.body || {};
 
   if (!store_erpid || !store_name) {
@@ -84,6 +97,120 @@ router.post('/needs', verifyApiKey, async (req, res) => {
 
   } catch (e) {
     console.error('[Recruitment External]', e.message);
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+// ════════════════════════════════════════════════════════════
+// POST /api/recruitment/external/arrival
+// 教育訓練系統呼叫：新人已完成建檔，回傳到職連結
+//
+// Headers:
+//   x-api-key: {EDUCATION_RECRUITMENT_API_KEY}
+//
+// Body:
+//   interview_id   string  必填  面試紀錄 UUID
+//   onboarding_url string  必填  新人到職連結
+//   request_id     string  選填  防重複唯一 ID
+//
+// 回傳：
+//   { success: true, data: { interview, need } }
+//   重複的 request_id 回傳 { success: true, duplicate: true, data: 既有記錄 }
+// ════════════════════════════════════════════════════════════
+router.post('/arrival', verifyEducationKey, async (req, res) => {
+  const { interview_id, onboarding_url, request_id } = req.body || {};
+
+  if (!interview_id) {
+    return res.status(400).json({ success: false, message: 'interview_id 為必填' });
+  }
+  if (!onboarding_url) {
+    return res.status(400).json({ success: false, message: 'onboarding_url 為必填' });
+  }
+
+  try {
+    // 防重複：同一 request_id 若已處理過，直接回傳
+    if (request_id) {
+      const { data: existing } = await supabase
+        .from('recruitment_interviews')
+        .select('*')
+        .eq('id', interview_id)
+        .eq('arrival_request_id', request_id)
+        .maybeSingle();
+
+      if (existing) {
+        return res.json({ success: true, duplicate: true, data: { interview: existing } });
+      }
+    }
+
+    // 1. 更新面試紀錄：onboarding_url + education_linked + arrival_request_id
+    const { data: interview, error: e1 } = await supabase
+      .from('recruitment_interviews')
+      .update({
+        onboarding_url,
+        education_linked:    true,
+        arrival_request_id:  request_id || null,
+        updated_at:          new Date().toISOString(),
+      })
+      .eq('id', interview_id)
+      .select(`*, recruitment_applicants(id, name, need_id, target_store_erpid, target_store_name)`)
+      .single();
+
+    if (e1) throw e1;
+
+    // 2. 若 applicant 有關聯的 need_id → 自動 +1 filled
+    const applicant = interview.recruitment_applicants;
+    let need = null;
+
+    if (applicant?.need_id) {
+      const { data: cur } = await supabase
+        .from('recruitment_needs')
+        .select('id, total_needed, filled, status')
+        .eq('id', applicant.need_id)
+        .maybeSingle();
+
+      if (cur && cur.status === 'open') {
+        const newFilled = (cur.filled || 0) + 1;
+        const newStatus = newFilled >= cur.total_needed ? 'fulfilled' : 'open';
+
+        const { data: updatedNeed } = await supabase
+          .from('recruitment_needs')
+          .update({ filled: newFilled, status: newStatus, updated_at: new Date().toISOString() })
+          .eq('id', cur.id)
+          .select()
+          .single();
+
+        need = updatedNeed;
+      }
+    } else if (applicant?.target_store_erpid) {
+      // 若沒有明確 need_id，找同門市最新的 open 需求自動 +1
+      const { data: cur } = await supabase
+        .from('recruitment_needs')
+        .select('id, total_needed, filled, status')
+        .eq('store_erpid', applicant.target_store_erpid)
+        .eq('status', 'open')
+        .order('created_at', { ascending: false })
+        .maybeSingle();
+
+      if (cur) {
+        const newFilled = (cur.filled || 0) + 1;
+        const newStatus = newFilled >= cur.total_needed ? 'fulfilled' : 'open';
+
+        const { data: updatedNeed } = await supabase
+          .from('recruitment_needs')
+          .update({ filled: newFilled, status: newStatus, updated_at: new Date().toISOString() })
+          .eq('id', cur.id)
+          .select()
+          .single();
+
+        need = updatedNeed;
+      }
+    }
+
+    console.log(`[Recruitment] 教育系統到職回呼：面試 ${interview_id}，${applicant?.name || '?'}，到職連結已儲存`);
+    res.json({ success: true, data: { interview, need } });
+
+  } catch (e) {
+    console.error('[Recruitment External arrival]', e.message);
     res.status(500).json({ success: false, message: e.message });
   }
 });
