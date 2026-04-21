@@ -73,12 +73,17 @@ async function syncAdBudget(month) {
       // 用 store_name 比對 store_erpid
       const store_erpid = storeNameMap[sd.store_name] || `ad-store-${sd.store_id}`;
 
+      // 優先使用實際花費分攤；尚未填寫時 fallback 到預算分攤
+      const actualShare = sd.actual_spend_share;
+      const amount      = actualShare != null ? Number(actualShare) : Number(sd.budget_share) || 0;
+      const isActual    = actualShare != null;
+
       rows.push({
         // 唯一鍵：廣告 ID + 門市 ID（整數）
         order_id:         `ad-${camp.id}-${sd.store_id}`,
         source_type:      'ad_budget',
         store_erpid,
-        amount:           Number(sd.budget_share) || 0,
+        amount,
         // 廣告結束日作為帳單歸屬時間；未設定則用月底
         signed_at:        camp.end_date
           ? `${camp.end_date}T23:59:59+08:00`
@@ -94,10 +99,13 @@ async function syncAdBudget(month) {
             camp.strategy ? `策略：${camp.strategy}` : null,
           ].filter(Boolean).join('　'),
           completion_notes: camp.copy_content || null,
-          amount:           sd.budget_share,
+          amount,
           status:           'completed',
+          // 保留預算分攤供日後比對
+          budget_share:     Number(sd.budget_share) || 0,
+          is_actual_spend:  isActual,
         }],
-        remark: `${camp.name}（${camp.platform || camp.channel}）${camp.start_date}～${camp.end_date}`,
+        remark: `${camp.name}（${camp.platform || camp.channel}）${camp.start_date}～${camp.end_date}${isActual ? '' : '【預算分攤】'}`,
         updated_at: new Date().toISOString(),
       });
     }
