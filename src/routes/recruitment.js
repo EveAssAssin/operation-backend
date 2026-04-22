@@ -98,17 +98,21 @@ router.patch('/needs/:id', async (req, res) => {
 // 履歷投遞者
 // ════════════════════════════════════════════════════════════
 
-// GET /api/recruitment/applicants?date=YYYY-MM-DD&platform=&status=
+// GET /api/recruitment/applicants?date=YYYY-MM-DD&platform=&status=&all=true
+// date 不帶時只取今日；all=true 時取全部（不限日期）
 router.get('/applicants', async (req, res) => {
   try {
-    const { date, platform, status } = req.query;
+    const { date, platform, status, all } = req.query;
     let q = supabase
       .from('recruitment_applicants')
       .select('*, recruitment_interviews(*)')
+      .order('date',       { ascending: false })
       .order('created_at', { ascending: false });
-    if (date)     q = q.eq('date', date);
-    if (platform) q = q.eq('platform', platform);
-    if (status)   q = q.eq('status', status);
+
+    // all=true 不過濾日期；否則以 date 參數過濾（前端若帶空字串也視為不過濾）
+    if (!all && date) q = q.eq('date', date);
+    if (platform)     q = q.eq('platform', platform);
+    if (status)       q = q.eq('status', status);
 
     const { data, error } = await q;
     if (error) throw error;
@@ -142,11 +146,11 @@ router.post('/applicants', async (req, res) => {
 });
 
 // PATCH /api/recruitment/applicants/:id
-// body: { status, reject_reason, interview_date }
+// body: { status, reject_reason, interview_date, interview_time }
 router.patch('/applicants/:id', async (req, res) => {
   try {
     const { id }    = req.params;
-    const { status, reject_reason, interview_date } = req.body;
+    const { status, reject_reason, interview_date, interview_time } = req.body;
 
     if (!['pending', 'rejected', 'invited'].includes(status)) {
       return bad(res, 'status 必須為 pending | rejected | invited');
@@ -160,7 +164,10 @@ router.patch('/applicants/:id', async (req, res) => {
 
     const updates = { status, updated_at: new Date().toISOString() };
     if (status === 'rejected') updates.reject_reason  = reject_reason;
-    if (status === 'invited')  updates.interview_date = interview_date;
+    if (status === 'invited')  {
+      updates.interview_date = interview_date;
+      updates.interview_time = interview_time || null;
+    }
 
     const { data: applicant, error: e1 } = await supabase
       .from('recruitment_applicants')
@@ -253,7 +260,7 @@ router.get('/interviews', async (req, res) => {
         *,
         recruitment_applicants (
           id, name, code, platform, date, phone,
-          target_store_erpid, target_store_name, interview_date
+          target_store_erpid, target_store_name, interview_date, interview_time
         )
       `)
       .order('created_at', { ascending: false });
