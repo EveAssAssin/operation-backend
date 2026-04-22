@@ -18,6 +18,13 @@ router.use(authenticate);
 // 營運部系統的有效角色
 const VALID_ROLES = ['super_admin', 'operation_lead', 'operation_staff'];
 
+// 各角色可以授予的角色範圍（operation_lead 只能管 operation_staff）
+function getAllowedRoles(requesterRole) {
+  if (requesterRole === 'super_admin') return VALID_ROLES;
+  if (requesterRole === 'operation_lead') return ['operation_staff'];
+  return [];
+}
+
 /**
  * GET /api/system/employees
  * 列出所有在職員工，並標示是否已有系統權限
@@ -121,6 +128,11 @@ router.post('/grant', authorize('system_user.edit'), async (req, res) => {
     if (!VALID_ROLES.includes(role)) {
       return res.status(400).json({ success: false, message: `無效角色，有效值：${VALID_ROLES.join(', ')}` });
     }
+    // 主管只能授予 operation_staff 角色
+    const allowedRoles = getAllowedRoles(req.user.role);
+    if (!allowedRoles.includes(role)) {
+      return res.status(403).json({ success: false, message: '權限不足，您無法授予此角色' });
+    }
 
     // 查員工
     const { data: emp, error: empErr } = await supabase
@@ -182,6 +194,11 @@ router.put('/:id/role', authorize('system_user.edit'), async (req, res) => {
     if (!role || !VALID_ROLES.includes(role)) {
       return res.status(400).json({ success: false, message: `無效角色，有效值：${VALID_ROLES.join(', ')}` });
     }
+    // 主管只能改成 operation_staff
+    const allowedRoles = getAllowedRoles(req.user.role);
+    if (!allowedRoles.includes(role)) {
+      return res.status(403).json({ success: false, message: '權限不足，您無法設定此角色' });
+    }
     const { data, error } = await supabase
       .from('system_users')
       .update({ role, updated_at: new Date().toISOString() })
@@ -202,6 +219,20 @@ router.put('/:id/role', authorize('system_user.edit'), async (req, res) => {
  */
 router.put('/:id/revoke', authorize('system_user.edit'), async (req, res) => {
   try {
+    // 先查出目標用戶的角色，確認是否有權限撤銷
+    const { data: target } = await supabase
+      .from('system_users')
+      .select('id, role, name')
+      .eq('id', req.params.id)
+      .single();
+
+    if (!target) return res.status(404).json({ success: false, message: '找不到此用戶' });
+
+    const allowedRoles = getAllowedRoles(req.user.role);
+    if (!allowedRoles.includes(target.role)) {
+      return res.status(403).json({ success: false, message: '權限不足，您無法撤銷此角色的帳號' });
+    }
+
     const { data, error } = await supabase
       .from('system_users')
       .update({ is_active: false, updated_at: new Date().toISOString() })

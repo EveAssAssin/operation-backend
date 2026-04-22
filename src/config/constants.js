@@ -22,8 +22,8 @@ const MODULE_PERMISSIONS = {
   'billing.confirm':   ROLES.operation_lead,   // 確認 / 分配 / 作廢
   'billing.manage':    ROLES.operation_lead,   // 管理來源單位 / 會計科目
   // 系統用戶管理
-  'system_user.view':  ROLES.operation_lead,  // 查看（主管以上）
-  'system_user.edit':  ROLES.super_admin,      // 授權/撤銷（超管）
+  'system_user.view':  ROLES.operation_lead,   // 查看（主管以上）
+  'system_user.edit':  ROLES.operation_lead,   // 授權/撤銷（主管以上）；後端額外限制主管只能管 operation_staff
 };
 
 // 同步類型
