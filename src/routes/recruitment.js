@@ -119,7 +119,7 @@ router.get('/applicants', async (req, res) => {
 // POST /api/recruitment/applicants
 router.post('/applicants', async (req, res) => {
   try {
-    const { date, platform, name, code, target_store_erpid, target_store_name, need_id } = req.body;
+    const { date, platform, name, code, phone, target_store_erpid, target_store_name, need_id } = req.body;
     if (!platform || !name) return bad(res, 'platform 與 name 為必填');
 
     const { data, error } = await supabase
@@ -128,6 +128,7 @@ router.post('/applicants', async (req, res) => {
         date: date || new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Taipei' }),
         platform, name,
         code:               code               || null,
+        phone:              phone              || null,
         target_store_erpid: target_store_erpid || null,
         target_store_name:  target_store_name  || null,
         need_id:            need_id            || null,
@@ -202,7 +203,7 @@ router.get('/interviews', async (req, res) => {
       .select(`
         *,
         recruitment_applicants (
-          id, name, code, platform, date,
+          id, name, code, platform, date, phone,
           target_store_erpid, target_store_name, interview_date
         )
       `)
@@ -233,12 +234,13 @@ router.get('/interviews/:id', async (req, res) => {
 // PATCH /api/recruitment/interviews/:id
 router.patch('/interviews/:id', async (req, res) => {
   try {
-    const { notes, result, education_linked, onboarding_url } = req.body;
+    const { notes, result, education_linked, onboarding_url, pending_reason } = req.body;
     const updates = { updated_at: new Date().toISOString() };
     if (notes            !== undefined) updates.notes            = notes;
     if (result           !== undefined) updates.result           = result;
     if (education_linked !== undefined) updates.education_linked = education_linked;
     if (onboarding_url   !== undefined) updates.onboarding_url   = onboarding_url;
+    if (pending_reason   !== undefined) updates.pending_reason   = pending_reason;
     if (result && !updates.completed_at) updates.completed_at = new Date().toISOString();
 
     const { data, error } = await supabase
@@ -288,24 +290,26 @@ router.post('/interviews/:id/audio', upload.single('audio'), async (req, res) =>
 });
 
 // POST /api/recruitment/interviews/:id/sms
-// body: { phone }  — 發送到職簡訊給新人
+// body: { phone, onboarding_url? }  — 發送到職簡訊給新人
 router.post('/interviews/:id/sms', async (req, res) => {
   try {
     const { id }    = req.params;
-    const { phone } = req.body;
+    const { phone, onboarding_url: urlOverride } = req.body;
     if (!phone) return bad(res, 'phone 為必填');
 
-    // 取出面試紀錄的 onboarding_url
+    // 取出面試紀錄（onboarding_url 可由前端覆蓋）
     const { data: iv, error: e1 } = await supabase
       .from('recruitment_interviews')
       .select('id, onboarding_url, recruitment_applicants(name)')
       .eq('id', id)
       .single();
     if (e1) throw e1;
-    if (!iv.onboarding_url) return bad(res, '尚未有到職連結，請先等教育訓練系統回傳');
+
+    const onboardingUrl = urlOverride || iv.onboarding_url;
+    if (!onboardingUrl) return bad(res, '請輸入到職連結');
 
     const name    = iv.recruitment_applicants?.name || '您';
-    const msgBody = `親愛的 ${name}，歡迎加入樂活眼鏡！請點選以下連結完成到職手續：${iv.onboarding_url}`;
+    const msgBody = `親愛的 ${name}，歡迎加入樂活眼鏡！請點選以下連結完成到職手續：${onboardingUrl}`;
 
     const result = await sendSms(phone, msgBody);
 
