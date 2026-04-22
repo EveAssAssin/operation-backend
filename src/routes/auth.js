@@ -46,21 +46,32 @@ router.post('/login', async (req, res) => {
       .update({ last_login_at: new Date().toISOString() })
       .eq('id', user.id);
 
+    // 補查 line_uid（從 employees 表，以 erpid 對應）
+    let lineUid = null;
+    if (user.erpid) {
+      const { data: emp } = await supabase
+        .from('employees')
+        .select('line_uid')
+        .eq('erpid', user.erpid)
+        .maybeSingle();
+      lineUid = emp?.line_uid || null;
+    }
+
     // 根據角色回傳可操作的模組清單
     const modules = getModulesForRole(user.role);
 
     res.json({
       success: true,
       user: {
-        id:       user.id,
-        memberId: user.member_id,
-        erpid:    user.erpid,
-        name:     user.name,
-        role:     user.role,
+        id:         user.id,
+        memberId:   user.member_id,
+        app_number: user.member_id,
+        erpid:      user.erpid,
+        name:       user.name,
+        role:       user.role,
+        line_uid:   lineUid,
       },
       modules,
-      // 開發模式下直接使用 app_number 作為 token
-      // 正式上線後替換為 SSO token
       token: app_number,
     });
 
@@ -100,10 +111,20 @@ router.get('/sso', async (req, res) => {
       .update({ last_login_at: new Date().toISOString() })
       .eq('id', user.id);
 
+    let lineUid = null;
+    if (user.erpid) {
+      const { data: emp } = await supabase
+        .from('employees')
+        .select('line_uid')
+        .eq('erpid', user.erpid)
+        .maybeSingle();
+      lineUid = emp?.line_uid || null;
+    }
+
     const modules = getModulesForRole(user.role);
     res.json({
       success: true,
-      user: { id: user.id, memberId: user.member_id, erpid: user.erpid, name: user.name, role: user.role },
+      user: { id: user.id, memberId: user.member_id, app_number: user.member_id, erpid: user.erpid, name: user.name, role: user.role, line_uid: lineUid },
       modules,
       token: app_number,
     });
