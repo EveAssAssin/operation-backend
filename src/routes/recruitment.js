@@ -190,6 +190,55 @@ router.patch('/applicants/:id', async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
+// PUT /api/recruitment/applicants/:id
+// 編輯基本資料（姓名 / 代碼 / 手機 / 平台 / 投遞門市）
+router.put('/applicants/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, code, phone, platform, target_store_erpid, target_store_name } = req.body;
+    if (!name || !platform) return bad(res, 'name 與 platform 為必填');
+
+    const { data, error } = await supabase
+      .from('recruitment_applicants')
+      .update({
+        name,
+        code:               code               || null,
+        phone:              phone              || null,
+        platform,
+        target_store_erpid: target_store_erpid || null,
+        target_store_name:  target_store_name  || null,
+        updated_at:         new Date().toISOString(),
+      })
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) throw error;
+    ok(res, data);
+  } catch (e) { fail(res, e); }
+});
+
+// DELETE /api/recruitment/applicants/:id
+// 刪除投遞者（同時刪除相關面試紀錄）
+router.delete('/applicants/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // 先刪面試紀錄（避免 FK 錯誤）
+    await supabase
+      .from('recruitment_interviews')
+      .delete()
+      .eq('applicant_id', id);
+
+    const { error } = await supabase
+      .from('recruitment_applicants')
+      .delete()
+      .eq('id', id);
+    if (error) throw error;
+
+    res.json({ success: true, message: '已刪除' });
+  } catch (e) { fail(res, e); }
+});
+
 // ════════════════════════════════════════════════════════════
 // 面試紀錄
 // ════════════════════════════════════════════════════════════
