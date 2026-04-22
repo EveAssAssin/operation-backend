@@ -39,7 +39,7 @@ router.get('/employees', authorize('system_user.view'), async (req, res) => {
     // 1. 取得所有在職員工
     let empQuery = supabase
       .from('employees')
-      .select('id, erpid, app_number, name, jobtitle, store_name, store_erpid, is_active')
+      .select('id, erpid, app_number, name, jobtitle, store_name, store_erpid, is_active, line_uid')
       .eq('is_active', true)
       .order('store_name', { ascending: true })
       .order('name',       { ascending: true });
@@ -79,6 +79,7 @@ router.get('/employees', authorize('system_user.view'), async (req, res) => {
         system_user_id: su?.id || null,
         role:           su?.is_active ? su.role : null,
         last_login_at:  su?.last_login_at || null,
+        line_uid:       emp.line_uid || null,
       };
     });
 
