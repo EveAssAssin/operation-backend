@@ -198,11 +198,12 @@ router.patch('/applicants/:id', async (req, res) => {
 });
 
 // PUT /api/recruitment/applicants/:id
-// 編輯基本資料（姓名 / 代碼 / 手機 / 平台 / 投遞門市）
+// 編輯基本資料（姓名 / 代碼 / 手機 / 平台 / 投遞門市 / 面試日期 / 面試時間）
 router.put('/applicants/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, code, phone, platform, target_store_erpid, target_store_name } = req.body;
+    const { name, code, phone, platform, target_store_erpid, target_store_name,
+            interview_date, interview_time } = req.body;
     if (!name || !platform) return bad(res, 'name 與 platform 為必填');
 
     const { data, error } = await supabase
@@ -214,6 +215,8 @@ router.put('/applicants/:id', async (req, res) => {
         platform,
         target_store_erpid: target_store_erpid || null,
         target_store_name:  target_store_name  || null,
+        interview_date:     interview_date     || null,
+        interview_time:     interview_time     || null,
         updated_at:         new Date().toISOString(),
       })
       .eq('id', id)
