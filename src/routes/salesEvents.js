@@ -7,7 +7,7 @@ const router   = express.Router();
 const axios    = require('axios');
 const { authorize } = require('../middleware/auth');
 
-const SALES_BASE = 'https://sales-analysis-backend.onrender.com';
+const SALES_BASE = 'https://sales-analysis-backend-vc4f.onrender.com';
 const SALES_KEY  = 'lohas-op-2026';
 
 router.use(authorize('operation_staff', 'operation_lead', 'dept_head', 'super_admin'));
