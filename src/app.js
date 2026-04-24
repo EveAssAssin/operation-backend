@@ -85,6 +85,9 @@ app.use('/api/recruitment', authenticate, require('./routes/recruitment'));
 // 業績系統活動模組（需登入）
 app.use('/api/sales-events', authenticate, require('./routes/salesEvents'));
 
+// 推播群組管理（需登入）
+app.use('/api/push-groups', authenticate, require('./routes/pushGroups'));
+
 // ── 內部同步觸發（部署初期用，確認正常後可移除）──────
 app.post('/api/internal/sync', async (req, res) => {
   const { runEmployeeSync } = require('./services/personnelSync');
