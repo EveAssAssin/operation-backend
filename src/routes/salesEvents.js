@@ -58,17 +58,38 @@ router.get('/external-events', async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
+// 將前端欄位轉換為業績系統 API 格式
+function toExternalEventPayload(body) {
+  const {
+    event_type, name, start_date, end_date,
+    description, notes, store_ids,
+    push_on_start, push_on_start_time,
+    push_on_start_adv, push_on_start_adv_min, push_on_start_adv_time,
+    push_on_end, push_on_end_time,
+  } = body;
+
+  const payload = { event_type, name, start_date, end_date };
+  if (description       !== undefined) payload.description       = description;
+  if (notes             !== undefined) payload.notes             = notes;
+  if (store_ids         !== undefined) payload.store_ids         = store_ids;
+  if (push_on_start     !== undefined) payload.push_on_start     = push_on_start;
+  if (push_on_start_time !== undefined) payload.push_on_start_time = push_on_start_time;
+  if (push_on_start_adv !== undefined) payload.push_on_start_adv = push_on_start_adv;
+  if (push_on_start_adv_min !== undefined) payload.push_on_start_adv_min = push_on_start_adv_min;
+  if (push_on_start_adv_time !== undefined) payload.push_on_start_adv_time = push_on_start_adv_time;
+  if (push_on_end       !== undefined) payload.push_on_end       = push_on_end;
+  if (push_on_end_time  !== undefined) payload.push_on_end_time  = push_on_end_time;
+  return payload;
+}
+
 // POST /api/sales-events/external-events
 router.post('/external-events', async (req, res) => {
   try {
-    const { type, name, start_date, end_date, note, store_erpids } = req.body;
-    if (!type || !name || !start_date || !end_date) {
-      return bad(res, 'type, name, start_date, end_date 為必填');
+    const { event_type, name, start_date, end_date } = req.body;
+    if (!event_type || !name || !start_date || !end_date) {
+      return bad(res, 'event_type, name, start_date, end_date 為必填');
     }
-    const payload = { type, name, start_date, end_date };
-    if (note !== undefined)        payload.note        = note;
-    if (store_erpids !== undefined) payload.store_erpids = store_erpids;
-    const data = await salesReq('POST', '/operation/external-events', payload);
+    const data = await salesReq('POST', '/operation/external-events', toExternalEventPayload(req.body));
     ok(res, data);
   } catch (e) { fail(res, e); }
 });
@@ -84,14 +105,11 @@ router.get('/external-events/:id', async (req, res) => {
 // PUT /api/sales-events/external-events/:id
 router.put('/external-events/:id', async (req, res) => {
   try {
-    const { type, name, start_date, end_date, note, store_erpids } = req.body;
-    if (!type || !name || !start_date || !end_date) {
-      return bad(res, 'type, name, start_date, end_date 為必填');
+    const { event_type, name, start_date, end_date } = req.body;
+    if (!event_type || !name || !start_date || !end_date) {
+      return bad(res, 'event_type, name, start_date, end_date 為必填');
     }
-    const payload = { type, name, start_date, end_date };
-    if (note !== undefined)        payload.note        = note;
-    if (store_erpids !== undefined) payload.store_erpids = store_erpids;
-    const data = await salesReq('PUT', `/operation/external-events/${req.params.id}`, payload);
+    const data = await salesReq('PUT', `/operation/external-events/${req.params.id}`, toExternalEventPayload(req.body));
     ok(res, data);
   } catch (e) { fail(res, e); }
 });
