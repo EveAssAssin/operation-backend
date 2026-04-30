@@ -152,8 +152,9 @@ router.patch('/applicants/:id', async (req, res) => {
     const { id }    = req.params;
     const { status, reject_reason, interview_date, interview_time } = req.body;
 
-    if (!['pending', 'rejected', 'invited'].includes(status)) {
-      return bad(res, 'status 必須為 pending | rejected | invited');
+    const VALID_STATUSES = ['pending', 'rejected', 'invited', 'notified_intent', 'notified_chat', 'notified_invite'];
+    if (!VALID_STATUSES.includes(status)) {
+      return bad(res, `status 必須為 ${VALID_STATUSES.join(' | ')}`);
     }
     if (status === 'rejected' && !reject_reason) {
       return bad(res, '婉拒時 reject_reason 為必填');
