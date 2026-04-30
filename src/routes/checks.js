@@ -45,7 +45,7 @@ router.patch('/subjects/:id', async (req, res) => {
 });
 
 // 合併科目：把 merge_ids 的批次全部改成 keep_id，再刪除 merge_ids
-router.post('/subjects/merge', authorize('operation_lead', 'super_admin'), async (req, res) => {
+router.post('/subjects/merge', authorize('operation_staff', 'operation_lead', 'super_admin'), async (req, res) => {
   try {
     const { keep_id, merge_ids } = req.body;
     if (!keep_id || !Array.isArray(merge_ids) || merge_ids.length === 0) {
@@ -149,7 +149,7 @@ router.patch('/notify-targets/:id', async (req, res) => {
 });
 
 // 測試推播：立即發送今日出款通知（回傳詳細結果供前端顯示）
-router.post('/notify-targets/test', authorize('operation_lead', 'super_admin'), async (req, res) => {
+router.post('/notify-targets/test', authorize('operation_staff', 'operation_lead', 'super_admin'), async (req, res) => {
   try {
     const { getTodayDueChecks, getNotifyTargets } = require('../services/checkService');
     const { pushToUsers } = require('../services/linePushService');
@@ -206,17 +206,17 @@ router.delete('/notify-targets/:id', async (req, res) => {
 // ══════════════════════════════════════════════════════════
 
 // 刪除單一批次（含其下所有支票）
-router.delete('/batches/:id', authorize('operation_lead', 'super_admin'), async (req, res) => {
+router.delete('/batches/:id', authorize('operation_staff', 'operation_lead', 'super_admin'), async (req, res) => {
   try { ok(res, await svc.deleteBatch(req.params.id)); } catch(e) { err(res, e, 500); }
 });
 
 // 清除全部支票資料
-router.post('/clear-all', authorize('operation_lead', 'super_admin'), async (req, res) => {
+router.post('/clear-all', authorize('operation_staff', 'operation_lead', 'super_admin'), async (req, res) => {
   try { ok(res, await svc.clearAll()); } catch(e) { err(res, e, 500); }
 });
 
 // 批次補標已付款：到期日 < 今天 且 status=pending → paid
-router.post('/bulk-pay-past', authorize('operation_lead', 'super_admin'), async (req, res) => {
+router.post('/bulk-pay-past', authorize('operation_staff', 'operation_lead', 'super_admin'), async (req, res) => {
   try { ok(res, await svc.bulkPayPast()); } catch(e) { err(res, e, 500); }
 });
 

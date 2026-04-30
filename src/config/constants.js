@@ -10,20 +10,18 @@ const ROLES = {
 
 const MODULE_PERMISSIONS = {
   'personnel.view':    ROLES.operation_staff,
-  'personnel.edit':    ROLES.operation_lead,
-  'personnel.sync':    ROLES.operation_lead,   // 主管以上可手動觸發人員同步
-  'system_user.view':  ROLES.dept_head,
-  'system_user.edit':  ROLES.super_admin,
+  'personnel.edit':    ROLES.operation_staff,  // 部員可編輯（LINE UID 等）
+  'personnel.sync':    ROLES.operation_staff,  // 部員可手動觸發同步
   // 開帳系統（v1）
-  'billing.view':      ROLES.operation_lead,
-  'billing.sync':      ROLES.operation_lead,
+  'billing.view':      ROLES.operation_staff,
+  'billing.sync':      ROLES.operation_staff,
   // 開帳系統 v2
-  'billing.create':    ROLES.operation_staff,  // 建立帳單（所有人員）
-  'billing.confirm':   ROLES.operation_lead,   // 確認 / 分配 / 作廢
-  'billing.manage':    ROLES.operation_lead,   // 管理來源單位 / 會計科目
+  'billing.create':    ROLES.operation_staff,  // 建立帳單
+  'billing.confirm':   ROLES.operation_staff,  // 確認 / 分配 / 作廢
+  'billing.manage':    ROLES.operation_staff,  // 管理來源單位 / 會計科目
   // 系統用戶管理
-  'system_user.view':  ROLES.operation_lead,   // 查看（主管以上）
-  'system_user.edit':  ROLES.operation_lead,   // 授權/撤銷（主管以上）；後端額外限制主管只能管 operation_staff
+  'system_user.view':  ROLES.operation_staff,  // 查看（部員以上）
+  'system_user.edit':  ROLES.operation_lead,   // 授權/撤銷 → 主管以上才能修改權限設定
 };
 
 // 同步類型

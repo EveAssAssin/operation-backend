@@ -14,8 +14,8 @@ const {
   getOrderDetail,
 } = require('../services/billingService');
 
-// 所有路由需 operation_lead 以上（app.js 掛載時已套 authenticate）
-router.use(authorize('operation_lead', 'dept_head', 'super_admin'));
+// 所有路由需 operation_staff 以上（app.js 掛載時已套 authenticate）
+router.use(authorize('operation_staff', 'operation_lead', 'dept_head', 'super_admin'));
 
 // ─────────────────────────────────────────────────────────────
 // GET /api/billing/summary?month=YYYY-MM
