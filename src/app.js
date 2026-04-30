@@ -88,6 +88,9 @@ app.use('/api/sales-events', authenticate, require('./routes/salesEvents'));
 // 推播群組管理（需登入）
 app.use('/api/push-groups', authenticate, require('./routes/pushGroups'));
 
+// 常態費用模組（需登入）
+app.use('/api/recurring-expenses', authenticate, require('./routes/recurringExpenses'));
+
 // ── 內部同步觸發（部署初期用，確認正常後可移除）──────
 app.post('/api/internal/sync', async (req, res) => {
   const { runEmployeeSync } = require('./services/personnelSync');
@@ -113,19 +116,21 @@ app.post('/api/internal/sync-line-uid', async (req, res) => {
 });
 
 // ── 排程任務 ──────────────────────────────────────────────
-const { startScheduledSync }        = require('./jobs/syncEmployees');
-const { startLineUidScheduledSync } = require('./jobs/syncLineUid');
-const { startBillingScheduledSync } = require('./jobs/syncBilling');
-const { startHubPoller }            = require('./jobs/hubPoller');
-const { startCheckNotifyJob }       = require('./jobs/checkNotify');
-const { init: initHolidays }        = require('./services/taiwanHolidayService');
+const { startScheduledSync }                  = require('./jobs/syncEmployees');
+const { startLineUidScheduledSync }           = require('./jobs/syncLineUid');
+const { startBillingScheduledSync }           = require('./jobs/syncBilling');
+const { startHubPoller }                      = require('./jobs/hubPoller');
+const { startCheckNotifyJob }                 = require('./jobs/checkNotify');
+const { startRecurringExpenseNotifyJob }      = require('./jobs/notifyRecurringExpenses');
+const { init: initHolidays }                  = require('./services/taiwanHolidayService');
 
 startScheduledSync();
 startLineUidScheduledSync();
 startBillingScheduledSync();
-startHubPoller();         // 每 5 分鐘自動掃 Hub 收件匣
-startCheckNotifyJob();    // 每天 10:00 支票到期通知
-initHolidays();           // 預載台灣假日快取（本年 + 明年）
+startHubPoller();                  // 每 5 分鐘自動掃 Hub 收件匣
+startCheckNotifyJob();             // 每天 10:00 支票到期通知
+startRecurringExpenseNotifyJob();  // 每天 09:00 常態費用到期通知
+initHolidays();                    // 預載台灣假日快取（本年 + 明年）
 
 // ── 錯誤處理 ──────────────────────────────────────────────
 app.use((req, res) => {
