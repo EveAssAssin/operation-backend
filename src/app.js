@@ -91,6 +91,9 @@ app.use('/api/push-groups', authenticate, require('./routes/pushGroups'));
 // 常態費用模組（需登入）
 app.use('/api/recurring-expenses', authenticate, require('./routes/recurringExpenses'));
 
+// 任務派發模組（送任務到市場部，需登入）
+app.use('/api/quests', authenticate, require('./routes/quests'));
+
 // ── 內部同步觸發（部署初期用，確認正常後可移除）──────
 app.post('/api/internal/sync', async (req, res) => {
   const { runEmployeeSync } = require('./services/personnelSync');
