@@ -177,6 +177,17 @@ router.post('/bind/unbind', async (req, res) => {
   res.json(r);
 });
 
+// LIFF 設定（公開 — 給前端讀，不洩漏 secret）
+router.get('/config', (_req, res) => {
+  res.json({
+    success: true,
+    data: {
+      liff_id: line.LIFF_ID || '',
+      bind_liff_url: line.BIND_LIFF_URL || '',
+    },
+  });
+});
+
 // ─────────────────────────────────────────────────────────────
 //                 ADMIN：以下需 SSO 登入
 // ─────────────────────────────────────────────────────────────
@@ -429,17 +440,6 @@ router.post('/sync/enrich-categories', async (req, res) => {
   } catch (e) {
     res.status(500).json({ success: false, message: e.message });
   }
-});
-
-// LIFF 設定（給前端讀，不洩漏 secret）
-router.get('/config', (_req, res) => {
-  res.json({
-    success: true,
-    data: {
-      liff_id: line.LIFF_ID || '',
-      bind_liff_url: line.BIND_LIFF_URL || '',
-    },
-  });
 });
 
 module.exports = router;
