@@ -45,12 +45,8 @@ async function handleLineEvent(ev) {
   if (!userId) return;
   const replyToken = ev.replyToken;
 
-  // 加好友 / 解除封鎖
+  // 加好友 → 不自動推任何訊息（因為這條 OA 也會有非廠商的一般使用者加入）
   if (type === 'follow') {
-    await line.reply(replyToken, [
-      line.textMessage('歡迎加入「樂活特約廠商綁定」！\n首次使用請點下方按鈕綁定貴公司資訊。'),
-      line.bindEntryFlex({}),
-    ]);
     return;
   }
 
@@ -64,39 +60,33 @@ async function handleLineEvent(ev) {
     const text = String(ev.message.text || '').trim();
     const lower = text.toLowerCase();
 
-    if (['綁定', 'bind', '/bind', '開始'].includes(lower) || lower === '綁定') {
+    // 廠商觸發綁定的關鍵字（窗口會主動告訴廠商輸入這些字）
+    if (['綁定', 'bind', '/bind', '開始綁定'].includes(text) || ['bind', '/bind'].includes(lower)) {
       await line.reply(replyToken, [line.bindEntryFlex({})]);
       return;
     }
-    if (['狀態', 'status', '查詢綁定'].includes(lower) || lower === '狀態') {
+    if (['狀態', 'status', '查詢綁定'].includes(text) || lower === 'status') {
       const { data } = await supabase
         .from('appointed_unit_bindings')
         .select('unit_name_snap, binding_role, status, bound_at')
         .eq('line_user_id', userId)
         .maybeSingle();
-      if (!data || data.status !== 'active') {
-        await line.reply(replyToken, [line.textMessage('您尚未綁定特約廠商，請輸入「綁定」開始。')]);
-      } else {
-        await line.reply(replyToken, [line.textMessage(
-          `已綁定：${data.unit_name_snap}\n身分：${data.binding_role === 'employee' ? '員工' : '管理員'}\n綁定時間：${new Date(data.bound_at).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })}`
-        )]);
-      }
+      // 沒綁過 → 不回任何訊息，避免騷擾一般使用者
+      if (!data || data.status !== 'active') return;
+      await line.reply(replyToken, [line.textMessage(
+        `已綁定：${data.unit_name_snap}\n身分：${data.binding_role === 'employee' ? '員工' : '管理員'}\n綁定時間：${new Date(data.bound_at).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei' })}`
+      )]);
       return;
     }
-    if (['解除綁定', '解綁', 'unbind'].includes(lower)) {
+    if (['解除綁定', '解綁', 'unbind'].includes(text) || lower === 'unbind') {
       const r = await auSvc.unbind({ lineUserId: userId, reason: 'user_request' });
       if (r.ok) {
-        await line.reply(replyToken, [line.textMessage('已解除綁定。如需重新綁定請輸入「綁定」。')]);
-      } else {
-        await line.reply(replyToken, [line.textMessage('您目前沒有綁定中的特約廠商。')]);
+        await line.reply(replyToken, [line.textMessage('已解除綁定。')]);
       }
+      // 沒綁定的人輸入「解綁」→ 不回應，避免無關使用者看到綁定相關提示
       return;
     }
-    // 其他文字 → 引導到 LIFF
-    await line.reply(replyToken, [
-      line.textMessage('指令：\n「綁定」開始綁定流程\n「狀態」查詢綁定資訊\n「解綁」解除綁定'),
-      line.bindEntryFlex({}),
-    ]);
+    // 其他文字 → 完全不回應（先前會自動推綁定卡片，現已關閉）
     return;
   }
 }
