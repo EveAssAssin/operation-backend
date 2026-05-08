@@ -116,7 +116,8 @@ async function enrichUnitCategories({ limit = 50 } = {}) {
 
 // ─── 同步：特約單位旗下會員 ────────────────────────────────────
 async function syncMembersForUnit(unitCode) {
-  const members = await lohas.getAppointedUnitMembers(unitCode);
+  const unit_code = String(unitCode);                          // 統一改 snake_case 給 row 用
+  const members = await lohas.getAppointedUnitMembers(unit_code);
   let inserted = 0, updated = 0;
   const seenClientIds = new Set();
   for (const m of members) {
@@ -135,7 +136,7 @@ async function syncMembersForUnit(unitCode) {
     const { data: existing } = await supabase
       .from('appointed_unit_members')
       .select('id')
-      .eq('unit_code', unitCode)
+      .eq('unit_code', unit_code)
       .eq('client_id', client_id)
       .maybeSingle();
     if (existing) {
@@ -150,7 +151,7 @@ async function syncMembersForUnit(unitCode) {
   const { data: localMembers } = await supabase
     .from('appointed_unit_members')
     .select('id, client_id')
-    .eq('unit_code', unitCode)
+    .eq('unit_code', unit_code)
     .eq('is_active', true);
   let deactivated = 0;
   for (const lm of (localMembers || [])) {
@@ -162,7 +163,7 @@ async function syncMembersForUnit(unitCode) {
       deactivated++;
     }
   }
-  return { unitCode, total: members.length, inserted, updated, deactivated };
+  return { unit_code, total: members.length, inserted, updated, deactivated };
 }
 
 async function syncAllMembers({ batchSize = 1000 } = {}) {
