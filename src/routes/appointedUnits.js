@@ -421,35 +421,52 @@ router.get('/broadcasts/:id', async (req, res) => {
   res.json({ success: true, data: { broadcast: bcast, recipients: recipients || [] } });
 });
 
-// 手動觸發 — 同步全部特約單位
-router.post('/sync/units', async (_req, res) => {
-  try {
-    const r = await auSvc.syncAllUnits();
-    res.json({ success: true, data: r });
-  } catch (e) {
-    res.status(500).json({ success: false, message: e.message });
+// ── 同步狀態快照（檔案層級記憶體變數，重啟會清掉，夠用了）─
+const _syncState = {
+  units:      { status: 'idle', startedAt: null, finishedAt: null, result: null, error: null },
+  members:    { status: 'idle', startedAt: null, finishedAt: null, result: null, error: null },
+  categories: { status: 'idle', startedAt: null, finishedAt: null, result: null, error: null },
+};
+function _runBg(name, fn) {
+  if (_syncState[name].status === 'running') {
+    return { ok: false, message: `${name} 同步正在進行中，請稍候` };
   }
+  _syncState[name] = { status: 'running', startedAt: new Date().toISOString(), finishedAt: null, result: null, error: null };
+  fn().then(r => {
+    _syncState[name] = { status: 'done', startedAt: _syncState[name].startedAt, finishedAt: new Date().toISOString(), result: r, error: null };
+    console.log(`[sync/${name}] 完成`, r);
+  }).catch(e => {
+    _syncState[name] = { status: 'failed', startedAt: _syncState[name].startedAt, finishedAt: new Date().toISOString(), result: null, error: e.message };
+    console.error(`[sync/${name}] 失敗`, e);
+  });
+  return { ok: true };
+}
+
+// 手動觸發 — 同步全部特約單位（背景跑，立即回應）
+router.post('/sync/units', (_req, res) => {
+  const r = _runBg('units', () => auSvc.syncAllUnits());
+  if (!r.ok) return res.status(409).json({ success: false, message: r.message });
+  res.json({ success: true, message: '單位同步已啟動，背景執行中（約 30 秒-1 分鐘），可在「同步狀態」查看進度' });
 });
 
 // 手動觸發 — 同步全部廠商員工
-router.post('/sync/members', async (_req, res) => {
-  try {
-    const r = await auSvc.syncAllMembers();
-    res.json({ success: true, data: r });
-  } catch (e) {
-    res.status(500).json({ success: false, message: e.message });
-  }
+router.post('/sync/members', (_req, res) => {
+  const r = _runBg('members', () => auSvc.syncAllMembers());
+  if (!r.ok) return res.status(409).json({ success: false, message: r.message });
+  res.json({ success: true, message: '員工同步已啟動，背景執行中（廠商多時可能要 3-5 分鐘）' });
 });
 
 // 手動觸發 — 用 25 號 API 補類別
-router.post('/sync/enrich-categories', async (req, res) => {
-  try {
-    const limit = Number(req.body?.limit || 100);
-    const r = await auSvc.enrichUnitCategories({ limit });
-    res.json({ success: true, data: r });
-  } catch (e) {
-    res.status(500).json({ success: false, message: e.message });
-  }
+router.post('/sync/enrich-categories', (req, res) => {
+  const limit = Number(req.body?.limit || 100);
+  const r = _runBg('categories', () => auSvc.enrichUnitCategories({ limit }));
+  if (!r.ok) return res.status(409).json({ success: false, message: r.message });
+  res.json({ success: true, message: '類別補抓已啟動，背景執行中' });
+});
+
+// 查詢同步狀態（給前端輪詢用）
+router.get('/sync/status', (_req, res) => {
+  res.json({ success: true, data: _syncState });
 });
 
 module.exports = router;
