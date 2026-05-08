@@ -1,11 +1,21 @@
 // routes/quests.js
-// 任務派發模組 — 營運部 → 市場部
-// 1. 建立任務：寫入本地 quests + 同步打市場部 /api/internal/quest/create
-// 2. 列表 / 詳情：讀本地 quests
-// 3. 重送：失敗的任務可再打一次
-// 4. Groups：代理市場部 /api/internal/quest/groups（給前端 dropdown）
+// 任務派發 + 審核模組 — 營運部 ↔ 市場部
 //
-// 需登入（authenticate 在 app.js 統一掛）；本檔只控角色
+// 派發：
+//   GET    /api/quests                      列出本地紀錄
+//   GET    /api/quests/:id                  詳情
+//   POST   /api/quests                      建立並送出
+//   POST   /api/quests/:id/resend           重送失敗的任務
+//   GET    /api/quests/groups               代理市場部 employee_groups
+//
+// 審核（市場部 internal API；reviewer 從 req.user 自動帶）：
+//   GET    /api/quests/submissions/pending          待審清單
+//   GET    /api/quests/submissions/reviewed         已審紀錄
+//   POST   /api/quests/submissions/:id/approve      通過
+//   POST   /api/quests/submissions/:id/reject       駁回（不可再交）
+//   POST   /api/quests/submissions/:id/reject-resubmit  退回重交
+//
+// authenticate 在 app.js 統一掛；本檔內限定角色。
 
 const express   = require('express');
 const router    = express.Router();
@@ -13,7 +23,6 @@ const supabase  = require('../config/supabase');
 const { authorize } = require('../middleware/auth');
 const marketQuest   = require('../services/marketQuestClient');
 
-// 角色：營運部員工以上可建任務
 router.use(authorize('operation_staff', 'operation_lead', 'dept_head', 'super_admin'));
 
 // ── 工具 ──────────────────────────────────────────────────────
@@ -41,23 +50,93 @@ function buildMarketPayload(quest, user) {
   };
 }
 
+function reviewerFromUser(user) {
+  return {
+    reviewer_name:      user?.name || '營運部',
+    reviewer_member_id: user?.member_id || user?.erpid || null,
+  };
+}
+
 // ════════════════════════════════════════════════════════════
-// GET /api/quests/groups
-// 代理市場部「列出 employee_groups」
-// query: include_members=1 → 順便帶回每組成員清單
+// 派發：GET /api/quests/groups
 // ════════════════════════════════════════════════════════════
 router.get('/groups', async (req, res) => {
   try {
     const includeMembers = req.query.include_members === '1' || req.query.include_members === 'true';
     const data = await marketQuest.listGroups({ includeMembers });
-    // 直接把市場部回應透傳：{ success, data: [...] }
     res.json(data);
   } catch (e) { fail(res, e, 'Quests/Groups'); }
 });
 
 // ════════════════════════════════════════════════════════════
-// GET /api/quests
-// 列出本地（營運部）發出的任務
+// 審核：GET /api/quests/submissions/pending
+// ════════════════════════════════════════════════════════════
+router.get('/submissions/pending', async (req, res) => {
+  try {
+    const data = await marketQuest.listPendingSubmissions();
+    res.json(data);
+  } catch (e) { fail(res, e, 'Quests/Pending'); }
+});
+
+// ════════════════════════════════════════════════════════════
+// 審核：GET /api/quests/submissions/reviewed?limit=50
+// ════════════════════════════════════════════════════════════
+router.get('/submissions/reviewed', async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+    const data = await marketQuest.listReviewedSubmissions({ limit });
+    res.json(data);
+  } catch (e) { fail(res, e, 'Quests/Reviewed'); }
+});
+
+// ════════════════════════════════════════════════════════════
+// 審核：POST /api/quests/submissions/:id/approve
+// reviewer_name / reviewer_member_id 從 req.user 自動帶（前端不需傳）
+// ════════════════════════════════════════════════════════════
+router.post('/submissions/:id/approve', async (req, res) => {
+  try {
+    const body = reviewerFromUser(req.user);
+    const data = await marketQuest.approveSubmission(req.params.id, body);
+    res.json(data);
+  } catch (e) { fail(res, e, 'Quests/Approve'); }
+});
+
+// ════════════════════════════════════════════════════════════
+// 審核：POST /api/quests/submissions/:id/reject
+// body: { reason }   reviewer_name 後端帶
+// ════════════════════════════════════════════════════════════
+router.post('/submissions/:id/reject', async (req, res) => {
+  try {
+    const reason = (req.body?.reason || '').trim();
+    if (!reason) return bad(res, '請填寫駁回理由');
+    const reviewer = reviewerFromUser(req.user);
+    const data = await marketQuest.rejectSubmission(req.params.id, {
+      reason,
+      reviewer_name: reviewer.reviewer_name,
+    });
+    res.json(data);
+  } catch (e) { fail(res, e, 'Quests/Reject'); }
+});
+
+// ════════════════════════════════════════════════════════════
+// 審核：POST /api/quests/submissions/:id/reject-resubmit
+// body: { reason }
+// ════════════════════════════════════════════════════════════
+router.post('/submissions/:id/reject-resubmit', async (req, res) => {
+  try {
+    const reason = (req.body?.reason || '').trim();
+    if (!reason) return bad(res, '請填寫退回理由');
+    const reviewer = reviewerFromUser(req.user);
+    const data = await marketQuest.rejectResubmitSubmission(req.params.id, {
+      reason,
+      reviewer_name: reviewer.reviewer_name,
+    });
+    res.json(data);
+  } catch (e) { fail(res, e, 'Quests/RejectResubmit'); }
+});
+
+// ════════════════════════════════════════════════════════════
+// 派發：GET /api/quests
 // query: status, limit (預設 50)
 // ════════════════════════════════════════════════════════════
 router.get('/', async (req, res) => {
@@ -81,8 +160,7 @@ router.get('/', async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════
-// GET /api/quests/:id
-// 任務詳情（含 request/response payload）
+// 派發：GET /api/quests/:id  詳情
 // ════════════════════════════════════════════════════════════
 router.get('/:id', async (req, res) => {
   try {
@@ -100,13 +178,9 @@ router.get('/:id', async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════
-// POST /api/quests
-// 建立任務 → 寫本地 + 同步打市場部
-// body: {
-//   title, description, task_deadline,
-//   award_points, required_submission,
-//   assignees: [{type:"group", group_id:"..."}]
-// }
+// 派發：POST /api/quests  建立並送出
+// body: { title, description, task_deadline, award_points,
+//         required_submission, assignees: [{type:"group", group_id:"..."}] }
 // ════════════════════════════════════════════════════════════
 router.post('/', async (req, res) => {
   try {
@@ -119,7 +193,6 @@ router.post('/', async (req, res) => {
       assignees,
     } = req.body || {};
 
-    // 驗證必填
     if (!title || !title.trim()) return bad(res, 'title 為必填');
     if (!task_deadline)         return bad(res, 'task_deadline 為必填（ISO 時間字串）');
     if (!Array.isArray(assignees) || assignees.length === 0) {
@@ -131,7 +204,6 @@ router.post('/', async (req, res) => {
       }
     }
 
-    // 1. 先寫本地（status=pending）拿 id 當 external_id
     const insertRow = {
       title: title.trim(),
       description: description || '',
@@ -155,7 +227,6 @@ router.post('/', async (req, res) => {
       .single();
     if (insErr) throw insErr;
 
-    // 2. 打市場部
     const payload = buildMarketPayload(created, req.user);
     let marketResp = null;
     let marketTaskId = null;
@@ -173,7 +244,6 @@ router.post('/', async (req, res) => {
       marketResp = err.response?.data || { error: err.message };
     }
 
-    // 3. 回寫本地
     const { data: updated, error: updErr } = await supabase
       .from('quests')
       .update({
@@ -197,8 +267,7 @@ router.post('/', async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════
-// POST /api/quests/:id/resend
-// 重送一筆 failed 的任務
+// 派發：POST /api/quests/:id/resend
 // ════════════════════════════════════════════════════════════
 router.post('/:id/resend', async (req, res) => {
   try {
