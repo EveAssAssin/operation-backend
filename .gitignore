@@ -1,3 +1,8 @@
 node_modules/
 .env
 .DS_Store
+
+# 臨時測試 / 沙盒中無法刪除的檔案
+test-lohas-tmp.js
+test-*.tmp.js
+*.tmp.mjs

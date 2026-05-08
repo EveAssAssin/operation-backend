@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/app.js",
     "dev": "nodemon src/app.js",
-    "job:sync-employees": "node src/jobs/syncEmployees.js"
+    "job:sync-employees": "node src/jobs/syncEmployees.js",
+    "job:sync-appointed-units": "node src/jobs/syncAppointedUnits.js"
   },
   "engines": {
     "node": ">=18.0.0"

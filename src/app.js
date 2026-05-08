@@ -31,7 +31,11 @@ app.use(cors({
   credentials: true,
 }));
 app.use(morgan('dev'));
-app.use(express.json({ limit: '5mb' }));
+app.use(express.json({
+  limit: '5mb',
+  // 把原始 body 留一份在 req.rawBody，給 LINE webhook 簽章驗證用
+  verify: (req, _res, buf) => { req.rawBody = buf.toString('utf8'); },
+}));
 
 // 速率限制
 app.use('/api/', rateLimit({
@@ -94,6 +98,9 @@ app.use('/api/recurring-expenses', authenticate, require('./routes/recurringExpe
 // 任務派發模組（送任務到市場部，需登入）
 app.use('/api/quests', authenticate, require('./routes/quests'));
 
+// 特約廠商模組（公開的 LIFF 綁定 + LINE webhook + 後台管理；內部自行處理 auth）
+app.use('/api/appointed-units', require('./routes/appointedUnits'));
+
 // ── 內部同步觸發（部署初期用，確認正常後可移除）──────
 app.post('/api/internal/sync', async (req, res) => {
   const { runEmployeeSync } = require('./services/personnelSync');
@@ -125,6 +132,7 @@ const { startBillingScheduledSync }           = require('./jobs/syncBilling');
 const { startHubPoller }                      = require('./jobs/hubPoller');
 const { startCheckNotifyJob }                 = require('./jobs/checkNotify');
 const { startRecurringExpenseNotifyJob }      = require('./jobs/notifyRecurringExpenses');
+const { startAppointedUnitJobs }              = require('./jobs/syncAppointedUnits');
 const { init: initHolidays }                  = require('./services/taiwanHolidayService');
 
 startScheduledSync();
@@ -133,6 +141,7 @@ startBillingScheduledSync();
 startHubPoller();                  // 每 5 分鐘自動掃 Hub 收件匣
 startCheckNotifyJob();             // 每天 10:00 支票到期通知
 startRecurringExpenseNotifyJob();  // 每天 09:00 常態費用到期通知
+startAppointedUnitJobs();          // 特約單位 / 廠商員工 同步
 initHolidays();                    // 預載台灣假日快取（本年 + 明年）
 
 // ── 錯誤處理 ──────────────────────────────────────────────
