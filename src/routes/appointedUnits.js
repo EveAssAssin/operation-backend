@@ -177,6 +177,26 @@ router.post('/bind/unbind', async (req, res) => {
   res.json(r);
 });
 
+// 依廠商名稱查代碼（公開，只回 unit_code / unit_name，避免洩露敏感資訊）
+//   - 至少 2 個字元
+//   - 最多回 10 筆
+router.post('/bind/lookup-code', async (req, res) => {
+  const keyword = String(req.body?.keyword || '').trim();
+  if (keyword.length < 2) {
+    return res.json({ ok: false, code: 'TOO_SHORT', message: '請輸入至少 2 個字元' });
+  }
+  // 把 % _ 等 LIKE 特殊字元跳掉，避免使用者亂搜誤觸萬用字元
+  const safe = keyword.replace(/[%_\\]/g, c => `\\${c}`);
+  const { data, error } = await supabase
+    .from('appointed_units')
+    .select('unit_code, unit_name, category_name')
+    .ilike('unit_name', `%${safe}%`)
+    .order('unit_name')
+    .limit(10);
+  if (error) return res.status(500).json({ ok: false, message: error.message });
+  res.json({ ok: true, results: data || [] });
+});
+
 // LIFF 設定（公開 — 給前端讀，不洩漏 secret）
 router.get('/config', (_req, res) => {
   res.json({
