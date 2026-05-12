@@ -154,62 +154,106 @@ async function syncChiFinanceLens(period) {
   }
 
   // 5. 寫入 bills + bill_allocations（每個門市一張 bill）
+  //    用「先查再 insert/update」明確處理，避開 partial unique index 與 onConflict 對應問題
   const now = new Date().toISOString();
   const unmappedBranches = [];
-  let syncedStores = 0;
+  const writeErrors = [];
+  let syncedStores = 0, insertedCount = 0, updatedCount = 0;
 
   for (const [branchName, stat] of Object.entries(perBranch)) {
     const store_erpid = lookupStoreErpid(branchName, branchMap);
     if (!store_erpid) {
-      // 找不到對照的門市 → 記下來，這月先跳
       unmappedBranches.push({ branch_name: branchName, net: stat.net });
       continue;
     }
     if (stat.net === 0 && stat.completionCount === 0 && stat.returnCount === 0) continue;
 
     const sourceRef = `chi-lens-${store_erpid}-${period}`;
-    const desc = `完成 ${stat.completionCount} 筆 NT$${totalCompletion.toLocaleString()}／退回 ${stat.returnCount} 筆 NT$${totalReturn.toLocaleString()}`;
+    const billPayload = {
+      source_id:        source.id,
+      period,
+      title:            `路奇天格鏡片費用 ${period} ${branchName}`,
+      total_amount:     stat.net,
+      description:      `完成 ${stat.completionCount} 筆 / 退回 ${stat.returnCount} 筆`,
+      status:           'confirmed',
+      source_ref:       sourceRef,
+      created_by_type:  'system',
+      confirmed_at:     now,
+      notes:            `自動同步自路奇天格 (chi-finance) ${period}`,
+      updated_at:       now,
+    };
 
-    const { data: bill, error: billErr } = await supabase
+    // 5-1. 找舊 bill
+    const { data: oldBill, error: findErr } = await supabase
       .from('bills')
-      .upsert(
-        {
-          source_id:        source.id,
-          period,
-          title:            `路奇天格鏡片費用 ${period} ${branchName}`,
-          total_amount:     stat.net,
-          description:      `完成 ${stat.completionCount} 筆 / 退回 ${stat.returnCount} 筆`,
-          status:           'confirmed',
-          source_ref:       sourceRef,
-          created_by_type:  'system',
-          confirmed_at:     now,
-          notes:            `自動同步自路奇天格 (chi-finance) ${period}`,
-          updated_at:       now,
-        },
-        { onConflict: 'source_ref', ignoreDuplicates: false }
-      )
       .select('id')
-      .single();
-
-    if (billErr || !bill) {
-      console.error(`[ChiLens] bills upsert 失敗 ${branchName}（${store_erpid}）：`, billErr?.message);
+      .eq('source_ref', sourceRef)
+      .maybeSingle();
+    if (findErr) {
+      writeErrors.push({ branch: branchName, step: 'find_bill', message: findErr.message });
       continue;
     }
 
-    const { error: allocErr } = await supabase
+    let billId;
+    if (oldBill) {
+      // 5-2a. 更新
+      const { error: updErr } = await supabase
+        .from('bills')
+        .update(billPayload)
+        .eq('id', oldBill.id);
+      if (updErr) {
+        writeErrors.push({ branch: branchName, step: 'update_bill', message: updErr.message });
+        continue;
+      }
+      billId = oldBill.id;
+      updatedCount++;
+    } else {
+      // 5-2b. 新建
+      const { data: newBill, error: insErr } = await supabase
+        .from('bills')
+        .insert([billPayload])
+        .select('id')
+        .single();
+      if (insErr || !newBill) {
+        writeErrors.push({ branch: branchName, step: 'insert_bill', message: insErr?.message || 'no row returned' });
+        continue;
+      }
+      billId = newBill.id;
+      insertedCount++;
+    }
+
+    // 5-3. allocation upsert（這張表 (bill_id, store_erpid) 有 UNIQUE 沒有 partial 條件，用 onConflict OK）
+    const { data: oldAlloc } = await supabase
       .from('bill_allocations')
-      .upsert(
-        {
-          bill_id:          bill.id,
+      .select('id')
+      .eq('bill_id', billId)
+      .eq('store_erpid', store_erpid)
+      .maybeSingle();
+
+    if (oldAlloc) {
+      const { error: aUpdErr } = await supabase
+        .from('bill_allocations')
+        .update({
+          store_name:       branchName,
+          allocated_amount: stat.net,
+          confirm_status:   'confirmed',
+          updated_at:       now,
+        })
+        .eq('id', oldAlloc.id);
+      if (aUpdErr) writeErrors.push({ branch: branchName, step: 'update_alloc', message: aUpdErr.message });
+    } else {
+      const { error: aInsErr } = await supabase
+        .from('bill_allocations')
+        .insert([{
+          bill_id:          billId,
           store_erpid,
           store_name:       branchName,
           allocated_amount: stat.net,
           confirm_status:   'confirmed',
           updated_at:       now,
-        },
-        { onConflict: 'bill_id, store_erpid', ignoreDuplicates: false }
-      );
-    if (allocErr) console.error(`[ChiLens] allocations upsert 失敗 ${branchName}：`, allocErr.message);
+        }]);
+      if (aInsErr) writeErrors.push({ branch: branchName, step: 'insert_alloc', message: aInsErr.message });
+    }
 
     syncedStores++;
   }
@@ -217,6 +261,8 @@ async function syncChiFinanceLens(period) {
   const result = {
     period,
     synced_stores:        syncedStores,
+    inserted_count:       insertedCount,
+    updated_count:        updatedCount,
     total_branches:       Object.keys(perBranch).length,
     completion_count:     groups.reduce((s, g) => s + (g.completions?.length || 0), 0),
     return_count:         groups.reduce((s, g) => s + (g.returns?.length || 0), 0),
@@ -224,6 +270,7 @@ async function syncChiFinanceLens(period) {
     total_return:         totalReturn,
     total_net:            totalCompletion - totalReturn,
     unmapped_branches:    unmappedBranches,
+    write_errors:         writeErrors,           // ⚠️ 寫入失敗時看這個欄位
   };
   console.log(`[ChiLens] ${period} 完成`, result);
   return result;
