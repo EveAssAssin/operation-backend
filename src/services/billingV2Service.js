@@ -41,14 +41,26 @@ async function getSourceById(id) {
 
 /**
  * 建立來源單位
+ *   - code 是 UNIQUE，空字串會撞鍵；統一把 ''/whitespace 規範化為 null
+ *   - 其他可能空字串的選填欄位也一起 normalize 成 null 避免日後 query 雜訊
  */
 async function createSource(payload) {
+  const cleaned = { ...payload };
+  for (const k of ['code', 'dept_erpid', 'contact_name', 'contact_phone', 'contact_email', 'api_start_period']) {
+    if (typeof cleaned[k] === 'string' && cleaned[k].trim() === '') cleaned[k] = null;
+  }
   const { data, error } = await supabase
     .from('billing_sources')
-    .insert({ ...payload, created_at: new Date().toISOString(), updated_at: new Date().toISOString() })
+    .insert({ ...cleaned, created_at: new Date().toISOString(), updated_at: new Date().toISOString() })
     .select()
     .single();
-  if (error) throw new Error(`建立來源單位失敗：${error.message}`);
+  if (error) {
+    // 友善訊息
+    if (/billing_sources_code_key/.test(error.message)) {
+      throw new Error('識別碼已被其他來源單位使用，請改用其他識別碼（可留空）');
+    }
+    throw new Error(`建立來源單位失敗：${error.message}`);
+  }
   return data;
 }
 
