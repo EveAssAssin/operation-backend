@@ -30,17 +30,44 @@ const API_URL = process.env.CHI_FINANCE_API_URL
   || 'https://chi-finance-system.onrender.com/api/public/lens-billing';
 const API_KEY = process.env.CHI_FINANCE_API_KEY || '';
 
+// 把不同命名規則的門市名稱正規化成可比對的 key
+//   "樂活潭子門市"  → "潭子"
+//   "潭子店"        → "潭子"
+//   "潭子門市"      → "潭子"
+//   "中部加工中心"  → "中部加工中心"（無對應商家會落 unmapped，保留原樣）
+function canonicalize(name) {
+  if (!name) return '';
+  let s = String(name).trim();
+  s = s.replace(/^樂活/, '');           // 去前綴
+  s = s.replace(/門市$|店$|分店$/, ''); // 去常見後綴
+  return s;
+}
+
 // 建立 branch_name → store_erpid 對照表（用 departments.store_name）
+//   為了兼容兩邊命名差異，同時建立「原樣」與「正規化」兩個查找路徑
 async function buildBranchMap() {
   const { data, error } = await supabase
     .from('departments')
     .select('store_erpid, store_name');
   if (error) throw new Error(`[ChiLens] departments 撈不到：${error.message}`);
-  const m = {};
+  const direct  = {};  // 完全相符（"潭子店" → erpid）
+  const canon   = {};  // 正規化後相符（"潭子" → erpid）
   for (const d of (data || [])) {
-    if (d.store_name) m[d.store_name] = d.store_erpid;
+    if (!d.store_name || !d.store_erpid) continue;
+    direct[d.store_name] = d.store_erpid;
+    const key = canonicalize(d.store_name);
+    if (key) canon[key] = d.store_erpid;
   }
-  return m;
+  return { direct, canon };
+}
+
+// 用兩段嘗試查 erpid：先看原樣是否吻合，再看正規化後是否吻合
+function lookupStoreErpid(branchName, branchMap) {
+  if (!branchName) return null;
+  if (branchMap.direct[branchName]) return branchMap.direct[branchName];
+  const key = canonicalize(branchName);
+  if (key && branchMap.canon[key]) return branchMap.canon[key];
+  return null;
 }
 
 // 取 chi-finance 該月份原始資料
@@ -132,7 +159,7 @@ async function syncChiFinanceLens(period) {
   let syncedStores = 0;
 
   for (const [branchName, stat] of Object.entries(perBranch)) {
-    const store_erpid = branchMap[branchName];
+    const store_erpid = lookupStoreErpid(branchName, branchMap);
     if (!store_erpid) {
       // 找不到對照的門市 → 記下來，這月先跳
       unmappedBranches.push({ branch_name: branchName, net: stat.net });
