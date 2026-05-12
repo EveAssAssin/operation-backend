@@ -29,13 +29,13 @@ const SOURCE_CODE = 'CHI-LENS';
 // ─── 手動別名表（chi-finance branch_name → 樂活 departments.store_name）─────
 // 給自動正規化抓不到的特殊命名用。新增別名時請維持「鍵 = chi-finance 名稱」格式
 const BRANCH_ALIASES = {
-  '樂活高大門市': '高應大店',  // chi-finance 用「高大」，內部叫「高應大」
+  '樂活高大門市': '高應大店',     // chi-finance 用「高大」，內部叫「高應大」
+  '中部加工中心': '中部加工中心',  // 對應 departments.store_erpid='00010' 的內部單位
 };
 
 // ─── 排除清單（不算入任何門市的內部單位）─────────────────────
-// chi-finance 內部的加工中心、總部之類，**不該變成樂活門市的帳**，整個忽略
+// 留空。未來如果有 chi-finance 端真的不想算進來的單位，加在這裡會直接忽略
 const SKIP_BRANCHES = new Set([
-  '中部加工中心',
 ]);
 
 const API_URL = process.env.CHI_FINANCE_API_URL
