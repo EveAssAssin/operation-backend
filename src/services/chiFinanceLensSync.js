@@ -151,26 +151,58 @@ async function syncChiFinanceLens(period) {
   // 3. 對照表
   const branchMap = await buildBranchMap();
 
-  // 4. 彙總：依 branch_name 加總（completions 加、returns 減）
-  const perBranch = {};   // branch_name → { net, completionCount, returnCount }
+  // 4. 彙總：依 branch_name 加總（completions 加、returns 減）+ 收集明細
+  const perBranch = {};   // branch_name → { net, completionCount, returnCount, items: [] }
   let totalCompletion = 0, totalReturn = 0;
   for (const g of groups) {
     for (const c of (g.completions || [])) {
       const name = c.branch_name || '(未知門市)';
-      perBranch[name] ??= { net: 0, completionCount: 0, returnCount: 0 };
+      perBranch[name] ??= { net: 0, completionCount: 0, returnCount: 0, items: [] };
       const amt = Number(c.client_total) || 0;
       perBranch[name].net += amt;
       perBranch[name].completionCount += 1;
+      perBranch[name].items.push({
+        type:           'completion',
+        seq_no:         c.seq_no,
+        item_date:      c.item_date,
+        customer_order: c.customer_order,
+        doc_number:     c.doc_number,
+        product_spec:   c.product_spec,
+        quantity:       Number(c.quantity) || 0,
+        markup:         Number(c.markup) || 0,
+        unit_price:     Number(c.client_unit_price) || 0,
+        total:          amt,
+      });
       totalCompletion += amt;
     }
     for (const r of (g.returns || [])) {
       const name = r.branch_name || '(未知門市)';
-      perBranch[name] ??= { net: 0, completionCount: 0, returnCount: 0 };
+      perBranch[name] ??= { net: 0, completionCount: 0, returnCount: 0, items: [] };
       const amt = Number(r.client_total) || 0;
       perBranch[name].net -= amt;
       perBranch[name].returnCount += 1;
+      perBranch[name].items.push({
+        type:           'return',
+        seq_no:         r.seq_no,
+        item_date:      r.item_date,
+        customer_order: r.customer_order,
+        doc_number:     r.doc_number,
+        product_spec:   r.product_spec,
+        quantity:       Number(r.quantity) || 0,
+        markup:         Number(r.markup) || 0,
+        unit_price:     Number(r.client_unit_price) || 0,
+        total:          -amt,   // 退回用負數，呈現時方便加總
+      });
       totalReturn += amt;
     }
+  }
+  // 把每家明細按日期 + seq 排序
+  for (const b of Object.values(perBranch)) {
+    b.items.sort((a, b) => {
+      const d = (a.item_date || '').localeCompare(b.item_date || '');
+      if (d !== 0) return d;
+      return (a.seq_no || 0) - (b.seq_no || 0);
+    });
   }
 
   // 5. 寫入 bills + bill_allocations（每個門市一張 bill）
@@ -203,6 +235,7 @@ async function syncChiFinanceLens(period) {
       description:      `完成 ${stat.completionCount} 筆 / 退回 ${stat.returnCount} 筆`,
       status:           'confirmed',
       source_ref:       sourceRef,
+      items:            stat.items,                 // 把該門市明細存進 JSONB
       created_by_type:  'system',
       confirmed_at:     now,
       notes:            `自動同步自路奇天格 (chi-finance) ${period}`,
