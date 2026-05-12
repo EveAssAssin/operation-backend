@@ -181,6 +181,51 @@ router.post('/sync/ad', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
+// POST /api/billing/sync/chi-finance-lens
+// 同步路奇天格鏡片帳單（chi-finance）
+// Body: { month: 'YYYY-MM' } 或 { period: 'YYYY-MM' }
+// ─────────────────────────────────────────────────────────────
+router.post('/sync/chi-finance-lens', async (req, res) => {
+  const period = req.body?.period || req.body?.month;
+  if (!period || !/^\d{4}-\d{2}$/.test(period)) {
+    return res.status(400).json({ success: false, message: 'month 必填，格式 YYYY-MM' });
+  }
+  res.json({ success: true, message: `路奇天格鏡片帳單同步已啟動（${period}），背景執行中` });
+  try {
+    const { syncChiFinanceLens } = require('../services/chiFinanceLensSync');
+    const result = await syncChiFinanceLens(period);
+    console.log(`[Billing] 路奇天格同步完成（${period}）`, result);
+  } catch (err) {
+    console.error('[Billing] 路奇天格同步失敗：', err.message);
+  }
+});
+
+// 同步狀態查詢（給前端 polling 用，最近一次同步結果）
+const _chiLensStatus = { lastRunAt: null, lastResult: null, lastError: null };
+router.get('/sync/chi-finance-lens/status', (_req, res) => {
+  res.json({ success: true, data: _chiLensStatus });
+});
+// 同步觸發後把結果存進 _chiLensStatus（同上 POST，但用同步取回）
+router.post('/sync/chi-finance-lens/sync-now', async (req, res) => {
+  const period = req.body?.period || req.body?.month;
+  if (!period || !/^\d{4}-\d{2}$/.test(period)) {
+    return res.status(400).json({ success: false, message: 'month 必填，格式 YYYY-MM' });
+  }
+  try {
+    const { syncChiFinanceLens } = require('../services/chiFinanceLensSync');
+    const result = await syncChiFinanceLens(period);
+    _chiLensStatus.lastRunAt = new Date().toISOString();
+    _chiLensStatus.lastResult = result;
+    _chiLensStatus.lastError = null;
+    res.json({ success: true, data: result });
+  } catch (err) {
+    _chiLensStatus.lastRunAt = new Date().toISOString();
+    _chiLensStatus.lastError = err.message;
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
 // GET /api/billing/debug?month=YYYY-MM
 // 直接打市場 API，回傳原始結果，不寫 DB（除錯用）
 // ─────────────────────────────────────────────────────────────

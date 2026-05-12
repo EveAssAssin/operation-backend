@@ -135,6 +135,12 @@ async function syncMonth(month, syncType = 'manual') {
       console.warn(`[AdBudget] 月份 ${month} 同步失敗（不影響主流程）：${err.message}`)
     );
 
+    // 同步路奇天格鏡片帳單（CHI_FINANCE_API_KEY 未設定 / 來源未建立時自動跳過）
+    const { syncChiFinanceLens } = require('./chiFinanceLensSync');
+    await syncChiFinanceLens(month).catch(err =>
+      console.warn(`[ChiLens] 月份 ${month} 同步失敗（不影響主流程）：${err.message}`)
+    );
+
     // 同步完後，自動彙總寫入 bills v2
     await syncOrdersToBills(month).catch(err =>
       console.warn(`[BillingV2Sync] syncOrdersToBills 失敗（不影響主流程）：${err.message}`)
@@ -209,6 +215,18 @@ async function incrementalSync() {
           console.warn(`[BillingV2Sync] 增量 syncOrdersToBills(${m}) 失敗：${err.message}`)
         );
       }
+    }
+
+    // 增量同步額外加掛：路奇天格鏡片帳單（同步本月與上月，避免漏單）
+    const { syncChiFinanceLens } = require('./chiFinanceLensSync');
+    const now = new Date();
+    const cur  = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const prevStr = `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}`;
+    for (const m of [prevStr, cur]) {
+      await syncChiFinanceLens(m).catch(err =>
+        console.warn(`[ChiLens] 增量 ${m} 同步失敗（不影響主流程）：${err.message}`)
+      );
     }
 
     await writeSyncLog({
