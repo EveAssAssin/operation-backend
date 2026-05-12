@@ -26,6 +26,18 @@ const supabase = require('../config/supabase');
 
 const SOURCE_CODE = 'CHI-LENS';
 
+// ─── 手動別名表（chi-finance branch_name → 樂活 departments.store_name）─────
+// 給自動正規化抓不到的特殊命名用。新增別名時請維持「鍵 = chi-finance 名稱」格式
+const BRANCH_ALIASES = {
+  '樂活高大門市': '高應大店',  // chi-finance 用「高大」，內部叫「高應大」
+};
+
+// ─── 排除清單（不算入任何門市的內部單位）─────────────────────
+// chi-finance 內部的加工中心、總部之類，**不該變成樂活門市的帳**，整個忽略
+const SKIP_BRANCHES = new Set([
+  '中部加工中心',
+]);
+
 const API_URL = process.env.CHI_FINANCE_API_URL
   || 'https://chi-finance-system.onrender.com/api/public/lens-billing';
 const API_KEY = process.env.CHI_FINANCE_API_KEY || '';
@@ -61,10 +73,18 @@ async function buildBranchMap() {
   return { direct, canon };
 }
 
-// 用兩段嘗試查 erpid：先看原樣是否吻合，再看正規化後是否吻合
+// 三段查 erpid：
+//   1. 別名表（最高優先）
+//   2. 原樣相符
+//   3. 正規化後相符
 function lookupStoreErpid(branchName, branchMap) {
   if (!branchName) return null;
+  // 1. 別名表
+  const aliased = BRANCH_ALIASES[branchName];
+  if (aliased && branchMap.direct[aliased]) return branchMap.direct[aliased];
+  // 2. 原樣
   if (branchMap.direct[branchName]) return branchMap.direct[branchName];
+  // 3. 正規化
   const key = canonicalize(branchName);
   if (key && branchMap.canon[key]) return branchMap.canon[key];
   return null;
@@ -157,10 +177,16 @@ async function syncChiFinanceLens(period) {
   //    用「先查再 insert/update」明確處理，避開 partial unique index 與 onConflict 對應問題
   const now = new Date().toISOString();
   const unmappedBranches = [];
+  const skippedBranches = [];      // 在 SKIP_BRANCHES 中的，已被刻意忽略
   const writeErrors = [];
   let syncedStores = 0, insertedCount = 0, updatedCount = 0;
 
   for (const [branchName, stat] of Object.entries(perBranch)) {
+    // 排除：chi-finance 內部單位（如「中部加工中心」），不算進任何門市帳
+    if (SKIP_BRANCHES.has(branchName)) {
+      skippedBranches.push({ branch_name: branchName, net: stat.net });
+      continue;
+    }
     const store_erpid = lookupStoreErpid(branchName, branchMap);
     if (!store_erpid) {
       unmappedBranches.push({ branch_name: branchName, net: stat.net });
@@ -270,6 +296,7 @@ async function syncChiFinanceLens(period) {
     total_return:         totalReturn,
     total_net:            totalCompletion - totalReturn,
     unmapped_branches:    unmappedBranches,
+    skipped_branches:     skippedBranches,       // chi-finance 內部單位，刻意排除
     write_errors:         writeErrors,           // ⚠️ 寫入失敗時看這個欄位
   };
   console.log(`[ChiLens] ${period} 完成`, result);
