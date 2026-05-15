@@ -101,6 +101,12 @@ app.use('/api/quests', authenticate, require('./routes/quests'));
 // 特約廠商模組（公開的 LIFF 綁定 + LINE webhook + 後台管理；內部自行處理 auth）
 app.use('/api/appointed-units', require('./routes/appointedUnits'));
 
+// 各類流程模組
+//   公開端點（QR 掃描後填寫，不需登入，由 line_uid 驗證）
+app.use('/api/processes/public', require('./routes/processes/public'));
+//   管理端（需登入）
+app.use('/api/processes', authenticate, require('./routes/processes/admin'));
+
 // ── 內部同步觸發（部署初期用，確認正常後可移除）──────
 app.post('/api/internal/sync', async (req, res) => {
   const { runEmployeeSync } = require('./services/personnelSync');
