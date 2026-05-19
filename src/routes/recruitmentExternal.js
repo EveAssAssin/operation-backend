@@ -5,9 +5,31 @@
 const express  = require('express');
 const router   = express.Router();
 const supabase = require('../config/supabase');
+const { pushToUsers } = require('../services/linePushService');
 
 const MARKET_API_KEY    = process.env.MARKET_RECRUITMENT_API_KEY    || '';
 const EDUCATION_API_KEY = process.env.EDUCATION_RECRUITMENT_API_KEY || '';
+
+// ── 推播給營運部 staff（共用工具）─────────────────────────
+async function notifyOperationStaff(message) {
+  try {
+    const { data: staffs, error } = await supabase
+      .from('system_users')
+      .select('member_id')
+      .in('role', ['operation_staff', 'operation_lead'])
+      .eq('is_active', true);
+    if (error) throw error;
+    const appNumbers = (staffs || []).map(s => s.member_id).filter(Boolean);
+    if (appNumbers.length === 0) {
+      console.log('[Recruitment Notify] 無營運部 staff 可推播');
+      return;
+    }
+    await pushToUsers(appNumbers, message);
+    console.log(`[Recruitment Notify] 已推播給 ${appNumbers.length} 人`);
+  } catch (err) {
+    console.error('[Recruitment Notify] 推播失敗：', err.message);
+  }
+}
 
 // ── API Key 驗證 middleware（市場部）──────────────────────
 function verifyMarketKey(req, res, next) {
@@ -93,6 +115,20 @@ router.post('/needs', verifyMarketKey, async (req, res) => {
     if (error) throw error;
 
     console.log(`[Recruitment] 市場部 API 新增需求：${store_name} 缺 ${total_needed} 人`);
+
+    // 推播給營運部 staff（fire-and-forget，不阻塞回應）
+    const urgentText = Number(urgent_needed) > 0 ? `（其中急缺 ${urgent_needed} 人）` : '';
+    const noteText   = note ? `\n備註：${note}` : '';
+    const message =
+      `📣 市場部新人力需求\n` +
+      `${'─'.repeat(20)}\n` +
+      `門市：${store_name}\n` +
+      `需求人數：${total_needed} 人${urgentText}` +
+      noteText +
+      `\n${'─'.repeat(20)}\n` +
+      `請至「人力招募」確認並安排。`;
+    notifyOperationStaff(message); // 不 await
+
     res.json({ success: true, data });
 
   } catch (e) {
