@@ -258,7 +258,7 @@ async function incrementalSync() {
 async function getMonthSummary(month) {
   const { data, error } = await supabase
     .from('billing_orders')
-    .select('store_erpid, source_type, amount, billing_category')
+    .select('store_erpid, source_type, amount, billing_category, items')
     .eq('billing_month', month);
 
   if (error) throw new Error(`[BillingService] 查詢彙總失敗：${error.message}`);
@@ -278,6 +278,8 @@ async function getMonthSummary(month) {
         education_amount:    0,
         ad_count:            0,
         ad_amount:           0,
+        material_cost_total: 0,  // 材料費合計（從 items 細項加總）
+        labor_cost_total:    0,  // 工資合計（從 items 細項加總）
         total_count:         0,
         total_amount:        0,
       };
@@ -306,6 +308,14 @@ async function getMonthSummary(month) {
     }
     s.total_count  += 1;
     s.total_amount += Number(row.amount);
+
+    // 從 items 細項加總材料費 / 工資（只有 maintenance / repair 有 items）
+    if (Array.isArray(row.items)) {
+      for (const it of row.items) {
+        s.material_cost_total += Number(it?.material_cost || 0);
+        s.labor_cost_total    += Number(it?.labor_cost    || 0);
+      }
+    }
   }
 
   return Object.values(map).sort((a, b) =>
