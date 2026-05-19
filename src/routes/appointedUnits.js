@@ -112,7 +112,11 @@ router.post('/bind/status', async (req, res) => {
 
 // 員工綁定
 router.post('/bind/employee', async (req, res) => {
-  const { line_user_id, unit_code, mobile_last4, display_name, picture_url } = req.body || {};
+  const {
+    line_user_id, unit_code, mobile_last4, display_name, picture_url,
+    introducer_store_erpid, introducer_store_name,
+    introducer_member_id,   introducer_member_name,
+  } = req.body || {};
   try {
     const r = await auSvc.bindAsEmployee({
       lineUserId:  line_user_id,
@@ -120,6 +124,10 @@ router.post('/bind/employee', async (req, res) => {
       mobileLast4: mobile_last4,
       displayName: display_name,
       pictureUrl:  picture_url,
+      introducerStoreErpid: introducer_store_erpid,
+      introducerStoreName:  introducer_store_name,
+      introducerMemberId:   introducer_member_id,
+      introducerMemberName: introducer_member_name,
     });
     if (!r.ok) return res.status(400).json(r);
     // 推送一條歡迎訊息
@@ -137,7 +145,11 @@ router.post('/bind/employee', async (req, res) => {
 
 // 管理員綁定（一次性綁定碼）
 router.post('/bind/admin', async (req, res) => {
-  const { line_user_id, unit_code, bind_code, display_name, picture_url } = req.body || {};
+  const {
+    line_user_id, unit_code, bind_code, display_name, picture_url,
+    introducer_store_erpid, introducer_store_name,
+    introducer_member_id,   introducer_member_name,
+  } = req.body || {};
   try {
     const r = await auSvc.bindAsAdmin({
       lineUserId:  line_user_id,
@@ -145,6 +157,10 @@ router.post('/bind/admin', async (req, res) => {
       bindCode:    bind_code,
       displayName: display_name,
       pictureUrl:  picture_url,
+      introducerStoreErpid: introducer_store_erpid,
+      introducerStoreName:  introducer_store_name,
+      introducerMemberId:   introducer_member_id,
+      introducerMemberName: introducer_member_name,
     });
     if (!r.ok) return res.status(400).json(r);
     try {
@@ -185,6 +201,49 @@ router.post('/bind/lookup-code', async (req, res) => {
     .limit(10);
   if (error) return res.status(500).json({ ok: false, message: error.message });
   res.json({ ok: true, results: data || [] });
+});
+
+// ── 公開：介紹門市清單（LIFF 綁定下拉用）─────────────────
+//   只回 store_erpid + store_name，去重，排序
+router.get('/bind/introducer-stores', async (_req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('employees')
+      .select('store_erpid, store_name')
+      .eq('is_active', true)
+      .not('store_erpid', 'is', null)
+      .not('store_name',  'is', null);
+    if (error) throw error;
+    const map = new Map();
+    (data || []).forEach(r => {
+      if (r.store_erpid && r.store_name && !map.has(r.store_erpid)) {
+        map.set(r.store_erpid, { store_erpid: r.store_erpid, store_name: r.store_name });
+      }
+    });
+    const list = [...map.values()].sort((a, b) => a.store_name.localeCompare(b.store_name, 'zh-TW'));
+    res.json({ ok: true, data: list });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message });
+  }
+});
+
+// ── 公開：依門市取員工清單（LIFF 綁定下拉用，介紹人選擇）─
+router.get('/bind/introducer-staff', async (req, res) => {
+  const storeErpid = String(req.query.store_erpid || '').trim();
+  if (!storeErpid) return res.status(400).json({ ok: false, message: 'store_erpid 必填' });
+  try {
+    const { data, error } = await supabase
+      .from('employees')
+      .select('app_number, name, jobtitle')
+      .eq('is_active', true)
+      .eq('store_erpid', storeErpid)
+      .not('app_number', 'is', null)
+      .order('name', { ascending: true });
+    if (error) throw error;
+    res.json({ ok: true, data: data || [] });
+  } catch (e) {
+    res.status(500).json({ ok: false, message: e.message });
+  }
 });
 
 // LIFF 設定（公開 — 給前端讀，不洩漏 secret）

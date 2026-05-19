@@ -189,7 +189,10 @@ async function syncAllMembers({ batchSize = 1000 } = {}) {
 }
 
 // ─── 綁定：員工流程（廠商代碼 + 手機末 4 碼）────────────────────
-async function bindAsEmployee({ lineUserId, unitCode, mobileLast4, displayName, pictureUrl }) {
+async function bindAsEmployee({
+  lineUserId, unitCode, mobileLast4, displayName, pictureUrl,
+  introducerStoreErpid, introducerStoreName, introducerMemberId, introducerMemberName,
+}) {
   if (!lineUserId || !unitCode || !mobileLast4) {
     return { ok: false, code: 'MISSING', message: '參數不完整' };
   }
@@ -253,6 +256,11 @@ async function bindAsEmployee({ lineUserId, unitCode, mobileLast4, displayName, 
     last_active_at:     new Date().toISOString(),
     unbound_at:         null,
     unbound_reason:     null,
+    // 介紹門市 / 介紹人
+    introducer_store_erpid: introducerStoreErpid || null,
+    introducer_store_name:  introducerStoreName  || null,
+    introducer_member_id:   introducerMemberId   || null,
+    introducer_member_name: introducerMemberName || null,
   };
   if (existing) {
     await supabase.from('appointed_unit_bindings').update(row).eq('id', existing.id);
@@ -263,7 +271,10 @@ async function bindAsEmployee({ lineUserId, unitCode, mobileLast4, displayName, 
 }
 
 // ─── 綁定：管理員流程（廠商代碼 + 一次性綁定碼）─────────────────
-async function bindAsAdmin({ lineUserId, unitCode, bindCode, displayName, pictureUrl }) {
+async function bindAsAdmin({
+  lineUserId, unitCode, bindCode, displayName, pictureUrl,
+  introducerStoreErpid, introducerStoreName, introducerMemberId, introducerMemberName,
+}) {
   if (!lineUserId || !unitCode || !bindCode) {
     return { ok: false, code: 'MISSING', message: '參數不完整' };
   }
@@ -309,6 +320,11 @@ async function bindAsAdmin({ lineUserId, unitCode, bindCode, displayName, pictur
     last_active_at:    new Date().toISOString(),
     unbound_at:        null,
     unbound_reason:    null,
+    // 介紹門市 / 介紹人
+    introducer_store_erpid: introducerStoreErpid || null,
+    introducer_store_name:  introducerStoreName  || null,
+    introducer_member_id:   introducerMemberId   || null,
+    introducer_member_name: introducerMemberName || null,
   };
   let bindingId;
   if (existing) {
