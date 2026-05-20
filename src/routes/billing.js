@@ -230,6 +230,49 @@ router.post('/sync/chi-finance-lens/sync-now', async (req, res) => {
 // 直接打市場 API，回傳原始結果，不寫 DB（除錯用）
 // ─────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────
+// GET /api/billing/ad-debug?month=YYYY-MM
+// 直接打廣告費 API 回原始結果（不寫 DB）— 用來確認資料來源狀態
+// ─────────────────────────────────────────────────────────────
+router.get('/ad-debug', async (req, res) => {
+  const axios = require('axios');
+  const month = req.query.month || new Date().toISOString().slice(0, 7);
+  const url   = process.env.AD_BUDGET_API_URL;
+  if (!url) {
+    return res.status(503).json({ success: false, message: 'AD_BUDGET_API_URL 未設定' });
+  }
+  const target = `${url}/ad-budgets/public/campaigns?month=${month}`;
+  try {
+    const resp = await axios.get(target, { timeout: 15000 });
+    const raw  = resp.data;
+    const campaigns = Array.isArray(raw?.campaigns) ? raw.campaigns
+                     : Array.isArray(raw)            ? raw
+                     : null;
+    res.json({
+      success:        true,
+      called_url:     target,
+      http_status:    resp.status,
+      resp_type:      typeof raw,
+      resp_is_array:  Array.isArray(raw),
+      resp_top_keys:  raw && typeof raw === 'object' && !Array.isArray(raw) ? Object.keys(raw) : null,
+      campaigns_count: campaigns ? campaigns.length : '無 campaigns 欄位',
+      first_campaign: campaigns?.[0] || null,
+      // 萬一格式怪，把整個 raw 截短回傳
+      raw_preview: typeof raw === 'string' ? raw.slice(0, 500) : raw,
+    });
+  } catch (err) {
+    res.status(500).json({
+      success:     false,
+      called_url:  target,
+      message:     err.message,
+      http_status: err.response?.status || null,
+      resp_data:   typeof err.response?.data === 'string'
+                     ? err.response.data.slice(0, 500)
+                     : err.response?.data || null,
+    });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
 // GET /api/billing/env-check
 // 檢查相關環境變數有沒有設（只回 boolean，不洩漏值）
 // ─────────────────────────────────────────────────────────────
