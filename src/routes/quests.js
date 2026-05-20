@@ -36,6 +36,11 @@ function fail(res, e, prefix = 'Quests') {
 }
 
 function buildMarketPayload(quest, user) {
+  // reviewer_member_ids：先用 quest 自帶（未來可前端選），否則 fallback 目前登入者
+  const reviewerIds = Array.isArray(quest.reviewer_member_ids) && quest.reviewer_member_ids.length
+    ? quest.reviewer_member_ids
+    : [user?.member_id].filter(Boolean);
+
   return {
     title:               quest.title,
     description:         quest.description || '',
@@ -47,6 +52,7 @@ function buildMarketPayload(quest, user) {
     award_points:        quest.award_points !== false,
     assignees:           quest.assignees,
     required_submission: quest.required_submission || ['text'],
+    reviewer_member_ids: reviewerIds,
   };
 }
 
