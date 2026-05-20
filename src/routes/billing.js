@@ -230,6 +230,55 @@ router.post('/sync/chi-finance-lens/sync-now', async (req, res) => {
 // 直接打市場 API，回傳原始結果，不寫 DB（除錯用）
 // ─────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────
+// POST /api/billing/ad-sync-debug?month=YYYY-MM
+// 同步執行 syncAdBudget 並回報結果（包含 DB 寫入後的實際筆數）
+// 不論 sync 成功失敗都回 JSON（不像 /sync/ad 是 fire-and-forget）
+// ─────────────────────────────────────────────────────────────
+router.post('/ad-sync-debug', async (req, res) => {
+  const supabase = require('../config/supabase');
+  const month = req.body?.month || req.query.month || new Date().toISOString().slice(0, 7);
+  try {
+    const { syncAdBudget } = require('../services/adBudgetSync');
+    const syncResult = await syncAdBudget(month);
+
+    // 查實際寫入的筆數
+    const { count, error: countErr } = await supabase
+      .from('billing_orders')
+      .select('id', { count: 'exact', head: true })
+      .eq('billing_month', month)
+      .eq('source_type', 'ad_budget');
+
+    // 取前 5 筆 sample 看 store_erpid 對應狀況
+    const { data: samples } = await supabase
+      .from('billing_orders')
+      .select('order_id, store_erpid, amount, billing_category, remark')
+      .eq('billing_month', month)
+      .eq('source_type', 'ad_budget')
+      .limit(5);
+
+    // 看 store_erpid 是不是大量出現 'ad-store-N' fallback（代表 storeNameMap 對不上）
+    const fallbackCount = (samples || []).filter(s => s.store_erpid?.startsWith('ad-store-')).length;
+
+    res.json({
+      success:        true,
+      month,
+      sync_result:    syncResult,
+      rows_in_db:     count || 0,
+      count_err:      countErr?.message || null,
+      sample_count:   samples?.length || 0,
+      fallback_count_in_samples: fallbackCount,
+      samples:        samples || [],
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      message: err.message,
+      stack:   err.stack?.split('\n').slice(0, 6),
+    });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
 // GET /api/billing/ad-debug?month=YYYY-MM
 // 直接打廣告費 API 回原始結果（不寫 DB）— 用來確認資料來源狀態
 // ─────────────────────────────────────────────────────────────
