@@ -56,6 +56,7 @@ router.post('/needs', async (req, res) => {
         urgent_needed: Number(urgent_needed) || 0,
         note: note || null,
         source: 'manual',
+        created_by_app_number: req.user?.member_id || null,
       })
       .select()
       .single();
@@ -98,21 +99,36 @@ router.patch('/needs/:id', async (req, res) => {
 // 履歷投遞者
 // ════════════════════════════════════════════════════════════
 
-// GET /api/recruitment/applicants?date=YYYY-MM-DD&platform=&status=&all=true
-// date 不帶時只取今日；all=true 時取全部（不限日期）
+// GET /api/recruitment/applicants?date=YYYY-MM-DD&month=YYYY-MM&platform=&status=&all=true
+// 篩選優先序：all > month > date（不帶 = 今日）
 router.get('/applicants', async (req, res) => {
   try {
-    const { date, platform, status, all } = req.query;
+    const { date, month, platform, status, all } = req.query;
     let q = supabase
       .from('recruitment_applicants')
       .select('*, recruitment_interviews(*)')
       .order('date',       { ascending: false })
       .order('created_at', { ascending: false });
 
-    // all=true 不過濾日期；否則以 date 參數過濾（前端若帶空字串也視為不過濾）
-    if (!all && date) q = q.eq('date', date);
-    if (platform)     q = q.eq('platform', platform);
-    if (status)       q = q.eq('status', status);
+    // all=true → 不過濾日期
+    // month=YYYY-MM → 該月份所有資料
+    // date=YYYY-MM-DD → 該日
+    // 都沒帶 → 今日
+    if (all === 'true' || all === true) {
+      // 不過濾
+    } else if (month && /^\d{4}-\d{2}$/.test(month)) {
+      // 該月 1 號到月底
+      const [y, m] = month.split('-').map(Number);
+      const start = `${month}-01`;
+      const end   = new Date(y, m, 0).getDate();
+      const endStr = `${month}-${String(end).padStart(2, '0')}`;
+      q = q.gte('date', start).lte('date', endStr);
+    } else if (date) {
+      q = q.eq('date', date);
+    }
+
+    if (platform) q = q.eq('platform', platform);
+    if (status)   q = q.eq('status', status);
 
     const { data, error } = await q;
     if (error) throw error;
@@ -254,10 +270,40 @@ router.delete('/applicants/:id', async (req, res) => {
 // 面試紀錄
 // ════════════════════════════════════════════════════════════
 
-// GET /api/recruitment/interviews?result=
+// GET /api/recruitment/interviews?result=&month=YYYY-MM
+// 篩選 month 時用 interview_date（面試日）為基準；沒設面試日的也會被排除
 router.get('/interviews', async (req, res) => {
   try {
-    const { result } = req.query;
+    const { result, month } = req.query;
+
+    if (month && /^\d{4}-\d{2}$/.test(month)) {
+      // 月份篩選：用 applicant 的 interview_date 字段
+      const [y, m] = month.split('-').map(Number);
+      const start = `${month}-01`;
+      const end   = new Date(y, m, 0).getDate();
+      const endStr = `${month}-${String(end).padStart(2, '0')}`;
+
+      let q = supabase
+        .from('recruitment_interviews')
+        .select(`
+          *,
+          recruitment_applicants!inner (
+            id, name, code, platform, date, phone,
+            target_store_erpid, target_store_name, interview_date, interview_time
+          )
+        `)
+        .gte('recruitment_applicants.interview_date', start)
+        .lte('recruitment_applicants.interview_date', endStr)
+        .order('created_at', { ascending: false });
+
+      if (result === 'pending') q = q.is('result', null);
+      else if (result)          q = q.eq('result', result);
+
+      const { data, error } = await q;
+      if (error) throw error;
+      return ok(res, data);
+    }
+
     let q = supabase
       .from('recruitment_interviews')
       .select(`

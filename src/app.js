@@ -138,6 +138,7 @@ const { startBillingScheduledSync }           = require('./jobs/syncBilling');
 const { startHubPoller }                      = require('./jobs/hubPoller');
 const { startCheckNotifyJob }                 = require('./jobs/checkNotify');
 const { startRecurringExpenseNotifyJob }      = require('./jobs/notifyRecurringExpenses');
+const { startDuplicateNeedsNotifyJob }        = require('./jobs/notifyDuplicateNeeds');
 const { startAppointedUnitJobs }              = require('./jobs/syncAppointedUnits');
 const { init: initHolidays }                  = require('./services/taiwanHolidayService');
 
@@ -147,6 +148,7 @@ startBillingScheduledSync();
 startHubPoller();                  // 每 5 分鐘自動掃 Hub 收件匣
 startCheckNotifyJob();             // 每天 10:00 支票到期通知
 startRecurringExpenseNotifyJob();  // 每天 09:00 常態費用到期通知
+startDuplicateNeedsNotifyJob();    // 每天 11:00 重複人力需求提醒
 startAppointedUnitJobs();          // 特約單位 / 廠商員工 同步
 initHolidays();                    // 預載台灣假日快取（本年 + 明年）
 
