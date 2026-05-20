@@ -229,6 +229,14 @@ async function incrementalSync() {
       );
     }
 
+    // 增量同步額外加掛：企劃部廣告費（同步本月與上月，避免漏單）
+    const { syncAdBudget } = require('./adBudgetSync');
+    for (const m of [prevStr, cur]) {
+      await syncAdBudget(m).catch(err =>
+        console.warn(`[AdBudget] 增量 ${m} 同步失敗（不影響主流程）：${err.message}`)
+      );
+    }
+
     await writeSyncLog({
       sync_type:     'incremental',
       since_ts:      since,

@@ -229,6 +229,25 @@ router.post('/sync/chi-finance-lens/sync-now', async (req, res) => {
 // GET /api/billing/debug?month=YYYY-MM
 // 直接打市場 API，回傳原始結果，不寫 DB（除錯用）
 // ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// GET /api/billing/env-check
+// 檢查相關環境變數有沒有設（只回 boolean，不洩漏值）
+// ─────────────────────────────────────────────────────────────
+router.get('/env-check', (_req, res) => {
+  res.json({
+    success: true,
+    data: {
+      BILLING_API_KEY:        Boolean(process.env.BILLING_API_KEY),
+      MARKET_BILLING_URL:     process.env.MARKET_BILLING_URL || '(default)',
+      AD_BUDGET_API_URL:      process.env.AD_BUDGET_API_URL || null,
+      AD_BUDGET_API_URL_set:  Boolean(process.env.AD_BUDGET_API_URL),
+      EDUCATION_API_KEY:      Boolean(process.env.EDUCATION_API_KEY),
+      EDUCATION_API_URL:      process.env.EDUCATION_API_URL || '(default)',
+      CHI_FINANCE_API_KEY:    Boolean(process.env.CHI_FINANCE_API_KEY),
+    },
+  });
+});
+
 router.get('/debug', async (req, res) => {
   const { month } = req.query;
   const axios = require('axios');
