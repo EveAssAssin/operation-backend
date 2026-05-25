@@ -14,7 +14,9 @@
 //     PUT    /api/point-redemption/items/:id
 //     DELETE /api/point-redemption/items/:id
 //     GET    /api/point-redemption/redemptions
-//     POST   /api/point-redemption/redemptions/:id/fulfill
+//     POST   /api/point-redemption/redemptions/:id/approve   審核通過（扣分+回寫MAP）
+//     POST   /api/point-redemption/redemptions/:id/reject    駁回（body: reason）
+//     POST   /api/point-redemption/redemptions/:id/fulfill   實體獎品標記發放
 //     GET    /api/point-redemption/balance/:erpid
 
 const express = require('express');
@@ -117,6 +119,25 @@ router.get('/redemptions', async (req, res) => {
     const { status, erpid, limit } = req.query;
     const rows = await svc.listRedemptions({ status, erpid, limit });
     ok(res, rows);
+  } catch (e) { fail(res, e); }
+});
+
+// 審核通過（扣分 + 回寫 MAP + 通知員工）
+router.post('/redemptions/:id/approve', async (req, res) => {
+  try {
+    const approver = req.user?.name || '營運部';
+    const result = await svc.approveRedemption(req.params.id, approver);
+    ok(res, result);
+  } catch (e) { fail(res, e); }
+});
+
+// 駁回（不扣分 + 通知員工）
+router.post('/redemptions/:id/reject', async (req, res) => {
+  try {
+    const approver = req.user?.name || '營運部';
+    const reason   = req.body?.reason;
+    const row = await svc.rejectRedemption(req.params.id, approver, reason);
+    ok(res, row);
   } catch (e) { fail(res, e); }
 });
 

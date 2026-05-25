@@ -1,15 +1,20 @@
 // services/pointRedemptionService.js
-// 分數兌換模組 — 商業邏輯
+// 分數兌換模組 — 商業邏輯（送審制）
+//
+// 流程：
+//   1. 員工申請兌換 → 建立 status=pending 紀錄（不扣分、不扣庫存）→ 通知營運主管
+//   2. 營運主管審核通過 → 寫負分回 MAP（setemployeescore）+ 扣庫存 → status=completed → 通知員工
+//   3. 駁回 → status=rejected（不扣分）→ 通知員工
+//   4. 實體獎品發放 → status=fulfilled
 //
 // 餘額來源：MAP getemployeescorerecord 全部歷史 score 加總（mapScoreApi.getEmployeeBalance）
-// 兌換扣分：MAP setemployeescore 寫一筆負分回 MAP（reasontitle 標「【分數兌換】品名」）
-//          本地 point_redemptions 表同步留一筆紀錄供查詢與實體獎品發放追蹤。
 
 const supabase   = require('../config/supabase');
 const mapScore   = require('./mapScoreApi');
+const linePush   = require('./linePushService');
 
 const ITEM_TYPES = ['physical', 'cash', 'title', 'other'];
-const REDEEM_COOLDOWN_MS = 20 * 1000;   // 同一員工兩次兌換最短間隔（防連點重複扣分）
+const REDEEM_COOLDOWN_MS = 20 * 1000;   // 同一員工兩次申請最短間隔（防連點）
 
 // ───────────────────────────────────────────────────────────
 // 兌換品項目錄
@@ -134,14 +139,88 @@ async function listRedemptions({ erpid, status, limit = 200 } = {}) {
   return data || [];
 }
 
+async function getRedemption(id) {
+  const { data, error } = await supabase
+    .from('point_redemptions')
+    .select('*')
+    .eq('id', id)
+    .single();
+  if (error || !data) throw new Error('找不到此兌換紀錄');
+  return data;
+}
+
 // ───────────────────────────────────────────────────────────
-// 兌換主流程
-//   1. 驗證員工身份（app_number → erpid）
+// 通知
+// ───────────────────────────────────────────────────────────
+
+// 取得營運部主管的 app_number（用於送審通知）
+async function getOpsManagerAppNumbers() {
+  const { data, error } = await supabase
+    .from('system_users')
+    .select('member_id, role, is_active')
+    .in('role', ['operation_lead', 'dept_head', 'super_admin'])
+    .eq('is_active', true);
+  if (error) {
+    console.error('[PointRedemption] 取營運主管清單失敗：', error.message);
+    return [];
+  }
+  return (data || []).map(u => u.member_id).filter(Boolean);
+}
+
+// 送審 → 通知營運主管
+async function notifyOpsNewRequest(record) {
+  try {
+    const managers = await getOpsManagerAppNumbers();
+    if (managers.length === 0) return;
+    const msg =
+      `🪙 分數兌換待審核\n` +
+      `員工：${record.employee_name}（${record.store_name || '—'}）\n` +
+      `品項：${record.item_name}\n` +
+      `扣分：${record.points_cost} 分\n\n` +
+      `請至營運部系統「分數兌換管理 → 兌換紀錄」審核。`;
+    await linePush.pushToUsers(managers, msg);
+  } catch (e) {
+    console.error('[PointRedemption] 送審通知失敗：', e.message);
+  }
+}
+
+// 審核通過 → 通知員工
+async function notifyEmployeeApproved(record, balanceAfter) {
+  try {
+    const msg =
+      `✅ 分數兌換已通過\n` +
+      `品項：${record.item_name}\n` +
+      `已扣 ${record.points_cost} 分` +
+      (balanceAfter != null ? `，剩餘 ${balanceAfter} 分` : '') +
+      (record.item_type === 'physical' ? `\n\n實體獎品將另行通知發放。` : '');
+    await linePush.pushToUser(record.employee_app_number, msg);
+  } catch (e) {
+    console.error('[PointRedemption] 通過通知失敗：', e.message);
+  }
+}
+
+// 駁回 → 通知員工
+async function notifyEmployeeRejected(record, reason) {
+  try {
+    const msg =
+      `❌ 分數兌換未通過\n` +
+      `品項：${record.item_name}\n` +
+      `原因：${reason || '未說明'}\n\n` +
+      `分數未扣除，如有疑問請洽營運部。`;
+    await linePush.pushToUser(record.employee_app_number, msg);
+  } catch (e) {
+    console.error('[PointRedemption] 駁回通知失敗：', e.message);
+  }
+}
+
+// ───────────────────────────────────────────────────────────
+// 申請兌換（送審制）
+//   1. 驗證員工身份
 //   2. 取品項、檢查上架與庫存
-//   3. 防連點：同員工 20 秒內不可重複兌換
-//   4. 查 MAP 餘額，檢查是否足夠
-//   5. 寫負分回 MAP（setemployeescore）
-//   6. 寫入本地兌換紀錄、扣庫存
+//   3. 防連點：同員工 20 秒內不可重複申請
+//   4. 查 MAP 餘額（預檢，避免送出註定不足的申請）
+//   5. 建立 status=pending 紀錄（不扣分、不扣庫存）
+//   6. 通知營運主管
 // ───────────────────────────────────────────────────────────
 async function redeem({ app_number, item_id }) {
   const employee = await verifyEmployee(app_number);
@@ -152,7 +231,7 @@ async function redeem({ app_number, item_id }) {
     throw new Error('此品項已無庫存');
   }
 
-  // 防連點：檢查最近一筆兌換時間
+  // 防連點
   const since = new Date(Date.now() - REDEEM_COOLDOWN_MS).toISOString();
   const { data: recent } = await supabase
     .from('point_redemptions')
@@ -164,34 +243,14 @@ async function redeem({ app_number, item_id }) {
     throw new Error('操作太頻繁，請稍候幾秒再試');
   }
 
-  // 查餘額
+  // 預檢餘額（審核時會再檢查一次）
   const balance = await getBalance(employee.erpid);
   const cost    = Number(item.points_cost);
   if (balance.totalScore < cost) {
     throw new Error(`分數不足：目前 ${balance.totalScore} 分，需要 ${cost} 分`);
   }
 
-  // 寫負分回 MAP
-  const reasontitle = `【分數兌換】${item.name}`;
-  let mapOk = false;
-  let mapMsg = '';
-  try {
-    const r = await mapScore.addScore({
-      employeeerpid: employee.erpid,
-      score:         -Math.abs(cost),       // 負分＝扣分
-      bonus:         0,
-      reasonid:      '-1',
-      reasontitle,
-      editor:        '分數兌換系統',
-    });
-    mapOk  = true;
-    mapMsg = r.message || '寫入成功';
-  } catch (e) {
-    mapOk  = false;
-    mapMsg = e.message || 'MAP 寫入失敗';
-  }
-
-  // 寫入本地兌換紀錄
+  // 建立待審紀錄（不扣分、不扣庫存）
   const record = {
     employee_erpid:      employee.erpid,
     employee_app_number: employee.app_number,
@@ -201,9 +260,9 @@ async function redeem({ app_number, item_id }) {
     item_name:           item.name,
     item_type:           item.item_type,
     points_cost:         cost,
-    status:              mapOk ? 'completed' : 'cancelled',
-    map_write_status:    mapOk ? 'success'   : 'failed',
-    map_write_message:   mapMsg,
+    status:              'pending',
+    map_write_status:    null,
+    map_write_message:   null,
   };
   const { data: saved, error: insErr } = await supabase
     .from('point_redemptions')
@@ -211,35 +270,134 @@ async function redeem({ app_number, item_id }) {
     .select()
     .single();
   if (insErr) {
-    // 紀錄寫不進來但 MAP 已扣分 → 記 log，仍視為失敗讓使用者知道
-    console.error('[PointRedemption] 兌換紀錄寫入失敗：', insErr.message, 'MAP 扣分=', mapOk);
-    throw new Error('兌換紀錄寫入失敗，請聯繫管理員確認分數');
+    console.error('[PointRedemption] 申請紀錄寫入失敗：', insErr.message);
+    throw new Error('申請寫入失敗，請稍後再試');
   }
 
-  // MAP 扣分失敗 → 回報錯誤（紀錄已留存供稽核）
-  if (!mapOk) {
-    throw new Error(`兌換失敗，分數未扣除：${mapMsg}`);
-  }
-
-  // 扣庫存（有設定庫存才扣）
-  if (item.stock !== null && item.stock !== undefined) {
-    const nextStock = Math.max(0, Number(item.stock) - 1);
-    await supabase
-      .from('point_redeem_items')
-      .update({ stock: nextStock })
-      .eq('id', item.id);
-  }
+  // 通知營運主管（背景進行，不擋使用者）
+  notifyOpsNewRequest(saved);
 
   return {
     redemption:    saved,
-    balance_after: balance.totalScore - cost,
+    balance_before: balance.totalScore,
   };
+}
+
+// ───────────────────────────────────────────────────────────
+// 審核通過
+//   1. 取紀錄，必須 status=pending
+//   2. 重新檢查品項庫存
+//   3. 重新查 MAP 餘額是否仍足夠
+//   4. 寫負分回 MAP
+//   5. 更新紀錄 status=completed，扣庫存
+//   6. 通知員工
+// ───────────────────────────────────────────────────────────
+async function approveRedemption(id, approver) {
+  const record = await getRedemption(id);
+  if (record.status !== 'pending') {
+    throw new Error(`此申請目前狀態為「${record.status}」，無法審核`);
+  }
+
+  const item = await getItem(record.item_id).catch(() => null);
+  // 庫存重檢（品項可能已被刪 → item 為 null 則略過庫存檢查）
+  if (item && item.stock !== null && item.stock !== undefined && Number(item.stock) <= 0) {
+    throw new Error('此品項已無庫存，無法通過');
+  }
+
+  // 餘額重檢
+  const balance = await getBalance(record.employee_erpid);
+  const cost    = Number(record.points_cost);
+  if (balance.totalScore < cost) {
+    throw new Error(`員工分數不足（目前 ${balance.totalScore} 分，需要 ${cost} 分），無法通過`);
+  }
+
+  // 寫負分回 MAP
+  const reasontitle = `【分數兌換】${record.item_name}`;
+  let mapOk = false, mapMsg = '';
+  try {
+    const r = await mapScore.addScore({
+      employeeerpid: record.employee_erpid,
+      score:         -Math.abs(cost),
+      bonus:         0,
+      reasonid:      '-1',
+      reasontitle,
+      editor:        approver || '分數兌換審核',
+    });
+    mapOk  = true;
+    mapMsg = r.message || '寫入成功';
+  } catch (e) {
+    mapOk  = false;
+    mapMsg = e.message || 'MAP 寫入失敗';
+  }
+
+  if (!mapOk) {
+    // MAP 失敗 → 不改狀態，留 pending 讓主管重試
+    throw new Error(`MAP 扣分失敗，未通過：${mapMsg}`);
+  }
+
+  // 更新紀錄
+  const { data: updated, error: updErr } = await supabase
+    .from('point_redemptions')
+    .update({
+      status:            'completed',
+      map_write_status:  'success',
+      map_write_message: mapMsg,
+      approved_at:       new Date().toISOString(),
+      approved_by:       approver || null,
+    })
+    .eq('id', id)
+    .select()
+    .single();
+  if (updErr) throw new Error(`紀錄更新失敗：${updErr.message}`);
+
+  // 扣庫存
+  if (item && item.stock !== null && item.stock !== undefined) {
+    const nextStock = Math.max(0, Number(item.stock) - 1);
+    await supabase.from('point_redeem_items').update({ stock: nextStock }).eq('id', item.id);
+  }
+
+  // 通知員工
+  notifyEmployeeApproved(updated, balance.totalScore - cost);
+
+  return { redemption: updated, balance_after: balance.totalScore - cost };
+}
+
+// ───────────────────────────────────────────────────────────
+// 駁回
+// ───────────────────────────────────────────────────────────
+async function rejectRedemption(id, approver, reason) {
+  const record = await getRedemption(id);
+  if (record.status !== 'pending') {
+    throw new Error(`此申請目前狀態為「${record.status}」，無法駁回`);
+  }
+  const r = String(reason || '').trim();
+  if (!r) throw new Error('請填寫駁回原因');
+
+  const { data: updated, error } = await supabase
+    .from('point_redemptions')
+    .update({
+      status:        'rejected',
+      reject_reason: r,
+      approved_at:   new Date().toISOString(),
+      approved_by:   approver || null,
+    })
+    .eq('id', id)
+    .select()
+    .single();
+  if (error) throw new Error(`駁回失敗：${error.message}`);
+
+  notifyEmployeeRejected(updated, r);
+  return updated;
 }
 
 // ───────────────────────────────────────────────────────────
 // 實體獎品標記已發放
 // ───────────────────────────────────────────────────────────
 async function fulfill(id, fulfilledBy) {
+  const record = await getRedemption(id);
+  if (record.status !== 'completed') {
+    throw new Error('只有「已通過」的兌換才能標記發放');
+  }
   const { data, error } = await supabase
     .from('point_redemptions')
     .update({
@@ -264,6 +422,9 @@ module.exports = {
   verifyEmployee,
   getBalance,
   listRedemptions,
+  getRedemption,
   redeem,
+  approveRedemption,
+  rejectRedemption,
   fulfill,
 };
