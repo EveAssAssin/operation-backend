@@ -15,6 +15,12 @@ const linePush   = require('./linePushService');
 
 const ITEM_TYPES = ['physical', 'cash', 'title', 'other'];
 const REDEEM_COOLDOWN_MS = 20 * 1000;   // 同一員工兩次申請最短間隔（防連點）
+const CASH_RATIO = 100;                 // cash 型品項：1 分 = NT$100 現金（固定）
+
+// 算這筆兌換要寫多少獎金到 MAP（cash 才 > 0）
+function calcBonus(item, cost) {
+  return item.item_type === 'cash' ? Number(cost) * CASH_RATIO : 0;
+}
 
 // ───────────────────────────────────────────────────────────
 // 兌換品項目錄
@@ -54,6 +60,7 @@ function normalizeItemPayload(p = {}) {
   if (p.stock !== undefined)       out.stock       = (p.stock === null || p.stock === '') ? null : Math.trunc(Number(p.stock) || 0);
   if (p.is_active !== undefined)   out.is_active   = !!p.is_active;
   if (p.sort_order !== undefined)  out.sort_order  = Math.trunc(Number(p.sort_order) || 0);
+  if (p.min_balance_after !== undefined) out.min_balance_after = Math.max(0, Math.trunc(Number(p.min_balance_after) || 0));
   return out;
 }
 
@@ -172,11 +179,14 @@ async function notifyOpsNewRequest(record) {
   try {
     const managers = await getOpsManagerAppNumbers();
     if (managers.length === 0) return;
+    const cashLine = record.item_type === 'cash' && record.bonus_amount > 0
+      ? `\n現金：NT$${record.bonus_amount}`
+      : '';
     const msg =
       `🪙 分數兌換待審核\n` +
       `員工：${record.employee_name}（${record.store_name || '—'}）\n` +
       `品項：${record.item_name}\n` +
-      `扣分：${record.points_cost} 分\n\n` +
+      `扣分：${record.points_cost} 分${cashLine}\n\n` +
       `請至營運部系統「分數兌換管理 → 兌換紀錄」審核。`;
     await linePush.pushToUsers(managers, msg);
   } catch (e) {
@@ -187,12 +197,18 @@ async function notifyOpsNewRequest(record) {
 // 審核通過 → 通知員工
 async function notifyEmployeeApproved(record, balanceAfter) {
   try {
+    const cashLine = record.item_type === 'cash' && record.bonus_amount > 0
+      ? `\n💰 獎金 NT$${record.bonus_amount} 已寫入 MAP`
+      : '';
+    const physLine = record.item_type === 'physical'
+      ? `\n\n實體獎品將另行通知發放。`
+      : '';
     const msg =
       `✅ 分數兌換已通過\n` +
       `品項：${record.item_name}\n` +
       `已扣 ${record.points_cost} 分` +
       (balanceAfter != null ? `，剩餘 ${balanceAfter} 分` : '') +
-      (record.item_type === 'physical' ? `\n\n實體獎品將另行通知發放。` : '');
+      cashLine + physLine;
     await linePush.pushToUser(record.employee_app_number, msg);
   } catch (e) {
     console.error('[PointRedemption] 通過通知失敗：', e.message);
@@ -246,9 +262,17 @@ async function redeem({ app_number, item_id }) {
   // 預檢餘額（審核時會再檢查一次）
   const balance = await getBalance(employee.erpid);
   const cost    = Number(item.points_cost);
+  const minAfter = Math.max(0, Number(item.min_balance_after || 0));
+  const remaining = balance.totalScore - cost;
+
   if (balance.totalScore < cost) {
     throw new Error(`分數不足：目前 ${balance.totalScore} 分，需要 ${cost} 分`);
   }
+  if (remaining < minAfter) {
+    throw new Error(`此品項兌換後剩餘分數不得低於 ${minAfter} 分（目前 ${balance.totalScore}，兌換後將剩 ${remaining}）`);
+  }
+
+  const bonus = calcBonus(item, cost);
 
   // 建立待審紀錄（不扣分、不扣庫存）
   const record = {
@@ -260,6 +284,7 @@ async function redeem({ app_number, item_id }) {
     item_name:           item.name,
     item_type:           item.item_type,
     points_cost:         cost,
+    bonus_amount:        bonus,
     status:              'pending',
     map_write_status:    null,
     map_write_message:   null,
@@ -304,21 +329,29 @@ async function approveRedemption(id, approver) {
     throw new Error('此品項已無庫存，無法通過');
   }
 
-  // 餘額重檢
+  // 餘額重檢 + 門檻重檢
   const balance = await getBalance(record.employee_erpid);
   const cost    = Number(record.points_cost);
+  const minAfter = Math.max(0, Number(item?.min_balance_after || 0));
+  const remaining = balance.totalScore - cost;
   if (balance.totalScore < cost) {
     throw new Error(`員工分數不足（目前 ${balance.totalScore} 分，需要 ${cost} 分），無法通過`);
   }
+  if (remaining < minAfter) {
+    throw new Error(`通過後剩餘分數會低於 ${minAfter} 分（目前 ${balance.totalScore}，剩 ${remaining}），無法通過`);
+  }
 
-  // 寫負分回 MAP
-  const reasontitle = `【分數兌換】${record.item_name}`;
+  // 寫入 MAP：cash 型同時寫負分 + 正獎金
+  const bonus = Number(record.bonus_amount || 0);
+  const reasontitle = record.item_type === 'cash'
+    ? `【獎金兌換】${record.item_name}`
+    : `【分數兌換】${record.item_name}`;
   let mapOk = false, mapMsg = '';
   try {
     const r = await mapScore.addScore({
       employeeerpid: record.employee_erpid,
       score:         -Math.abs(cost),
-      bonus:         0,
+      bonus:         bonus,
       reasonid:      '-1',
       reasontitle,
       editor:        approver || '分數兌換審核',
