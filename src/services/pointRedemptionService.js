@@ -237,14 +237,23 @@ async function notifyEmployeeRejected(record, reason) {
 //   4. 查 MAP 餘額（預檢，避免送出註定不足的申請）
 //   5. 建立 status=pending 紀錄（不扣分、不扣庫存）
 //   6. 通知營運主管
+//
+//   quantity（選填，預設 1）：兌換倍數。
+//     cash 型：總扣分 = item.points_cost × quantity；獎金 = 總扣分 × 100
+//     其他型：當作件數（要扣庫存幾件）
 // ───────────────────────────────────────────────────────────
-async function redeem({ app_number, item_id }) {
+async function redeem({ app_number, item_id, quantity = 1 }) {
   const employee = await verifyEmployee(app_number);
   const item     = await getItem(item_id);
 
   if (!item.is_active) throw new Error('此品項已下架，無法兌換');
-  if (item.stock !== null && item.stock !== undefined && Number(item.stock) <= 0) {
-    throw new Error('此品項已無庫存');
+
+  // 數量清洗：必須為正整數
+  const qty = Math.max(1, Math.trunc(Number(quantity) || 1));
+
+  if (item.stock !== null && item.stock !== undefined) {
+    if (Number(item.stock) <= 0) throw new Error('此品項已無庫存');
+    if (Number(item.stock) < qty) throw new Error(`此品項庫存只剩 ${item.stock}，無法一次兌換 ${qty}`);
   }
 
   // 防連點
@@ -260,9 +269,10 @@ async function redeem({ app_number, item_id }) {
   }
 
   // 預檢餘額（審核時會再檢查一次）
-  const balance = await getBalance(employee.erpid);
-  const cost    = Number(item.points_cost);
-  const minAfter = Math.max(0, Number(item.min_balance_after || 0));
+  const balance   = await getBalance(employee.erpid);
+  const unitCost  = Number(item.points_cost);
+  const cost      = unitCost * qty;                      // 總扣分
+  const minAfter  = Math.max(0, Number(item.min_balance_after || 0));
   const remaining = balance.totalScore - cost;
 
   if (balance.totalScore < cost) {
@@ -272,7 +282,7 @@ async function redeem({ app_number, item_id }) {
     throw new Error(`此品項兌換後剩餘分數不得低於 ${minAfter} 分（目前 ${balance.totalScore}，兌換後將剩 ${remaining}）`);
   }
 
-  const bonus = calcBonus(item, cost);
+  const bonus = calcBonus(item, cost);                   // cash：cost × 100
 
   // 建立待審紀錄（不扣分、不扣庫存）
   const record = {
@@ -283,6 +293,7 @@ async function redeem({ app_number, item_id }) {
     item_id:             item.id,
     item_name:           item.name,
     item_type:           item.item_type,
+    quantity:            qty,
     points_cost:         cost,
     bonus_amount:        bonus,
     status:              'pending',
@@ -324,9 +335,11 @@ async function approveRedemption(id, approver) {
   }
 
   const item = await getItem(record.item_id).catch(() => null);
+  const qty  = Math.max(1, Math.trunc(Number(record.quantity) || 1));
   // 庫存重檢（品項可能已被刪 → item 為 null 則略過庫存檢查）
-  if (item && item.stock !== null && item.stock !== undefined && Number(item.stock) <= 0) {
-    throw new Error('此品項已無庫存，無法通過');
+  if (item && item.stock !== null && item.stock !== undefined) {
+    if (Number(item.stock) <= 0)    throw new Error('此品項已無庫存，無法通過');
+    if (Number(item.stock) < qty)   throw new Error(`此品項庫存只剩 ${item.stock}，無法通過 ${qty} 件`);
   }
 
   // 餘額重檢 + 門檻重檢
@@ -383,9 +396,9 @@ async function approveRedemption(id, approver) {
     .single();
   if (updErr) throw new Error(`紀錄更新失敗：${updErr.message}`);
 
-  // 扣庫存
+  // 扣庫存（按 quantity 扣）
   if (item && item.stock !== null && item.stock !== undefined) {
-    const nextStock = Math.max(0, Number(item.stock) - 1);
+    const nextStock = Math.max(0, Number(item.stock) - qty);
     await supabase.from('point_redeem_items').update({ stock: nextStock }).eq('id', item.id);
   }
 

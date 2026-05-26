@@ -62,10 +62,10 @@ router.get('/public/balance', async (req, res) => {
 // 兌換
 router.post('/public/redeem', async (req, res) => {
   try {
-    const { app_number, item_id } = req.body || {};
+    const { app_number, item_id, quantity } = req.body || {};
     if (!app_number) throw new Error('缺少員工編號 app_number');
     if (!item_id)    throw new Error('缺少兌換品項 item_id');
-    const result = await svc.redeem({ app_number, item_id });
+    const result = await svc.redeem({ app_number, item_id, quantity });
     ok(res, result);
   } catch (e) { fail(res, e); }
 });
