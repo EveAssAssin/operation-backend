@@ -131,6 +131,36 @@ async function getBalance(erpid) {
 }
 
 // ───────────────────────────────────────────────────────────
+// 取 MAP 評分紀錄明細（用來比對 MAP 系統累計差異）
+//   回傳：{ totalScore, totalBonus, recordCount, records: [...] }
+// ───────────────────────────────────────────────────────────
+async function getScoreDetail(erpid) {
+  const erp = String(erpid || '').trim();
+  if (!erp) throw new Error('erpid 必填');
+  const today = new Date();
+  const mm = String(today.getMonth() + 1).padStart(2, '0');
+  const dd = String(today.getDate()).padStart(2, '0');
+  const todayStr = `${today.getFullYear()}-${mm}-${dd}`;
+
+  const rows = await mapScore.getScoreRecords(erp, '2000-01-01', todayStr);
+  const row  = rows.find(r => String(r.employeeErpid) === erp) || rows[0];
+  const records = Array.isArray(row?.records) ? row.records : [];
+  let totalScore = 0;
+  let totalBonus = 0;
+  for (const r of records) {
+    totalScore += Number(r.score || 0);
+    totalBonus += Number(r.bonus || 0);
+  }
+  return {
+    employeeName: row?.employeeName || null,
+    totalScore,
+    totalBonus,
+    recordCount: records.length,
+    records,
+  };
+}
+
+// ───────────────────────────────────────────────────────────
 // 兌換紀錄查詢
 // ───────────────────────────────────────────────────────────
 async function listRedemptions({ erpid, status, limit = 200 } = {}) {
@@ -467,6 +497,7 @@ module.exports = {
   deleteItem,
   verifyEmployee,
   getBalance,
+  getScoreDetail,
   listRedemptions,
   getRedemption,
   redeem,

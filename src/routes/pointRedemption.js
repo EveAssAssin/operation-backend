@@ -59,6 +59,15 @@ router.get('/public/balance', async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
+// MAP 評分紀錄明細（員工自助比對 MAP 累計差異用）
+router.get('/public/score-detail', async (req, res) => {
+  try {
+    const emp    = await svc.verifyEmployee(req.query.app_number);
+    const detail = await svc.getScoreDetail(emp.erpid);
+    ok(res, { employee: emp, ...detail });
+  } catch (e) { fail(res, e); }
+});
+
 // 兌換
 router.post('/public/redeem', async (req, res) => {
   try {
