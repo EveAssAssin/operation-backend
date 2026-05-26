@@ -137,12 +137,8 @@ async function getBalance(erpid) {
 async function getScoreDetail(erpid) {
   const erp = String(erpid || '').trim();
   if (!erp) throw new Error('erpid 必填');
-  const today = new Date();
-  const mm = String(today.getMonth() + 1).padStart(2, '0');
-  const dd = String(today.getDate()).padStart(2, '0');
-  const todayStr = `${today.getFullYear()}-${mm}-${dd}`;
-
-  const rows = await mapScore.getScoreRecords(erp, '2000-01-01', todayStr);
+  // ⚠️ endtime 用遠未來，避免 MAP API 以日期邊界濾掉今天稍早寫入的紀錄
+  const rows = await mapScore.getScoreRecords(erp, '2000-01-01', '2099-12-31');
   const row  = rows.find(r => String(r.employeeErpid) === erp) || rows[0];
   const records = Array.isArray(row?.records) ? row.records : [];
   let totalScore = 0;

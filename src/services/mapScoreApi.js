@@ -133,8 +133,9 @@ async function getEmployeeBalance(erpid) {
   const erp = String(erpid || '').trim();
   if (!erp) throw new Error('erpid 必填');
 
-  // 從很早的日期撈到今天，等於撈完整歷史
-  const rows = await getScoreRecords(erp, '2000-01-01', todayStr());
+  // 從很早的日期撈到遠未來，等於撈完整歷史
+  // ⚠️ 不可用「今天」當 endtime — MAP API 似乎把日期當 00:00 邊界，會漏掉今天稍早寫入的紀錄
+  const rows = await getScoreRecords(erp, '2000-01-01', '2099-12-31');
   const row  = rows.find(r => String(r.employeeErpid) === erp) || rows[0];
 
   const records = Array.isArray(row?.records) ? row.records : [];
