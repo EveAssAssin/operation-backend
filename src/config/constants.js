@@ -2,10 +2,12 @@
 // 營運部系統角色與權限定義
 
 const ROLES = {
-  operation_staff:  1,   // 營運部員工
-  operation_lead:   2,   // 營運部組長 / 區域主管
-  dept_head:        3,   // 部門主管
-  super_admin:      4,   // 超級管理員
+  operation_staff:      1,   // 營運部員工（未分類）
+  operation_accounting: 1,   // 營運部會計（與 staff 同層級，靠 module 權限區分）
+  operation_hr:         1,   // 營運部人事（與 staff 同層級，靠 module 權限區分）
+  operation_lead:       2,   // 營運部主管（全權）
+  dept_head:            3,   // 部門主管
+  super_admin:          4,   // 超級管理員
 };
 
 const MODULE_PERMISSIONS = {

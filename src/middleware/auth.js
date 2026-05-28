@@ -76,8 +76,14 @@ const authorize = (...args) => {
     const isRoleMode = args.some(a => knownRoles.includes(a));
 
     if (isRoleMode) {
+      // shortcut: 若白名單含 operation_staff，自動加入新分權子角色 accounting + hr
+      // （這三個子角色在 ROLES 都是 level 1，視為平輩；精細分權由前端 sidebar 過濾完成）
+      let whitelist = args;
+      if (args.includes('operation_staff')) {
+        whitelist = [...args, 'operation_accounting', 'operation_hr'];
+      }
       // 檢查使用者角色是否在白名單中
-      if (!args.includes(userRole)) {
+      if (!whitelist.includes(userRole)) {
         return res.status(403).json({
           success: false,
           message: '權限不足，您的角色無法執行此操作',
@@ -102,4 +108,29 @@ const authorize = (...args) => {
   };
 };
 
-module.exports = { authenticate, authorize };
+/**
+ * 模組權限檢查（DB-based 分權系統）
+ *   用法：authorizeModule('billing', 'view') 或 authorizeModule('billing', 'edit')
+ *   is_admin=true 的角色（super_admin / dept_head / operation_lead）自動通過
+ */
+const authorizeModule = (moduleKey, action = 'view') => {
+  return async (req, res, next) => {
+    try {
+      if (!req.user) return res.status(401).json({ success: false, message: '請先登入' });
+      const permSvc = require('../services/permissionService');
+      const allowed = await permSvc.canAccess(req.user.role, moduleKey, action);
+      if (!allowed) {
+        return res.status(403).json({
+          success: false,
+          message: `權限不足，您的角色無權${action === 'edit' ? '編輯' : '查看'}「${moduleKey}」`,
+        });
+      }
+      next();
+    } catch (err) {
+      console.error('[Auth] authorizeModule 失敗：', err.message);
+      return res.status(500).json({ success: false, message: '權限服務異常' });
+    }
+  };
+};
+
+module.exports = { authenticate, authorize, authorizeModule };
