@@ -110,6 +110,9 @@ app.use('/api/processes', authenticate, require('./routes/processes/admin'));
 // 分數兌換模組（公開的員工自助 /public/* + 後台管理；內部自行處理 auth）
 app.use('/api/point-redemption', require('./routes/pointRedemption'));
 
+// 基本資料模組（電費 / 電話 / 房租 / 自訂；含 audit log + LINE 推播）
+app.use('/api/basic-data', authenticate, require('./routes/basicData'));
+
 // ── 內部同步觸發（部署初期用，確認正常後可移除）──────
 app.post('/api/internal/sync', async (req, res) => {
   const { runEmployeeSync } = require('./services/personnelSync');
