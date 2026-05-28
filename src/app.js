@@ -113,6 +113,9 @@ app.use('/api/point-redemption', require('./routes/pointRedemption'));
 // 基本資料模組（電費 / 電話 / 房租 / 自訂；含 audit log + LINE 推播）
 app.use('/api/basic-data', authenticate, require('./routes/basicData'));
 
+// 排程推播模組（自訂排程 + 變數展開 + 個人/角色群收件人）
+app.use('/api/scheduled-notify', authenticate, require('./routes/scheduledNotify'));
+
 // ── 內部同步觸發（部署初期用，確認正常後可移除）──────
 app.post('/api/internal/sync', async (req, res) => {
   const { runEmployeeSync } = require('./services/personnelSync');
@@ -146,6 +149,7 @@ const { startCheckNotifyJob }                 = require('./jobs/checkNotify');
 const { startRecurringExpenseNotifyJob }      = require('./jobs/notifyRecurringExpenses');
 const { startDuplicateNeedsNotifyJob }        = require('./jobs/notifyDuplicateNeeds');
 const { startAppointedUnitJobs }              = require('./jobs/syncAppointedUnits');
+const { startScheduledNotifyDispatcher }      = require('./jobs/scheduledNotifyDispatcher');
 const { init: initHolidays }                  = require('./services/taiwanHolidayService');
 
 startScheduledSync();
@@ -156,6 +160,7 @@ startCheckNotifyJob();             // 每天 10:00 支票到期通知
 startRecurringExpenseNotifyJob();  // 每天 09:00 常態費用到期通知
 startDuplicateNeedsNotifyJob();    // 每天 11:00 重複人力需求提醒
 startAppointedUnitJobs();          // 特約單位 / 廠商員工 同步
+startScheduledNotifyDispatcher();  // 每分鐘掃自訂排程推播
 initHolidays();                    // 預載台灣假日快取（本年 + 明年）
 
 // ── 錯誤處理 ──────────────────────────────────────────────
