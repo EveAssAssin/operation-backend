@@ -301,4 +301,143 @@ router.get('/categories', authenticateVendor, async (req, res) => {
   }
 });
 
+// ════════════════════════════════════════════════════════════
+//           廠商請款 (vendor_payment_requests)
+// ════════════════════════════════════════════════════════════
+const vpSvc = require('../services/vendorPaymentService');
+
+function vpOk(res, data) { res.json({ success: true, data }); }
+function vpFail(res, e) {
+  console.error('[VendorPayment][vendor]', e.message);
+  res.status(500).json({ success: false, message: e.message || '伺服器錯誤' });
+}
+function actorVendor(req) {
+  return { actorType: 'vendor', actorId: req.vendor?.id };
+}
+
+// 廠商自己的銀行帳號
+router.get('/bank-accounts', authenticateVendor, async (req, res) => {
+  try { vpOk(res, await vpSvc.listBankAccounts(req.vendor.source_id)); }
+  catch (e) { vpFail(res, e); }
+});
+router.post('/bank-accounts', authenticateVendor, async (req, res) => {
+  try { vpOk(res, await vpSvc.createBankAccount(req.vendor.source_id, req.body || {})); }
+  catch (e) { vpFail(res, e); }
+});
+router.patch('/bank-accounts/:id', authenticateVendor, async (req, res) => {
+  // 確認此帳號屬於當前 vendor
+  const { data: bank } = await supabase.from('vendor_bank_accounts')
+    .select('source_id').eq('id', req.params.id).maybeSingle();
+  if (!bank || bank.source_id !== req.vendor.source_id) {
+    return res.status(403).json({ success: false, message: '無權編輯此銀行帳號' });
+  }
+  try { vpOk(res, await vpSvc.updateBankAccount(req.params.id, req.body || {})); }
+  catch (e) { vpFail(res, e); }
+});
+router.delete('/bank-accounts/:id', authenticateVendor, async (req, res) => {
+  const { data: bank } = await supabase.from('vendor_bank_accounts')
+    .select('source_id').eq('id', req.params.id).maybeSingle();
+  if (!bank || bank.source_id !== req.vendor.source_id) {
+    return res.status(403).json({ success: false, message: '無權刪除此銀行帳號' });
+  }
+  try { vpOk(res, await vpSvc.deleteBankAccount(req.params.id)); }
+  catch (e) { vpFail(res, e); }
+});
+
+// 廠商基本資料（讀寫 billing_sources 的有限欄位）
+router.get('/profile', authenticateVendor, async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('billing_sources')
+      .select('id, name, short_name, code, tax_id, contact_name, contact_phone, contact_email, contact_line_id, address, notes')
+      .eq('id', req.vendor.source_id).maybeSingle();
+    if (error) throw new Error(error.message);
+    vpOk(res, data);
+  } catch (e) { vpFail(res, e); }
+});
+router.patch('/profile', authenticateVendor, async (req, res) => {
+  try {
+    const allowed = {};
+    ['short_name','contact_name','contact_phone','contact_email','contact_line_id','address','notes']
+      .forEach(k => { if (req.body?.[k] !== undefined) allowed[k] = req.body[k]; });
+    const { data, error } = await supabase.from('billing_sources')
+      .update(allowed).eq('id', req.vendor.source_id).select().single();
+    if (error) throw new Error(error.message);
+    vpOk(res, data);
+  } catch (e) { vpFail(res, e); }
+});
+
+// 廠商請款單（只看自己的）
+router.get('/requests', authenticateVendor, async (req, res) => {
+  try {
+    vpOk(res, await vpSvc.listRequests({
+      source_id: req.vendor.source_id,
+      period:    req.query.period,
+      status:    req.query.status,
+      keyword:   req.query.keyword,
+    }));
+  } catch (e) { vpFail(res, e); }
+});
+
+router.get('/requests/:id', authenticateVendor, async (req, res) => {
+  try {
+    const r = await vpSvc.getRequest(req.params.id);
+    if (r.source_id !== req.vendor.source_id) {
+      return res.status(403).json({ success: false, message: '無權檢視' });
+    }
+    vpOk(res, r);
+  } catch (e) { vpFail(res, e); }
+});
+
+router.post('/requests', authenticateVendor, async (req, res) => {
+  try {
+    const body = { ...(req.body || {}), source_id: req.vendor.source_id };
+    vpOk(res, await vpSvc.createRequest(body, actorVendor(req)));
+  } catch (e) { vpFail(res, e); }
+});
+
+router.patch('/requests/:id', authenticateVendor, async (req, res) => {
+  try { vpOk(res, await vpSvc.updateRequest(req.params.id, req.body || {}, actorVendor(req))); }
+  catch (e) { vpFail(res, e); }
+});
+
+router.delete('/requests/:id', authenticateVendor, async (req, res) => {
+  try { vpOk(res, await vpSvc.deleteRequest(req.params.id, actorVendor(req))); }
+  catch (e) { vpFail(res, e); }
+});
+
+router.post('/requests/:id/submit', authenticateVendor, async (req, res) => {
+  try { vpOk(res, await vpSvc.submitRequest(req.params.id, actorVendor(req))); }
+  catch (e) { vpFail(res, e); }
+});
+
+// 附件（廠商只能對自己的請款上傳）
+router.post('/requests/:id/files', authenticateVendor, async (req, res) => {
+  const { data: req_row } = await supabase.from('vendor_payment_requests')
+    .select('source_id, status, created_by_vendor').eq('id', req.params.id).maybeSingle();
+  if (!req_row || req_row.source_id !== req.vendor.source_id) {
+    return res.status(403).json({ success: false, message: '無權上傳' });
+  }
+  if (req_row.status !== 'draft' && req_row.status !== 'rejected') {
+    return res.status(400).json({ success: false, message: '已送審的請款不能再加附件' });
+  }
+  try { vpOk(res, await vpSvc.addFile(req.params.id, req.body || {}, 'vendor')); }
+  catch (e) { vpFail(res, e); }
+});
+
+router.delete('/files/:id', authenticateVendor, async (req, res) => {
+  const { data: file } = await supabase.from('vendor_payment_files')
+    .select('request_id').eq('id', req.params.id).maybeSingle();
+  if (!file) return res.status(404).json({ success: false, message: '找不到附件' });
+  const { data: req_row } = await supabase.from('vendor_payment_requests')
+    .select('source_id, status').eq('id', file.request_id).maybeSingle();
+  if (req_row?.source_id !== req.vendor.source_id) {
+    return res.status(403).json({ success: false, message: '無權刪除' });
+  }
+  if (!['draft','rejected'].includes(req_row.status)) {
+    return res.status(400).json({ success: false, message: '已送審的請款不能刪附件' });
+  }
+  try { vpOk(res, await vpSvc.deleteFile(req.params.id)); }
+  catch (e) { vpFail(res, e); }
+});
+
 module.exports = router;

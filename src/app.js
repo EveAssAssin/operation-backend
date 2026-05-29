@@ -119,6 +119,9 @@ app.use('/api/scheduled-notify', authenticate, require('./routes/scheduledNotify
 // 分權系統（角色 / 模組 / 權限設定）
 app.use('/api/permissions', authenticate, require('./routes/permissions'));
 
+// 廠商請款（系統人員端 / 含 company_profile）
+app.use('/api/vendor-payment', require('./routes/vendorPayment'));
+
 // ── 內部同步觸發（部署初期用，確認正常後可移除）──────
 app.post('/api/internal/sync', async (req, res) => {
   const { runEmployeeSync } = require('./services/personnelSync');
