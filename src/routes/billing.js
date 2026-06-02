@@ -277,6 +277,21 @@ router.post('/sync/chi-finance-lens/sync-now', async (req, res) => {
 // 同步執行 syncAdBudget 並回報結果（包含 DB 寫入後的實際筆數）
 // 不論 sync 成功失敗都回 JSON（不像 /sync/ad 是 fire-and-forget）
 // ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// POST /api/billing/ad-noop?month=YYYY-MM
+// 啥都不做，直接回 200。用來確認 middleware / 路由 是否正常
+// ─────────────────────────────────────────────────────────────
+router.post('/ad-noop', async (req, res) => {
+  res.json({
+    success: true,
+    message: 'ok',
+    received: { body: req.body || null, query: req.query || null },
+    user_id: req.user?.id || null,
+    user_role: req.user?.role || null,
+    timestamp: new Date().toISOString(),
+  });
+});
+
 router.post('/ad-sync-debug', async (req, res) => {
   const month = req.body?.month || req.query.month || new Date().toISOString().slice(0, 7);
   const steps = [];     // 每一步的成功/失敗紀錄
