@@ -278,45 +278,90 @@ router.post('/sync/chi-finance-lens/sync-now', async (req, res) => {
 // 不論 sync 成功失敗都回 JSON（不像 /sync/ad 是 fire-and-forget）
 // ─────────────────────────────────────────────────────────────
 router.post('/ad-sync-debug', async (req, res) => {
-  const supabase = require('../config/supabase');
   const month = req.body?.month || req.query.month || new Date().toISOString().slice(0, 7);
+  const steps = [];     // 每一步的成功/失敗紀錄
+  let sample = null;
+
+  const safe = async (name, fn) => {
+    try {
+      const v = await fn();
+      steps.push({ step: name, ok: true });
+      return v;
+    } catch (e) {
+      steps.push({
+        step: name, ok: false,
+        message: e?.message || String(e),
+        code: e?.code || null,
+        details: e?.details || null,
+        hint: e?.hint || null,
+        stack: (e?.stack || '').split('\n').slice(0, 5),
+      });
+      throw e;   // 仍然 throw 讓外層 catch
+    }
+  };
+
   try {
-    const { syncAdBudget } = require('../services/adBudgetSync');
-    const syncResult = await syncAdBudget(month);
+    // Step 1: require service
+    const { syncAdBudget } = await safe('require_service', async () =>
+      require('../services/adBudgetSync')
+    );
 
-    // 查實際寫入的筆數
-    const { count, error: countErr } = await supabase
-      .from('billing_orders')
-      .select('id', { count: 'exact', head: true })
-      .eq('billing_month', month)
-      .eq('source_type', 'ad_budget');
+    // Step 2: 跑同步
+    const syncResult = await safe('run_sync', async () =>
+      syncAdBudget(month)
+    );
 
-    // 取前 5 筆 sample 看 store_erpid 對應狀況
-    const { data: samples } = await supabase
-      .from('billing_orders')
-      .select('order_id, store_erpid, amount, billing_category, remark')
-      .eq('billing_month', month)
-      .eq('source_type', 'ad_budget')
-      .limit(5);
+    // Step 3: 取 supabase
+    const supabase = await safe('require_supabase', async () =>
+      require('../config/supabase')
+    );
 
-    // 看 store_erpid 是不是大量出現 'ad-store-N' fallback（代表 storeNameMap 對不上）
+    // Step 4: 查筆數
+    const countRes = await safe('count_rows', async () => {
+      const r = await supabase
+        .from('billing_orders')
+        .select('id', { count: 'exact', head: true })
+        .eq('billing_month', month)
+        .eq('source_type', 'ad_budget');
+      if (r.error) throw new Error(r.error.message);
+      return r.count;
+    });
+
+    // Step 5: 取 sample
+    const samples = await safe('fetch_samples', async () => {
+      const r = await supabase
+        .from('billing_orders')
+        .select('order_id, store_erpid, amount, billing_category, remark')
+        .eq('billing_month', month)
+        .eq('source_type', 'ad_budget')
+        .limit(5);
+      if (r.error) throw new Error(r.error.message);
+      return r.data || [];
+    });
+
     const fallbackCount = (samples || []).filter(s => s.store_erpid?.startsWith('ad-store-')).length;
 
     res.json({
-      success:        true,
+      success: true,
       month,
-      sync_result:    syncResult,
-      rows_in_db:     count || 0,
-      count_err:      countErr?.message || null,
-      sample_count:   samples?.length || 0,
+      sync_result: syncResult,
+      rows_in_db: countRes || 0,
+      sample_count: samples?.length || 0,
       fallback_count_in_samples: fallbackCount,
-      samples:        samples || [],
+      samples: samples || [],
+      steps,
     });
   } catch (err) {
-    res.status(500).json({
+    // 任一步失敗 → 回 steps（包含失敗的那一步詳細資訊）
+    res.status(200).json({   // ⚠️ 用 200 避免 axios reject 包裝錯誤訊息
       success: false,
-      message: err.message,
-      stack:   err.stack?.split('\n').slice(0, 6),
+      message: err?.message || '未知錯誤',
+      error_name: err?.name || null,
+      error_code: err?.code || null,
+      error_details: err?.details || null,
+      error_hint: err?.hint || null,
+      stack: (err?.stack || '').split('\n').slice(0, 8),
+      steps,
     });
   }
 });
