@@ -62,6 +62,49 @@ router.get('/orders', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
+// GET /api/billing/ad-orders?month=YYYY-MM
+// 取得指定月份的「企劃部廣告費」帳單（source_type=ad_budget）
+// ─────────────────────────────────────────────────────────────
+router.get('/ad-orders', async (req, res) => {
+  try {
+    const supabase = require('../config/supabase');
+    const { month } = req.query;
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) {
+      return res.status(400).json({ success: false, message: 'month 參數格式錯誤' });
+    }
+    const { data, error } = await supabase
+      .from('billing_orders')
+      .select('*')
+      .eq('billing_month', month)
+      .eq('source_type', 'ad_budget')
+      .order('store_erpid', { ascending: true });
+    if (error) throw new Error(error.message);
+
+    // 依門市彙總
+    const byStore = {};
+    let totalAmount = 0;
+    for (const r of (data || [])) {
+      const k = r.store_erpid || '_none';
+      if (!byStore[k]) byStore[k] = { store_erpid: r.store_erpid, store_name: r.store_name || null, orders: [], total: 0 };
+      byStore[k].orders.push(r);
+      byStore[k].total += Number(r.amount || 0);
+      totalAmount += Number(r.amount || 0);
+    }
+    res.json({
+      success: true,
+      month,
+      total_count: data?.length || 0,
+      total_amount: totalAmount,
+      stores: Object.values(byStore),
+      orders: data || [],
+    });
+  } catch (err) {
+    console.error('[Billing] ad-orders 失敗：', err.message);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
 // POST /api/billing/sync
 // 手動觸發帳單同步
 // Body: { month?: 'YYYY-MM' }  — 指定月份時做全量月份同步；否則做增量同步
