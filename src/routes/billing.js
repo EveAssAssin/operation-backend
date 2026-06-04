@@ -292,6 +292,135 @@ router.post('/ad-noop', async (req, res) => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────
+// POST /api/billing/ad-sync-v2?month=YYYY-MM
+// 暴力版同步：整段邏輯內嵌，所有 error 都會明明白白回給前端
+// 任何 throw 都被捕捉，永遠回 200，body 是完整 debug 物件
+// ─────────────────────────────────────────────────────────────
+router.post('/ad-sync-v2', async (req, res) => {
+  const result = {
+    success: false,
+    month: null,
+    steps: [],
+    error: null,
+    summary: null,
+  };
+  const log = (msg, extra) => result.steps.push({ time: new Date().toISOString(), msg, ...(extra || {}) });
+
+  try {
+    const month = req.body?.month || req.query.month || new Date().toISOString().slice(0, 7);
+    result.month = month;
+    log(`start month=${month}`);
+
+    // Step 1: 撈 API
+    const axios = require('axios');
+    const apiUrl = process.env.AD_BUDGET_API_URL;
+    if (!apiUrl) throw new Error('AD_BUDGET_API_URL 環境變數未設');
+    const target = `${apiUrl}/ad-budgets/public/campaigns?month=${month}`;
+    log(`calling: ${target}`);
+
+    let apiResp;
+    try {
+      apiResp = await axios.get(target, { timeout: 25000 });
+    } catch (apiErr) {
+      throw new Error(`呼叫廣告 API 失敗: ${apiErr.message} (status=${apiErr.response?.status || 'n/a'})`);
+    }
+    const campaigns = apiResp.data?.campaigns || [];
+    log(`got ${campaigns.length} campaigns`);
+
+    if (campaigns.length === 0) {
+      result.success = true;
+      result.summary = { msg: `月份 ${month} 無廣告資料`, synced: 0, rows_in_db: 0 };
+      return res.json(result);
+    }
+
+    // Step 2: 撈 departments 對照表
+    const supabase = require('../config/supabase');
+    const dep = await supabase.from('departments').select('store_erpid, store_name');
+    if (dep.error) throw new Error(`查 departments 失敗: ${dep.error.message}`);
+    const storeNameMap = {};
+    for (const d of (dep.data || [])) if (d.store_name) storeNameMap[d.store_name] = d.store_erpid;
+    log(`departments map: ${Object.keys(storeNameMap).length} entries`);
+
+    // Step 3: 展開 rows
+    const rows = [];
+    for (const camp of campaigns) {
+      for (const sd of (camp.store_budget_detail || [])) {
+        const erpid = storeNameMap[sd.store_name] || `ad-store-${sd.store_id}`;
+        const isActual = sd.actual_spend_share != null;
+        const amount = Number(isActual ? sd.actual_spend_share : sd.budget_share) || 0;
+        rows.push({
+          order_id:         `ad-${camp.id}-${sd.store_id}`,
+          source_type:      'ad_budget',
+          store_erpid:      erpid,
+          amount,
+          signed_at:        camp.end_date ? `${camp.end_date}T23:59:59+08:00` : `${month}-28T23:59:59+08:00`,
+          billing_month:    month,
+          billing_category: '企劃部',
+          items: [{
+            item_name: camp.name,
+            description: [camp.platform, camp.channel, camp.strategy].filter(Boolean).join(' / '),
+            amount,
+            status: 'completed',
+          }],
+          remark: `${camp.name}（${camp.platform || camp.channel}）${camp.start_date}～${camp.end_date}${isActual ? '' : '【預算分攤】'}`,
+          updated_at: new Date().toISOString(),
+        });
+      }
+    }
+    log(`expanded ${rows.length} rows from ${campaigns.length} campaigns`);
+    const fallbackCount = rows.filter(r => r.store_erpid.startsWith('ad-store-')).length;
+    if (fallbackCount > 0) log(`⚠️ ${fallbackCount} rows use fallback store_erpid (未對應到 departments)`);
+
+    if (rows.length === 0) {
+      result.success = true;
+      result.summary = { msg: '展開後無明細', synced: 0, rows_in_db: 0 };
+      return res.json(result);
+    }
+
+    // Step 4: upsert
+    log(`upserting ${rows.length} rows...`);
+    const up = await supabase.from('billing_orders').upsert(rows, { onConflict: 'order_id' });
+    if (up.error) {
+      throw new Error(`upsert 失敗: ${up.error.message} (code=${up.error.code || 'n/a'}, details=${up.error.details || 'n/a'}, hint=${up.error.hint || 'n/a'})`);
+    }
+    log(`upsert ok`);
+
+    // Step 5: 查回 DB 確認
+    const cnt = await supabase
+      .from('billing_orders')
+      .select('id', { count: 'exact', head: true })
+      .eq('billing_month', month)
+      .eq('source_type', 'ad_budget');
+    const rowsInDb = cnt.count || 0;
+    log(`rows_in_db: ${rowsInDb}`);
+
+    const samples = await supabase
+      .from('billing_orders')
+      .select('order_id, store_erpid, amount, billing_category, remark')
+      .eq('billing_month', month)
+      .eq('source_type', 'ad_budget')
+      .limit(5);
+
+    result.success = true;
+    result.summary = {
+      msg: '同步完成',
+      campaigns: campaigns.length,
+      expanded_rows: rows.length,
+      fallback_count: fallbackCount,
+      rows_in_db: rowsInDb,
+      samples: samples.data || [],
+    };
+    res.json(result);
+  } catch (err) {
+    result.error = {
+      message: err?.message || String(err),
+      stack: (err?.stack || '').split('\n').slice(0, 6),
+    };
+    res.json(result);   // 仍然回 200，body 包含 error 細節
+  }
+});
+
 router.post('/ad-sync-debug', async (req, res) => {
   const month = req.body?.month || req.query.month || new Date().toISOString().slice(0, 7);
   const steps = [];     // 每一步的成功/失敗紀錄
