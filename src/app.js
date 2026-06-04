@@ -16,7 +16,12 @@ const PORT = process.env.PORT || 3001;
 app.set('trust proxy', 1);
 
 // ── 安全 & 中間件 ─────────────────────────────────────────
-app.use(helmet());
+// helmet 預設 cross-origin-resource-policy=same-origin 會阻擋跨網域 POST 讀 response body
+// （frontend 跟 backend 在不同 onrender.com 子網域 → 算跨網域）
+// 改成 cross-origin 才能讓 frontend POST 拿到 body
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+}));
 app.use(cors({
   origin: function (origin, callback) {
     const allowed = (process.env.CORS_ORIGIN || 'http://localhost:5173')
