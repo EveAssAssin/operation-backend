@@ -138,6 +138,121 @@ router.post('/needs', verifyMarketKey, async (req, res) => {
 });
 
 // ════════════════════════════════════════════════════════════
+// POST /api/recruitment/external/needs/cancel
+// 市場部後端呼叫：取消人力需求
+//
+// 規格：營運部對接_人力需求取消API規格.md v1 (2026-06-10)
+//
+// Headers:
+//   x-api-key: {MARKET_RECRUITMENT_API_KEY}
+//
+// Body:
+//   request_id   string         必填  市場端 uuid（建立時送過的）
+//   external_id  string | null  選填  營運部回傳的 id（找不到時用 request_id）
+//   store_erpid  string         選填  輔助比對
+//   cancelled_by string         選填  操作者姓名（用於 note）
+//   reason       string         選填  取消原因
+//
+// 回傳：
+//   { success: true, data: { id, status: 'cancelled' } }
+//   重複取消（已是 cancelled）也回 success: true（冪等）
+//   找不到 → 404 + { success: false, message: '找不到對應的需求' }
+// ════════════════════════════════════════════════════════════
+router.post('/needs/cancel', verifyMarketKey, async (req, res) => {
+  const { request_id, external_id, store_erpid, cancelled_by, reason } = req.body || {};
+
+  if (!request_id) {
+    return res.status(400).json({ success: false, message: 'request_id 為必填' });
+  }
+
+  try {
+    // ── 1. 定位需求：先試 external_id，再 fallback 到 request_id ──
+    let need = null;
+
+    if (external_id) {
+      const r = await supabase
+        .from('recruitment_needs')
+        .select('id, store_erpid, store_name, status, total_needed, filled, note')
+        .eq('id', external_id)
+        .maybeSingle();
+      if (r.data) need = r.data;
+    }
+
+    if (!need && request_id) {
+      const r = await supabase
+        .from('recruitment_needs')
+        .select('id, store_erpid, store_name, status, total_needed, filled, note')
+        .eq('hub_message_id', `ext-${request_id}`)
+        .maybeSingle();
+      if (r.data) need = r.data;
+    }
+
+    if (!need) {
+      return res.status(404).json({
+        success: false,
+        message: '找不到對應的需求',
+        searched: { external_id: external_id || null, request_id, store_erpid: store_erpid || null },
+      });
+    }
+
+    // ── 2. 冪等：已 cancelled 直接回 success ──
+    if (need.status === 'cancelled') {
+      return res.json({
+        success: true,
+        data: { id: need.id, status: 'cancelled' },
+        already_cancelled: true,
+      });
+    }
+
+    // ── 3. 標記 cancelled ──
+    const cancelNote = [
+      need.note || null,
+      cancelled_by ? `[取消] ${cancelled_by}` : '[取消]',
+      reason ? `原因：${reason}` : null,
+      `時間：${new Date().toISOString()}`,
+    ].filter(Boolean).join(' / ');
+
+    const { data: updated, error } = await supabase
+      .from('recruitment_needs')
+      .update({
+        status:     'cancelled',
+        note:       cancelNote,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', need.id)
+      .select('id, status, store_erpid, store_name')
+      .single();
+
+    if (error) throw error;
+
+    console.log(
+      `[Recruitment] 市場部 API 取消需求：${need.store_name} (${need.id})` +
+      (cancelled_by ? ` by ${cancelled_by}` : '') +
+      (reason ? ` 原因：${reason}` : '')
+    );
+
+    // ── 4. 推播給營運部 staff（fire-and-forget）──
+    const message =
+      `🚫 市場部取消人力需求\n` +
+      `${'─'.repeat(20)}\n` +
+      `門市：${need.store_name}\n` +
+      `原本缺：${need.total_needed} 人\n` +
+      (cancelled_by ? `取消者：${cancelled_by}\n` : '') +
+      (reason ? `原因：${reason}\n` : '') +
+      `${'─'.repeat(20)}\n` +
+      `該需求已於系統內關閉。`;
+    notifyOperationStaff(message);
+
+    res.json({ success: true, data: { id: updated.id, status: 'cancelled' } });
+
+  } catch (e) {
+    console.error('[Recruitment External cancel]', e.message);
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+
+// ════════════════════════════════════════════════════════════
 // POST /api/recruitment/external/arrival
 // 教育訓練系統呼叫：新人已完成建檔，回傳到職連結
 //
