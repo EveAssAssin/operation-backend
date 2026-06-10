@@ -464,6 +464,29 @@ async function listStores() {
   return data || [];
 }
 
+async function createStore({ store_erpid, store_name }) {
+  const erpid = String(store_erpid || '').trim();
+  const name  = String(store_name  || '').trim();
+  if (!erpid) throw new Error('store_erpid 不能空白');
+  if (!name)  throw new Error('store_name 不能空白');
+
+  // 先檢查有沒有重複
+  const { data: existing } = await supabase
+    .from('departments')
+    .select('store_erpid, store_name')
+    .eq('store_erpid', erpid)
+    .maybeSingle();
+  if (existing) throw new Error(`erpid「${erpid}」已被「${existing.store_name}」使用`);
+
+  const { data, error } = await supabase
+    .from('departments')
+    .insert({ store_erpid: erpid, store_name: name, is_active: true })
+    .select('store_erpid, store_name, is_active')
+    .single();
+  if (error) throw new Error(error.message);
+  return data;
+}
+
 async function listSystemUsers() {
   // 給「推播名單」用 — 列出系統用戶 with app_number
   const { data, error } = await supabase
@@ -489,5 +512,5 @@ module.exports = {
   // 訂閱者
   listSubscribers, upsertSubscriber, deleteSubscriber,
   // 選項
-  listStores, listSystemUsers,
+  listStores, createStore, listSystemUsers,
 };
