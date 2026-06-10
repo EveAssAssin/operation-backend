@@ -119,7 +119,13 @@ async function getScoreRecords(erpids, starttime, endtime) {
 }
 
 // ───────────────────────────────────────────────────────────────
-// 查單一員工目前分數餘額（加總全部歷史 score）
+// 查單一員工目前分數餘額
+//   ⚠️ 2026-06 MAP API 新增 employeeTotalScore 欄位：員工的即時當下總分
+//      早期版本沒這欄，得自己加總 records[].score。但加總會跟 MAP 實際分數
+//      差很多（驗證過張右筠差 294 分、王柏文差 133 分），原因應是 MAP 後台
+//      有手動調整 / 歷史歸檔，這些不會出現在 records 裡。
+//      所以：總分一律以 employeeTotalScore 為準；加總當 fallback。
+//
 //   回傳：{ erpid, employeeName, totalScore, totalBonus, recordCount }
 // ───────────────────────────────────────────────────────────────
 function todayStr() {
@@ -139,17 +145,23 @@ async function getEmployeeBalance(erpid) {
   const row  = rows.find(r => String(r.employeeErpid) === erp) || rows[0];
 
   const records = Array.isArray(row?.records) ? row.records : [];
-  let totalScore = 0;
-  let totalBonus = 0;
+  let sumScore = 0;
+  let sumBonus = 0;
   for (const rec of records) {
-    totalScore += Number(rec.score || 0);
-    totalBonus += Number(rec.bonus || 0);
+    sumScore += Number(rec.score || 0);
+    sumBonus += Number(rec.bonus || 0);
   }
+
+  // 總分一律以 MAP 給的 employeeTotalScore 為準；若 API 沒這欄（舊版相容）才退回加總
+  const totalScore = row?.employeeTotalScore != null
+    ? Number(row.employeeTotalScore)
+    : sumScore;
+
   return {
     erpid:        erp,
     employeeName: row?.employeeName || null,
     totalScore,
-    totalBonus,
+    totalBonus:   sumBonus,        // MAP 沒給總獎金欄位，仍用加總
     recordCount:  records.length,
   };
 }
