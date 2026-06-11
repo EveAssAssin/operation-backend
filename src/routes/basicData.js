@@ -24,9 +24,10 @@ function actorFromReq(req) {
 }
 
 // ── 選項 ─────────────────────────────────────────────────────
-router.get ('/options/stores',       async (req, res) => { try { ok(res, await svc.listStores()); }       catch (e) { fail(res, e); } });
-router.post('/options/stores',       async (req, res) => { try { ok(res, await svc.createStore(req.body || {})); } catch (e) { fail(res, e); } });
-router.get ('/options/system-users', async (req, res) => { try { ok(res, await svc.listSystemUsers()); }  catch (e) { fail(res, e); } });
+router.get   ('/options/stores',           async (req, res) => { try { ok(res, await svc.listStores()); }       catch (e) { fail(res, e); } });
+router.post  ('/options/stores',           async (req, res) => { try { ok(res, await svc.createStore(req.body || {})); } catch (e) { fail(res, e); } });
+router.delete('/options/stores/:erpid',    async (req, res) => { try { ok(res, await svc.deleteStore(req.params.erpid)); } catch (e) { fail(res, e); } });
+router.get   ('/options/system-users',     async (req, res) => { try { ok(res, await svc.listSystemUsers()); }  catch (e) { fail(res, e); } });
 
 // ── 分類 ─────────────────────────────────────────────────────
 router.get   ('/categories',     async (req, res) => { try { ok(res, await svc.listCategories()); }                                    catch (e) { fail(res, e); } });

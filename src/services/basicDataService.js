@@ -464,6 +464,28 @@ async function listStores() {
   return data || [];
 }
 
+async function deleteStore(erpid) {
+  const id = String(erpid || '').trim();
+  if (!id) throw new Error('erpid 不能空白');
+
+  // 先檢查還有沒有 entity_facts 引用
+  const { count, error: cErr } = await supabase
+    .from('entity_facts')
+    .select('id', { count: 'exact', head: true })
+    .eq('store_erpid', id);
+  if (cErr) throw new Error(cErr.message);
+  if ((count || 0) > 0) {
+    throw new Error(`這個門市還有 ${count} 筆資料引用，請先刪除或移動那些資料才能刪除門市`);
+  }
+
+  const { error } = await supabase
+    .from('departments')
+    .delete()
+    .eq('store_erpid', id);
+  if (error) throw new Error(error.message);
+  return { store_erpid: id, deleted: true };
+}
+
 async function createStore({ store_erpid, store_name }) {
   const erpid = String(store_erpid || '').trim();
   const name  = String(store_name  || '').trim();
@@ -512,5 +534,5 @@ module.exports = {
   // 訂閱者
   listSubscribers, upsertSubscriber, deleteSubscriber,
   // 選項
-  listStores, createStore, listSystemUsers,
+  listStores, createStore, deleteStore, listSystemUsers,
 };
