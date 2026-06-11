@@ -79,16 +79,26 @@ async function getExpense(id) {
 }
 
 async function createExpense(input, createdBy) {
+  const needsBilling = !!input.needs_billing;
+  const cycleDayNum  = parseCycleDay(input.cycle_day, input.cycle_day_text);
+
   const row = {
     name:             input.name?.trim(),
     description:      input.description?.trim() || null,
     amount:           Number(input.amount),
     cycle_type:       input.cycle_type || 'monthly_fixed_day',
-    cycle_day:        Number(input.cycle_day),
+    cycle_day:        cycleDayNum,
+    cycle_day_text:   (input.cycle_day_text || '').trim() || null,
     holiday_rule:     input.holiday_rule || 'previous_workday',
-    bill_target_type: input.bill_target_type,
-    bill_target_id:   String(input.bill_target_id),
-    bill_target_name: input.bill_target_name,
+
+    payment_method:   (input.payment_method || '').trim() || null,
+    payee_name:       (input.payee_name     || '').trim() || null,
+    needs_billing:    needsBilling,
+    period_text:      (input.period_text    || '').trim() || null,
+
+    bill_target_type: needsBilling ? input.bill_target_type : null,
+    bill_target_id:   needsBilling ? String(input.bill_target_id || '') : null,
+    bill_target_name: needsBilling ? input.bill_target_name : null,
     start_year_month: input.start_year_month || null,
     end_year_month:   input.end_year_month   || null,
     is_active:        input.is_active !== false,
@@ -98,10 +108,12 @@ async function createExpense(input, createdBy) {
 
   if (!row.name)             throw new Error('name 必填');
   if (!Number.isFinite(row.amount)) throw new Error('amount 必須是數字');
-  if (!row.cycle_day)        throw new Error('cycle_day 必填');
-  if (!row.bill_target_type) throw new Error('bill_target_type 必填');
-  if (!row.bill_target_id)   throw new Error('bill_target_id 必填');
-  if (!row.bill_target_name) throw new Error('bill_target_name 必填');
+  if (!row.cycle_day)        throw new Error('cycle_day 必填（或請填寫 cycle_day_text 例如「5號」）');
+  if (needsBilling) {
+    if (!row.bill_target_type) throw new Error('bill_target_type 必填（needs_billing=true 時）');
+    if (!row.bill_target_id)   throw new Error('bill_target_id 必填（needs_billing=true 時）');
+    if (!row.bill_target_name) throw new Error('bill_target_name 必填（needs_billing=true 時）');
+  }
 
   const { data, error } = await supabase
     .from('recurring_expenses')
@@ -112,9 +124,25 @@ async function createExpense(input, createdBy) {
   return data;
 }
 
+/** 解析「每月幾號支付」: 數字優先；否則從文字抽數字（「5號」→5、「18號前」→18） */
+function parseCycleDay(numeric, text) {
+  const n = Number(numeric);
+  if (Number.isFinite(n) && n >= 1 && n <= 31) return n;
+  if (text) {
+    const m = String(text).match(/(\d+)/);
+    if (m) {
+      const d = Number(m[1]);
+      if (d >= 1 && d <= 31) return d;
+    }
+  }
+  // 預設 5
+  return 5;
+}
+
 async function updateExpense(id, patch) {
   const allowed = [
-    'name','description','amount','cycle_type','cycle_day','holiday_rule',
+    'name','description','amount','cycle_type','cycle_day','cycle_day_text','holiday_rule',
+    'payment_method','payee_name','needs_billing','period_text',
     'bill_target_type','bill_target_id','bill_target_name',
     'start_year_month','end_year_month','is_active','note',
   ];
@@ -309,7 +337,7 @@ async function markNotified(paymentIds) {
 async function listStores() {
   const { data, error } = await supabase
     .from('employees')
-    .select('store_erpid, store_name')
+      .select('store_erpid, store_name')
     .not('store_erpid', 'is', null)
     .not('store_name',  'is', null)
     .eq('is_active', true);
