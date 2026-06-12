@@ -103,6 +103,9 @@ app.use('/api/recurring-expenses', authenticate, require('./routes/recurringExpe
 // 系統更新模組（從 GitHub 抓 commits 展示開發績效，需登入）
 app.use('/api/system-updates', authenticate, require('./routes/systemUpdates'));
 
+// 合約管理模組（房租/廠商/員工，需登入）
+app.use('/api/contracts', authenticate, require('./routes/contracts'));
+
 // 任務派發模組（送任務到市場部，需登入）
 app.use('/api/quests', authenticate, require('./routes/quests'));
 
