@@ -69,6 +69,25 @@ router.get('/payments/today', async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
+// GET /api/recurring-expenses/export-elton/:yearMonth
+// 產生該月「元大網銀批次匯款 Excel」(.xlsx) 下載
+router.get('/export-elton/:yearMonth', async (req, res) => {
+  try {
+    const { yearMonth } = req.params;
+    if (!/^\d{4}-\d{2}$/.test(yearMonth)) {
+      return res.status(400).json({ success: false, message: 'yearMonth 格式須為 YYYY-MM' });
+    }
+    const result = await svc.exportEltonBatchForMonth(yearMonth);
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(result.filename)}`);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('X-Item-Count', String(result.count));
+    res.send(result.buffer);
+  } catch (e) {
+    console.error('[RE export-elton]', e);
+    res.status(500).json({ success: false, message: e.message || '產生 Excel 失敗' });
+  }
+});
+
 // POST /api/recurring-expenses/payments/:id/pay
 // body: { paid_note }
 router.post('/payments/:id/pay', async (req, res) => {
@@ -115,29 +134,25 @@ router.get('/:id', async (req, res) => {
 router.post('/', async (req, res) => {
   try {
     const createdBy = req.user?.member_id || null;
-    const data      = await svc.createExpense(req.body || {}, createdBy);
+    const data = await svc.createExpense(req.body, createdBy);
     ok(res, data);
-  } catch (e) {
-    if (e.message?.includes('必填') || e.message?.includes('必須')) return bad(res, e.message);
-    fail(res, e);
-  }
+  } catch (e) { fail(res, e); }
 });
 
 // PATCH /api/recurring-expenses/:id
 router.patch('/:id', async (req, res) => {
   try {
-    const data = await svc.updateExpense(req.params.id, req.body || {});
+    const data = await svc.updateExpense(req.params.id, req.body);
     ok(res, data);
   } catch (e) { fail(res, e); }
 });
 
-// DELETE /api/recurring-expenses/:id  → 軟刪除（is_active = false）
+// DELETE /api/recurring-expenses/:id (軟刪除)
 router.delete('/:id', async (req, res) => {
   try {
     await svc.deleteExpense(req.params.id);
-    ok(res, { id: req.params.id });
+    ok(res, { deleted: true });
   } catch (e) { fail(res, e); }
 });
-
 
 module.exports = router;

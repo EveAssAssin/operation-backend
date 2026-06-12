@@ -6,6 +6,7 @@
 //   - 取今日應付清單（給排程推播用）
 
 const supabase = require('../config/supabase');
+const XLSX     = require('xlsx');
 const { prevWorkingDay } = require('./taiwanHolidayService');
 
 // ── 工具 ────────────────────────────────────────────────────
@@ -95,6 +96,9 @@ async function createExpense(input, createdBy) {
     payee_name:       (input.payee_name     || '').trim() || null,
     needs_billing:    needsBilling,
     period_text:      (input.period_text    || '').trim() || null,
+    bank_code:        (input.bank_code      || '').trim() || null,
+    bank_branch:      (input.bank_branch    || '').trim() || null,
+    bank_account:     (input.bank_account   || '').trim() || null,
 
     bill_target_type: needsBilling ? input.bill_target_type : null,
     bill_target_id:   needsBilling ? String(input.bill_target_id || '') : null,
@@ -143,6 +147,7 @@ async function updateExpense(id, patch) {
   const allowed = [
     'name','description','amount','cycle_type','cycle_day','cycle_day_text','holiday_rule',
     'payment_method','payee_name','needs_billing','period_text',
+    'bank_code','bank_branch','bank_account',
     'bill_target_type','bill_target_id','bill_target_name',
     'start_year_month','end_year_month','is_active','note',
   ];
@@ -331,18 +336,144 @@ async function markNotified(paymentIds) {
 }
 
 
+// ════════════════════════════════════════════════════════════
+//                  產生本月元大匯款 Excel
+// ════════════════════════════════════════════════════════════
+
+/**
+ * 產生指定月份的元大網銀批次匯款檔
+ *   - 撈 recurring_expense_payments 該月 status='pending'
+ *   - JOIN recurring_expenses 拿銀行資料 + 費用名稱
+ *   - 從 company_profile 讀 payer 資料
+ *   - 格式照使用者提供的「115.06元大常態+支票 出款.xlsx」
+ *     R3 付款資料 header / R4 付款資料 / R6 收款 header / R7 範本 / R8+ 明細
+ */
+async function exportEltonBatchForMonth(yearMonth) {
+  // ── 1. 撈 payments + 對應的 expense bank info
+  const { data: payments, error } = await supabase
+    .from('recurring_expense_payments')
+    .select(`
+      id, year_month, due_date, amount, status,
+      recurring_expenses (
+        name, payee_name, bank_code, bank_branch, bank_account
+      )
+    `)
+    .eq('year_month', yearMonth)
+    .eq('status', 'pending')
+    .order('due_date', { ascending: true });
+  if (error) throw new Error(error.message);
+
+  // ── 2. 撈 company_profile
+  const { data: payer, error: pErr } = await supabase
+    .from('company_profile')
+    .select('*')
+    .eq('id', 1)
+    .maybeSingle();
+  if (pErr) throw new Error(pErr.message);
+  if (!payer) throw new Error('請先到「公司資料」頁設定付款方資料');
+
+  // ── 3. 組明細列
+  const items = (payments || []).map(p => {
+    const e = p.recurring_expenses || {};
+    return {
+      due_date:     p.due_date,
+      amount:       Number(p.amount),
+      account_no:   e.bank_account || '',
+      account_name: e.payee_name   || '',
+      bank_code:    e.bank_code    || '',
+      branch_code:  e.bank_branch  || '',
+      memo:         e.name         || '',
+    };
+  });
+
+  // ── 4. 付款日：用最早一筆的 due_date（西元 yyyymmdd）
+  const firstDue = items[0]?.due_date || `${yearMonth}-15`;
+  const paymentDateYmd = String(firstDue).replace(/-/g, '');
+
+  // ── 5. 組裝 sheet
+  const data = [];
+  data.push([]);   // R1
+  data.push([]);   // R2
+
+  // R3: 付款資料 header
+  data.push(['', '', '', '付款日期', '付款帳號', '付款戶名', '付款總行', '付款分行', '逾時處理指示',
+             '', '', '', '', '', '', 'V20130123版']);
+
+  // R4: 付款資料 values
+  data.push(['', '', '',
+    paymentDateYmd,
+    payer.payer_account_no   || '',
+    payer.payer_account_name || '',
+    payer.payer_bank_code    || '',
+    payer.payer_branch_code  || '',
+    payer.default_overdue_code || '1',
+  ]);
+
+  // R5 空
+  data.push([]);
+
+  // R6: 收款資料 header
+  data.push([
+    '', '', '日期', '收款金額', '收款帳號', '收款戶名', '收款總行', '收款分行',
+    '識別碼類別', '識別碼', '手續費負擔別', '通知方式',
+    'FAX傳真號碼', 'E-mail Address', 'FXML URL', '銷帳參考資料', '附言',
+  ]);
+
+  // R7: 範本（勿刪除）
+  data.push([
+    '', '', '', 38, '00000000000001', '王大明', '806', '0998', '53', 'A123456789',
+    '15', '0', '', '', '', '', '範本資料，勿刪除！',
+  ]);
+
+  // R8 起：明細
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    const [y, m, d] = String(it.due_date).split('-').map(Number);
+    const rocDate = `${y - 1911}${String(m).padStart(2, '0')}${String(d).padStart(2, '0')}`;
+    data.push([
+      '',
+      i === 0 ? '開始=＞' : '',
+      rocDate,
+      it.amount,
+      it.account_no,
+      it.account_name,
+      it.bank_code,
+      it.branch_code,
+      '', '',
+      payer.default_fee_burden  || '15',
+      payer.default_notify_method || '0',
+      '', '', '', '',
+      it.memo,
+    ]);
+  }
+
+  const ws = XLSX.utils.aoa_to_sheet(data);
+  ws['!cols'] = [
+    { wch: 6 }, { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 18 }, { wch: 22 },
+    { wch: 8 }, { wch: 8 }, { wch: 10 }, { wch: 14 }, { wch: 12 }, { wch: 10 },
+    { wch: 14 }, { wch: 18 }, { wch: 14 }, { wch: 14 }, { wch: 20 },
+  ];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, '工作表1');
+
+  return {
+    buffer:   XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }),
+    filename: `${yearMonth}_元大常態+支票_出款.xlsx`,
+    count:    items.length,
+  };
+}
+
+
 // ── 開帳對象選項 ───────────────────────────────────────────
 
-/** 取得門市清單（用於下拉選單） */
 async function listStores() {
   const { data, error } = await supabase
     .from('employees')
-      .select('store_erpid, store_name')
+    .select('store_erpid, store_name')
     .not('store_erpid', 'is', null)
     .not('store_name',  'is', null)
     .eq('is_active', true);
-  if (error) throw error;
-  // 去重
+  if (error) throw new Error(error.message);
   const map = new Map();
   (data || []).forEach(r => {
     if (r.store_erpid && r.store_name && !map.has(r.store_erpid)) {
@@ -352,9 +483,31 @@ async function listStores() {
   return [...map.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-TW'));
 }
 
-/** 取得部門清單 */
 async function listDepartments() {
   const { data, error } = await supabase
+    .from('departments')
+    .select('id, name')
+    .order('name', { ascending: true });
+  if (error) throw new Error(error.message);
+  return (data || []).map(d => ({ id: String(d.id), name: d.name }));
+}
+
+
+module.exports = {
+  // CRUD
+  listExpenses, getExpense, createExpense, updateExpense, deleteExpense,
+  // Payment 補建 / 查詢 / 狀態
+  ensurePaymentForMonth, ensureCurrentMonthPayments,
+  listPaymentsByMonth, getTodayDuePayments,
+  markPaid, unmarkPaid, markNotified,
+  // 對象清單
+  listStores, listDepartments,
+  // 元大匯款
+  exportEltonBatchForMonth,
+  // 工具（給 cron / route 共用）
+  todayStr, ymOf, computeDueDates,
+};
+{ data, error } = await supabase
     .from('departments')
     .select('id, name')
     .order('name', { ascending: true });
@@ -372,6 +525,8 @@ module.exports = {
   markPaid, unmarkPaid, markNotified,
   // 對象清單
   listStores, listDepartments,
+  // 元大匯款
+  exportEltonBatchForMonth,
   // 工具（給 cron / route 共用）
   todayStr, ymOf, computeDueDates,
 };
