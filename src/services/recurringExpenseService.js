@@ -466,30 +466,31 @@ async function exportEltonBatchForMonth(yearMonth) {
 
 // ── 開帳對象選項 ───────────────────────────────────────────
 
+// 「門市」「部門」現在都從 departments 表撈
+//   - 門市：store_erpid 以「1」「2」開頭（120xxx、2456300...）
+//   - 部門：store_erpid 以「0」開頭（00002 企劃部...）
+//   - 跟基本資料「依門市」視角一致
+
 async function listStores() {
   const { data, error } = await supabase
-    .from('employees')
+    .from('departments')
     .select('store_erpid, store_name')
-    .not('store_erpid', 'is', null)
-    .not('store_name',  'is', null)
-    .eq('is_active', true);
+    .order('store_name', { ascending: true });
   if (error) throw new Error(error.message);
-  const map = new Map();
-  (data || []).forEach(r => {
-    if (r.store_erpid && r.store_name && !map.has(r.store_erpid)) {
-      map.set(r.store_erpid, { id: r.store_erpid, name: r.store_name });
-    }
-  });
-  return [...map.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-TW'));
+  return (data || [])
+    .filter(r => r.store_erpid && /^[12]/.test(r.store_erpid))
+    .map(r => ({ id: r.store_erpid, name: r.store_name }));
 }
 
 async function listDepartments() {
   const { data, error } = await supabase
     .from('departments')
-    .select('id, name')
-    .order('name', { ascending: true });
+    .select('store_erpid, store_name')
+    .order('store_name', { ascending: true });
   if (error) throw new Error(error.message);
-  return (data || []).map(d => ({ id: String(d.id), name: d.name }));
+  return (data || [])
+    .filter(r => r.store_erpid && /^0/.test(r.store_erpid))
+    .map(r => ({ id: r.store_erpid, name: r.store_name }));
 }
 
 
