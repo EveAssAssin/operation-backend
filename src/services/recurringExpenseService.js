@@ -507,26 +507,3 @@ module.exports = {
   // 工具（給 cron / route 共用）
   todayStr, ymOf, computeDueDates,
 };
-{ data, error } = await supabase
-    .from('departments')
-    .select('id, name')
-    .order('name', { ascending: true });
-  if (error) throw error;
-  return (data || []).map(d => ({ id: String(d.id), name: d.name }));
-}
-
-
-module.exports = {
-  // CRUD
-  listExpenses, getExpense, createExpense, updateExpense, deleteExpense,
-  // Payment 補建 / 查詢 / 狀態
-  ensurePaymentForMonth, ensureCurrentMonthPayments,
-  listPaymentsByMonth, getTodayDuePayments,
-  markPaid, unmarkPaid, markNotified,
-  // 對象清單
-  listStores, listDepartments,
-  // 元大匯款
-  exportEltonBatchForMonth,
-  // 工具（給 cron / route 共用）
-  todayStr, ymOf, computeDueDates,
-};
