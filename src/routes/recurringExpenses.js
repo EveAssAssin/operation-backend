@@ -69,15 +69,17 @@ router.get('/payments/today', async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
-// GET /api/recurring-expenses/export-elton/:yearMonth
+// POST /api/recurring-expenses/export-elton/:yearMonth
+// body: { payment_ids: [uuid, ...] }  // 空 = 全部 pending
 // 產生該月「元大網銀批次匯款 Excel」(.xlsx) 下載
-router.get('/export-elton/:yearMonth', async (req, res) => {
+router.post('/export-elton/:yearMonth', async (req, res) => {
   try {
     const { yearMonth } = req.params;
     if (!/^\d{4}-\d{2}$/.test(yearMonth)) {
       return res.status(400).json({ success: false, message: 'yearMonth 格式須為 YYYY-MM' });
     }
-    const result = await svc.exportEltonBatchForMonth(yearMonth);
+    const paymentIds = Array.isArray(req.body?.payment_ids) ? req.body.payment_ids : null;
+    const result = await svc.exportEltonBatchForMonth(yearMonth, paymentIds);
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(result.filename)}`);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('X-Item-Count', String(result.count));

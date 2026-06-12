@@ -348,9 +348,10 @@ async function markNotified(paymentIds) {
  *   - 格式照使用者提供的「115.06元大常態+支票 出款.xlsx」
  *     R3 付款資料 header / R4 付款資料 / R6 收款 header / R7 範本 / R8+ 明細
  */
-async function exportEltonBatchForMonth(yearMonth) {
+async function exportEltonBatchForMonth(yearMonth, paymentIds = null) {
   // ── 1. 撈 payments + 對應的 expense bank info
-  const { data: payments, error } = await supabase
+  //    有給 paymentIds → 依 IN 篩；沒給 → 全部 pending
+  let q = supabase
     .from('recurring_expense_payments')
     .select(`
       id, year_month, due_date, amount, status,
@@ -359,8 +360,13 @@ async function exportEltonBatchForMonth(yearMonth) {
       )
     `)
     .eq('year_month', yearMonth)
-    .eq('status', 'pending')
     .order('due_date', { ascending: true });
+  if (Array.isArray(paymentIds) && paymentIds.length > 0) {
+    q = q.in('id', paymentIds);
+  } else {
+    q = q.eq('status', 'pending');
+  }
+  const { data: payments, error } = await q;
   if (error) throw new Error(error.message);
 
   // ── 2. 撈 company_profile
