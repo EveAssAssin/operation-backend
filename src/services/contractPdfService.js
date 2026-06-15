@@ -1,8 +1,26 @@
 // services/contractPdfService.js
 // 用 Gemini API 從合約 PDF 抽結構化資訊（房租 / 廠商 / 員工）
 
+const supabase     = require('../config/supabase');
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const GEMINI_URL   = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+
+/** 從 company_profile DB 撈 gemini_api_key；fallback 環境變數 */
+async function getGeminiKey() {
+  // 先試 DB
+  try {
+    const { data } = await supabase
+      .from('company_profile')
+      .select('gemini_api_key')
+      .eq('id', 1)
+      .maybeSingle();
+    if (data?.gemini_api_key) return data.gemini_api_key;
+  } catch (e) {
+    console.warn('[contractPdf] read company_profile.gemini_api_key fail:', e.message);
+  }
+  // fallback env
+  return process.env.GEMINI_API_KEY || null;
+}
 
 /** 房租合約 prompt */
 const RENT_PROMPT = `你是合約解析助手。請從以下房租合約 PDF 抽出結構化資訊，回傳 **純 JSON**（不要 markdown、不要 \`\`\`），格式如下：
@@ -90,8 +108,8 @@ const PROMPTS = {
  * @param {string} type   'rent' | 'vendor' | 'employee'
  */
 async function parseContractPdf(pdfBuffer, type = 'rent') {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error('伺服器未設 GEMINI_API_KEY 環境變數');
+  const apiKey = await getGeminiKey();
+  if (!apiKey) throw new Error('還沒設定 Gemini API Key，請到「應付帳款 → ⚙ 公司資料」最下方填入');
 
   const prompt = PROMPTS[type] || RENT_PROMPT;
   const body = {
