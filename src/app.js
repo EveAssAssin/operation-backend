@@ -106,6 +106,9 @@ app.use('/api/system-updates', authenticate, require('./routes/systemUpdates'));
 // 合約管理模組（房租/廠商/員工，需登入）
 app.use('/api/contracts', authenticate, require('./routes/contracts'));
 
+// 通用附件模組（Supabase Storage，需登入）
+app.use('/api/files', authenticate, require('./routes/files'));
+
 // 任務派發模組（送任務到市場部，需登入）
 app.use('/api/quests', authenticate, require('./routes/quests'));
 
