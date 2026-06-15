@@ -87,6 +87,14 @@ router.delete('/:id', async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
+// ── History ────────────────────────────────────────────
+router.get('/:id/history', async (req, res) => {
+  try {
+    const limit = Math.max(1, Math.min(500, parseInt(req.query.limit || '200', 10)));
+    ok(res, await svc.listHistory(req.params.id, limit));
+  } catch (e) { fail(res, e); }
+});
+
 // ── Reminder ────────────────────────────────────────────
 router.get('/:id/reminders',  async (req, res) => {
   try { ok(res, await svc.listReminders(req.params.id)); } catch (e) { fail(res, e); }

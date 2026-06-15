@@ -165,9 +165,24 @@ async function upsertReminders(contractId, reminders) {
 }
 
 
+// ── 歷史記錄 ────────────────────────────────────────────────
+
+async function listHistory(contractId, limit = 200) {
+  const { data, error } = await supabase
+    .from('contract_history')
+    .select('id, changed_at, changed_by, field, old_value, new_value')
+    .eq('contract_id', contractId)
+    .order('changed_at', { ascending: false })
+    .limit(limit);
+  if (error) throw new Error(error.message);
+  return data || [];
+}
+
+
 module.exports = {
   listContracts, getContract, createContract, updateContract, deleteContract,
   listExpiring,
   listReminders, upsertReminders,
+  listHistory,
   todayStr,
 };

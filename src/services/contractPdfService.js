@@ -88,21 +88,27 @@ const VENDOR_PROMPT = `你是合約解析助手。從廠商貨款合約 PDF 抽�
 /** 員工合約 prompt */
 const EMPLOYEE_PROMPT = `你是合約解析助手。從員工雇用合約 PDF 抽結構化資訊，回傳 **純 JSON**：
 {
-  "name": "合約名稱",
+  "name": "合約名稱（如：王小明 雇用合約）",
   "party_name": "雇主公司",
   "our_side_name": "員工姓名",
   "signed_date": "YYYY-MM-DD",
   "start_date": "雇用起始日 YYYY-MM-DD",
   "end_date": "終止日 YYYY-MM-DD 或 null（無限期）",
-  "monthly_amount": 月薪,
+  "monthly_amount": 現行月薪,
   "total_amount": 年薪 或 null,
   "type_data": {
-    "position": "職位",
-    "probation_end": "試用期結束 YYYY-MM-DD 或 null",
-    "salary_base": 底薪,
-    "resignation_notice_days": 離職預告天數
+    "position":          "職位",
+    "probation_end":     "試用期結束 YYYY-MM-DD 或 null",
+    "probation_salary":  試用期月薪 數字,
+    "formal_salary":     轉正後月薪 數字,
+    "salary_base":       現行底薪 數字,
+    "insurance_grade":   勞保投保級距金額 數字（例：36300、38200）,
+    "adjustment_type":   "annual" / "performance" / "both" / "none",
+    "adjustment_month":  年度調薪月份（1-12 數字）或 null,
+    "resignation_notice_days": 離職預告天數,
+    "id_last4": "身分證末四碼"
   },
-  "note": "其他要點"
+  "note": "其他要點（保密條款、競業條款等）"
 }
 民國年換西元，看不到填 null，直接回 JSON。`;
 
