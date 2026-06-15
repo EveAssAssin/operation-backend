@@ -118,30 +118,36 @@ async function fetchCommitsFromRepo(repo, sinceISO, untilISO) {
 // ── 業務查詢 ────────────────────────────────────────────────
 
 /**
- * 該成員「最近 N 天」的詳細 commits（依日期分組）
+ * 該成員指定區間的詳細 commits（依日期分組）
+ *   - 給 fromDate / toDate（YYYY-MM-DD）→ 用區間
+ *   - 否則用 days（最近 N 天）
  *   回傳 [{ date: 'YYYY-MM-DD', commits: [...] }]，新 → 舊
  */
-async function dailyCommits(memberId, days = 14) {
+async function dailyCommits(memberId, opts = {}) {
+  const { days = 14, fromDate, toDate } = opts;
   const repos = await getMemberRepos(memberId);
   if (repos.length === 0) {
     return { days: [], total: 0, repos: [] };
   }
-  const sinceISO = new Date(Date.now() - days * 24 * 3600 * 1000).toISOString();
+  let sinceISO, untilISO;
+  if (fromDate || toDate) {
+    if (fromDate) sinceISO = new Date(`${fromDate}T00:00:00+08:00`).toISOString();
+    if (toDate)   untilISO = new Date(`${toDate}T23:59:59+08:00`).toISOString();
+  } else {
+    sinceISO = new Date(Date.now() - days * 24 * 3600 * 1000).toISOString();
+  }
 
   const all = [];
   for (const repo of repos) {
     try {
-      const cs = await fetchCommitsFromRepo(repo, sinceISO);
+      const cs = await fetchCommitsFromRepo(repo, sinceISO, untilISO);
       all.push(...cs);
     } catch (e) {
       console.warn('[systemUpdate] fetch fail', repo.github_owner, repo.github_repo, e.message);
     }
   }
 
-  // 過濾 merge commit（commit message 開頭是 Merge）
   const filtered = all.filter(c => !/^Merge /.test(c.message));
-
-  // 依日期分組
   const byDate = {};
   for (const c of filtered) {
     const d = toTaipeiDate(c.date);
@@ -156,7 +162,99 @@ async function dailyCommits(memberId, days = 14) {
     days:      dayList,
     total:     filtered.length,
     repos:     repos.map(r => `${r.github_owner}/${r.github_repo}`),
-    since:     sinceISO,
+    since:     sinceISO || null,
+    until:     untilISO || null,
+  };
+}
+
+
+// ── AI 中文摘要（用 Gemini 整理本期間 commits）
+async function aiSummarize(memberId, opts = {}) {
+  const { days = 14, fromDate, toDate } = opts;
+  const result = await dailyCommits(memberId, { days, fromDate, toDate });
+  const flat = result.days.flatMap(d => d.commits);
+  if (flat.length === 0) return { total: 0, summary: '本期間沒有 commits', items: [] };
+
+  // 從 company_profile 撈 Gemini key
+  const { data: cp } = await supabase
+    .from('company_profile')
+    .select('gemini_api_key')
+    .eq('id', 1)
+    .maybeSingle();
+  const apiKey = cp?.gemini_api_key || process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error('還沒設 Gemini API Key，請到「公司資料」頁設定');
+
+  const list = flat.map((c, i) => `${i + 1}. [${toTaipeiDate(c.date)}] [${c.type}] [${c.repo_label}] ${c.subject}`).join('\n');
+
+  const prompt = `你是專案經理。以下是「營運部系統」這段時間的 GitHub commit，請整理出中文重點摘要，回傳純 JSON：
+
+{
+  "summary": "本期間整體成果，用 3-5 句中文，給老闆看。要寫『新增了 X 功能、修了 Y 個 bug、優化了 Z』這種人話。",
+  "categories": {
+    "新增功能": ["中文簡述 1", "中文簡述 2"],
+    "修 Bug": ["..."],
+    "優化": ["..."],
+    "其他": ["..."]
+  },
+  "translations": [
+    // 每個 commit 對應一個中文短句（依原本順序），不超過 30 字
+    "中文翻譯 1",
+    "中文翻譯 2"
+  ]
+}
+
+translations 的長度必須等於下方 commit 數（${flat.length} 筆），順序對應。
+
+commit 列表：
+${list}
+
+直接回 JSON，不要 markdown。`;
+
+  // 用既有 fallback 機制 (contractPdfService 那套)
+  const models = [process.env.GEMINI_MODEL || 'gemini-2.0-flash', 'gemini-flash-latest', 'gemini-2.5-flash'];
+  let res, lastErr = '';
+  for (const model of models) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    res = await fetch(url, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.3, responseMimeType: 'application/json' },
+      }),
+    });
+    if (res.ok) break;
+    const t = await res.text().catch(() => '');
+    lastErr = `Gemini ${res.status} (${model}): ${t.slice(0, 200)}`;
+    if (![503, 429].includes(res.status)) throw new Error(lastErr);
+  }
+  if (!res.ok) throw new Error(lastErr);
+  const json = await res.json();
+  const txt = json?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (!txt) throw new Error('Gemini 沒回內容');
+
+  let parsed;
+  try { parsed = JSON.parse(txt); }
+  catch {
+    const cleaned = String(txt).replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    parsed = JSON.parse(cleaned);
+  }
+
+  // 把 translations 合回 commits
+  const items = flat.map((c, i) => ({
+    sha:        c.sha,
+    date:       c.date,
+    repo_label: c.repo_label,
+    type:       c.type,
+    subject:    c.subject,
+    zh:         parsed.translations?.[i] || '',
+  }));
+
+  return {
+    total:      flat.length,
+    summary:    parsed.summary || '',
+    categories: parsed.categories || {},
+    items,
   };
 }
 
@@ -222,6 +320,7 @@ module.exports = {
   getMemberRepos,
   dailyCommits,
   monthlySummary,
+  aiSummarize,
   listAvailableMonths,
   parseConventional,
 };

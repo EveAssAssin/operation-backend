@@ -22,10 +22,28 @@ router.get('/members', async (req, res) => {
 });
 
 // GET /api/system-updates/members/:id/daily?days=14
+//   或 ?from=YYYY-MM-DD&to=YYYY-MM-DD
 router.get('/members/:id/daily', async (req, res) => {
   try {
-    const days = Math.max(1, Math.min(60, parseInt(req.query.days || '14', 10)));
-    ok(res, await svc.dailyCommits(req.params.id, days));
+    const days = Math.max(1, Math.min(180, parseInt(req.query.days || '14', 10)));
+    ok(res, await svc.dailyCommits(req.params.id, {
+      days,
+      fromDate: req.query.from || null,
+      toDate:   req.query.to   || null,
+    }));
+  } catch (e) { fail(res, e); }
+});
+
+// GET /api/system-updates/members/:id/ai-summarize?days=14[&from=&to=]
+//   呼 Gemini 整理中文摘要
+router.get('/members/:id/ai-summarize', async (req, res) => {
+  try {
+    const days = Math.max(1, Math.min(90, parseInt(req.query.days || '14', 10)));
+    ok(res, await svc.aiSummarize(req.params.id, {
+      days,
+      fromDate: req.query.from || null,
+      toDate:   req.query.to   || null,
+    }));
   } catch (e) { fail(res, e); }
 });
 
