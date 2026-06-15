@@ -1,12 +1,11 @@
 // jobs/syncAppointedUnits.js
-// 排程：每天 04:00 同步特約單位列表（API 23）
-//        每 2 小時同步特約單位旗下會員（API 26）
-//        補抓特約單位類別（API 25）— 在每日同步單位後執行一次
+// 排程：每小時整點 同步特約單位列表（API 23）+ 補類別（API 25）
+//        每 2 小時 同步特約單位旗下會員（API 26）
 
 const cron  = require('node-cron');
 const auSvc = require('../services/appointedUnitService');
 
-const UNITS_CRON   = process.env.SYNC_APPOINTED_UNITS_CRON         || '0 4 * * *';
+const UNITS_CRON   = process.env.SYNC_APPOINTED_UNITS_CRON         || '0 * * * *';
 const MEMBERS_CRON = process.env.SYNC_APPOINTED_UNIT_MEMBERS_CRON  || '0 */2 * * *';
 
 function startAppointedUnitJobs() {
