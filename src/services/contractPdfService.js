@@ -44,7 +44,9 @@ const RENT_PROMPT = `你是合約解析助手。請從以下房租合約 PDF 抽
     "deposit": 押金 數字 或 null,
     "notice_days": 解約預告天數 或 null,
     "landlord_account": "房東匯款帳號 或 null",
-    "landlord_bank": "房東銀行（如：816 元大 0083 分行）"
+    "landlord_bank": "房東銀行（如：816 元大 0083 分行）",
+    "termination_conditions": "解約要件條款全文（含中途解約條件、違約金、書面通知期、賠償條款等，看到多少抽多少，可多段以換行分開）",
+    "demolition_scope": "拆除/回復原狀範圍（招牌、裝修、隔間、地板、天花板等要不要拆，承租方要負責什麼）"
   },
   "note": "其他重點補充（押金歸還條款、修繕約定等）"
 }
