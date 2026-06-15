@@ -3,9 +3,16 @@
 // 掛載點：/api/contracts（需登入）
 
 const express = require('express');
+const multer  = require('multer');
 const router  = express.Router();
 const { authorize } = require('../middleware/auth');
 const svc     = require('../services/contractService');
+const pdfSvc  = require('../services/contractPdfService');
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits:  { fileSize: 15 * 1024 * 1024 },  // 15MB
+});
 
 router.use(authorize('operation_staff', 'operation_lead', 'dept_head', 'super_admin'));
 
@@ -15,6 +22,21 @@ function fail(res, e)  {
   console.error('[Contracts]', e.message);
   res.status(500).json({ success: false, message: e.message || '伺服器錯誤' });
 }
+
+// POST /api/contracts/parse-pdf?type=rent  (multipart, field name: file)
+// 用 Gemini 從合約 PDF 自動抽結構化資料
+router.post('/parse-pdf', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file)             return res.status(400).json({ success: false, message: '請附上 PDF 檔案 (form-data 欄位名 file)' });
+    if (req.file.size === 0)   return res.status(400).json({ success: false, message: '檔案是空的' });
+    const type = req.query.type || 'rent';
+    if (!['rent', 'vendor', 'employee'].includes(type)) {
+      return res.status(400).json({ success: false, message: 'type 必須是 rent / vendor / employee' });
+    }
+    const parsed = await pdfSvc.parseContractPdf(req.file.buffer, type);
+    ok(res, parsed);
+  } catch (e) { fail(res, e); }
+});
 
 // GET /api/contracts?type=rent&status=active
 router.get('/', async (req, res) => {
