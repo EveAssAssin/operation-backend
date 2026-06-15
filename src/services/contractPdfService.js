@@ -65,14 +65,25 @@ const VENDOR_PROMPT = `你是合約解析助手。從廠商貨款合約 PDF 抽�
   "end_date": "YYYY-MM-DD",
   "total_amount": 合約總額,
   "type_data": {
-    "reward_rate": 回饋率小數（5% = 0.05）,
-    "cost_target": 成本比對目標,
-    "payment_terms": "付款條件文字（月結 60 天 等）",
-    "warranty_months": 保固月數
+    "benefits": [
+      // 把所有「優惠/獎勵/折讓/獎金」條款都抽出來，每筆一個 object：
+      // type:        '階梯回饋' / '回饋' / '現金折讓' / '獎金' / '折扣' / '抵用' / '其他'
+      // condition:   條件描述（例：'0~50萬' / '提早 7 天付現' / '年銷售達 500 萬'）
+      // value_type:  'percent' 或 'amount'
+      // value:       數值（5% 填 5，金額直接填數字）
+      // note:        備註（選填）
+      { "type": "階梯回饋", "condition": "0~50萬", "value_type": "percent", "value": 3 },
+      { "type": "階梯回饋", "condition": "50萬~200萬", "value_type": "percent", "value": 5 },
+      { "type": "現金折讓", "condition": "提早 7 天付現", "value_type": "percent", "value": 2 }
+    ],
+    "payment_terms":   "付款條件文字（月結 60 天 等）",
+    "cost_target":     成本比對目標 數字,
+    "warranty_months": 保固月數,
+    "billing_cycle":   "結帳週期（每月 / 每季）"
   },
-  "note": "其他要點"
+  "note": "其他要點（無法歸類為 benefits 的條款放這）"
 }
-民國年換西元，看不到填 null，直接回 JSON。`;
+民國年換西元，看不到填 null。benefits 沒寫的話填空陣列 []。直接回 JSON。`;
 
 /** 員工合約 prompt */
 const EMPLOYEE_PROMPT = `你是合約解析助手。從員工雇用合約 PDF 抽結構化資訊，回傳 **純 JSON**：
