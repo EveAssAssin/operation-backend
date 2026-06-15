@@ -2,8 +2,11 @@
 // 用 Gemini API 從合約 PDF 抽結構化資訊（房租 / 廠商 / 員工）
 
 const supabase     = require('../config/supabase');
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+// 預設用 2.0-flash 比 2.5-flash 穩定且量大；環境變數可以覆寫
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
 const GEMINI_URL   = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+// 503 fallback model（如果主 model 也 503，試這個）
+const FALLBACK_MODELS = ['gemini-2.0-flash', 'gemini-flash-latest', 'gemini-2.5-flash'];
 
 /** 從 company_profile DB 撈 gemini_api_key；fallback 環境變數 */
 async function getGeminiKey() {
@@ -147,16 +150,27 @@ async function parseContractPdf(pdfBuffer, type = 'rent') {
     },
   };
 
-  const res = await fetch(`${GEMINI_URL}?key=${encodeURIComponent(apiKey)}`, {
-    method:  'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body:    JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`Gemini API ${res.status}: ${text.slice(0, 300)}`);
+  // 依序試 GEMINI_MODEL → fallback models，遇 503/429 才換下一個
+  const candidates = [GEMINI_MODEL, ...FALLBACK_MODELS.filter(m => m !== GEMINI_MODEL)];
+  let res, json, lastErr = '';
+  for (const model of candidates) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    res = await fetch(url, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body),
+    });
+    if (res.ok) break;
+    const t = await res.text().catch(() => '');
+    lastErr = `Gemini API ${res.status} (${model}): ${t.slice(0, 200)}`;
+    // 503 / 429 才繼續試下一個；其他錯（401, 400）直接停
+    if (![503, 429].includes(res.status)) {
+      throw new Error(lastErr);
+    }
+    console.warn('[gemini] retry next model due to', res.status, model);
   }
-  const json = await res.json();
+  if (!res.ok) throw new Error(lastErr || `Gemini API 全部 model 都失敗`);
+  json = await res.json();
   const txt  = json?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!txt) throw new Error('Gemini 回傳沒有解析結果');
 
