@@ -262,22 +262,112 @@ router.get('/config', (_req, res) => {
 // ─────────────────────────────────────────────────────────────
 router.use(authenticate);
 
-// 列表（搜尋 / 過濾 / 分頁）
+// 列表（搜尋 / 過濾 / 分頁 / 排序）
+// query: page, size, keyword, category_id, sort=binding_desc | binding_asc
 router.get('/units', async (req, res) => {
   const page = Math.max(1, Number(req.query.page || 1));
   const size = Math.min(200, Math.max(1, Number(req.query.size || 20)));
   const offset = (page - 1) * size;
   const keyword = String(req.query.keyword || '').trim();
   const category_id = String(req.query.category_id || '').trim();
+  const sort = String(req.query.sort || 'binding_desc');
 
   let q = supabase.from('appointed_units').select('*', { count: 'exact' });
   if (keyword) q = q.or(`unit_name.ilike.%${keyword}%,unit_code.ilike.%${keyword}%`);
   if (category_id) q = q.eq('category_id', category_id);
-  q = q.order('sort_weight', { ascending: false }).order('unit_code').range(offset, offset + size - 1);
+
+  // 如果是「依綁定數排序」，先撈全部 units 在 JS 排序 + 切頁
+  const useBindingSort = sort.startsWith('binding');
+  if (!useBindingSort) {
+    q = q.order('sort_weight', { ascending: false }).order('unit_code').range(offset, offset + size - 1);
+  }
 
   const { data, count, error } = await q;
   if (error) return res.status(500).json({ success: false, message: error.message });
-  res.json({ success: true, data: data || [], pagination: { page, size, total: count || 0 } });
+  let units = data || [];
+
+  // 補 binding_count（全部 unit_code 一次撈出 group by）
+  const codes = units.map(u => u.unit_code).filter(Boolean);
+  let cntMap = {};
+  if (codes.length) {
+    const { data: bd } = await supabase
+      .from('appointed_unit_bindings')
+      .select('unit_code')
+      .in('unit_code', codes);
+    for (const b of bd || []) cntMap[b.unit_code] = (cntMap[b.unit_code] || 0) + 1;
+  }
+  units = units.map(u => ({ ...u, binding_count: cntMap[u.unit_code] || 0 }));
+
+  if (useBindingSort) {
+    const dir = sort === 'binding_asc' ? 1 : -1;
+    units.sort((a, b) => (a.binding_count - b.binding_count) * dir);
+    // 手動切頁
+    const total = units.length;
+    units = units.slice(offset, offset + size);
+    return res.json({ success: true, data: units, pagination: { page, size, total } });
+  }
+
+  res.json({ success: true, data: units, pagination: { page, size, total: count || 0 } });
+});
+
+
+// 綁定報表 — 區間內各廠商被綁定次數，可篩門市
+// query: from=YYYY-MM-DD, to=YYYY-MM-DD, store_erpid (optional), status (active|all 預設 all)
+router.get('/binding-report', async (req, res) => {
+  try {
+    const { from, to, store_erpid, status = 'all' } = req.query;
+    let q = supabase.from('appointed_unit_bindings')
+      .select('unit_code, unit_name_snap, introducer_store_erpid, introducer_store_name, bound_at, status');
+    if (from) q = q.gte('bound_at', from + 'T00:00:00+08:00');
+    if (to)   q = q.lte('bound_at', to   + 'T23:59:59+08:00');
+    if (store_erpid) q = q.eq('introducer_store_erpid', store_erpid);
+    if (status === 'active') q = q.eq('status', 'active');
+    const { data, error } = await q;
+    if (error) return res.status(500).json({ success: false, message: error.message });
+
+    const map = new Map();
+    for (const b of data || []) {
+      const k = b.unit_code || '_';
+      if (!map.has(k)) map.set(k, {
+        unit_code: b.unit_code,
+        unit_name: b.unit_name_snap || '',
+        count: 0,
+        first_bound_at: b.bound_at,
+        last_bound_at:  b.bound_at,
+      });
+      const r = map.get(k);
+      r.count++;
+      if (b.bound_at < r.first_bound_at) r.first_bound_at = b.bound_at;
+      if (b.bound_at > r.last_bound_at)  r.last_bound_at  = b.bound_at;
+    }
+    const result = [...map.values()].sort((a, b) => b.count - a.count);
+    const totalBindings = (data || []).length;
+
+    // 順帶算每個門市的合計（給「全部門市」摘要看哪些店厲害）
+    const storeMap = new Map();
+    for (const b of data || []) {
+      const sk = b.introducer_store_erpid || '_未知';
+      if (!storeMap.has(sk)) storeMap.set(sk, {
+        store_erpid: b.introducer_store_erpid || null,
+        store_name:  b.introducer_store_name  || '未指定門市',
+        count: 0,
+      });
+      storeMap.get(sk).count++;
+    }
+    const byStore = [...storeMap.values()].sort((a, b) => b.count - a.count);
+
+    res.json({
+      success: true,
+      data: {
+        total: totalBindings,
+        units: result,
+        by_store: byStore,
+        from: from || null, to: to || null, store_erpid: store_erpid || null,
+      },
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
 });
 
 // 單筆 + 統計
