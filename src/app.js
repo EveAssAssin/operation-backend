@@ -109,6 +109,9 @@ app.use('/api/contracts', authenticate, require('./routes/contracts'));
 // 通用附件模組（Supabase Storage，需登入）
 app.use('/api/files', authenticate, require('./routes/files'));
 
+// 文件庫（廠商/門市/員工 分類 + tag，需登入）
+app.use('/api/doc-library', authenticate, require('./routes/documentLibrary'));
+
 // 對外 API — 特約廠商綁定報表（x-api-key 認證，給其他部門/系統用）
 app.use('/api/external/appointed-units', require('./routes/appointedUnitsExternal'));
 
