@@ -25,10 +25,23 @@ const router  = express.Router();
 const supabase = require('../config/supabase');
 
 // ── x-api-key 認證 middleware ───────────────────────────────
-router.use((req, res, next) => {
-  const expected = process.env.BINDING_REPORT_API_KEY;
+// 優先順序：company_profile.binding_report_api_key (DB) > 環境變數 BINDING_REPORT_API_KEY
+router.use(async (req, res, next) => {
+  let expected = null;
+  try {
+    const { data } = await supabase
+      .from('company_profile')
+      .select('binding_report_api_key')
+      .eq('id', 1)
+      .maybeSingle();
+    expected = data?.binding_report_api_key || null;
+  } catch (e) {
+    console.warn('[external] read company_profile.binding_report_api_key fail:', e.message);
+  }
+  if (!expected) expected = process.env.BINDING_REPORT_API_KEY || null;
+
   if (!expected) {
-    return res.status(500).json({ success: false, message: '伺服器未設 BINDING_REPORT_API_KEY' });
+    return res.status(500).json({ success: false, message: '伺服器未設 API Key（請到「公司資料」頁設定 binding_report_api_key）' });
   }
   const got = req.get('x-api-key') || req.query.api_key;
   if (got !== expected) {

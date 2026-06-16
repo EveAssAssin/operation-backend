@@ -385,6 +385,7 @@ async function upsertCompanyProfile(payload) {
     default_fee_burden:    payload.default_fee_burden    || '15',
     default_notify_method: payload.default_notify_method || '0',
     gemini_api_key:        payload.gemini_api_key        || null,
+    binding_report_api_key: payload.binding_report_api_key || null,
   };
   const { data, error } = await supabase.from('company_profile')
     .upsert([row], { onConflict: 'id' }).select().single();
