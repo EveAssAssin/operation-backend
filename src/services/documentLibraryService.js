@@ -104,7 +104,7 @@ async function uploadDoc(input, uploader) {
 
 /** 更新（改 tags / description / category 重新分類） */
 async function updateDoc(id, patch) {
-  const allowed = ['category', 'category_ref', 'tags', 'description'];
+  const allowed = ['category', 'category_ref', 'tags', 'description', 'original_name'];
   const update = {};
   for (const k of allowed) if (patch[k] !== undefined) update[k] = patch[k];
   if (update.tags !== undefined) {

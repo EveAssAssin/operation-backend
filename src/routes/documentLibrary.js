@@ -55,10 +55,12 @@ router.post('/:type/upload', upload.single('file'), async (req, res) => {
       await svc.ensureStoreInDepartments(category, category_ref);
     }
 
+    // multer 預設用 latin1 解 originalname，中文會亂碼；轉回 UTF-8
+    const fixedName = Buffer.from(req.file.originalname || '', 'latin1').toString('utf8');
     const data = await svc.uploadDoc({
       buffer:       req.file.buffer,
       mimeType:     req.file.mimetype,
-      originalName: req.file.originalname,
+      originalName: fixedName,
       doc_type:     req.params.type,
       category, category_ref,
       tags:         tags ? String(tags) : undefined,

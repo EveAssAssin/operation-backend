@@ -32,10 +32,11 @@ router.post('/upload', upload.single('file'), async (req, res) => {
     if (!entity_id)   return bad(res, 'entity_id 必填（query）');
 
     const uploader = req.user?.member_id || null;
+    const fixedName = Buffer.from(req.file.originalname || '', 'latin1').toString('utf8');
     const data = await svc.uploadFile({
       buffer:       req.file.buffer,
       mimeType:     req.file.mimetype,
-      originalName: req.file.originalname,
+      originalName: fixedName,
       entity_type, entity_id, category, note,
     }, uploader);
     ok(res, data);
