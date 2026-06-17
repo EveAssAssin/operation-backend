@@ -48,9 +48,13 @@ async function uploadDoc(input, uploader) {
   if (!buffer || buffer.length === 0) throw new Error('空檔案');
   if (!category) throw new Error('category（分類名）必填');
 
-  const safeName = String(originalName || 'file').replace(/[^\w.\-一-鿿]/g, '_');
-  const safeCat  = String(category).replace(/[\/\\]/g, '_');
-  const storagePath = `doclib/${doc_type}/${safeCat}/${Date.now()}-${safeName}`;
+  // Storage key 限制嚴格：用 UUID 當檔名避開所有特殊字元問題
+  // 原始檔名仍會存在 attachments.original_name 給使用者看
+  const ext   = String(originalName || '').match(/\.[a-zA-Z0-9]{1,8}$/)?.[0] || '';
+  const uuid  = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : (Date.now() + '-' + Math.random().toString(36).slice(2));
+  // category 也用 hash（避開 storage 對中文 / 空格 / 底線連用的奇怪 case）
+  const catHash = require('crypto').createHash('md5').update(String(category)).digest('hex').slice(0, 12);
+  const storagePath = `doclib/${doc_type}/${catHash}/${uuid}${ext}`;
 
   const { error: upErr } = await supabase.storage
     .from(BUCKET)

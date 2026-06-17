@@ -26,9 +26,10 @@ async function uploadFile(input, uploaderAppNumber) {
   if (!entity_type) throw new Error('entity_type 必填');
   if (!entity_id)   throw new Error('entity_id 必填');
 
-  // 1. 上傳到 Storage（路徑：entity_type/entity_id/timestamp-name）
-  const safeName = String(originalName || 'file').replace(/[^\w.\-一-鿿]/g, '_');
-  const storagePath = `${entity_type}/${entity_id}/${Date.now()}-${safeName}`;
+  // 1. 上傳到 Storage（用 UUID 檔名避開 Supabase Storage 對特殊字元的限制）
+  const ext  = String(originalName || '').match(/\.[a-zA-Z0-9]{1,8}$/)?.[0] || '';
+  const uuid = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : (Date.now() + '-' + Math.random().toString(36).slice(2));
+  const storagePath = `${entity_type}/${entity_id}/${uuid}${ext}`;
   const { error: upErr } = await supabase.storage
     .from(BUCKET)
     .upload(storagePath, buffer, {
