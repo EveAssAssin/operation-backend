@@ -127,6 +127,10 @@ app.use('/api/processes/public', require('./routes/processes/public'));
 //   管理端（需登入）
 app.use('/api/processes', authenticate, require('./routes/processes/admin'));
 
+// 分數加分申請模組
+//   公開 + 管理 在同一個 router 內（router.use(authenticate) 切分）
+app.use('/api/score-application', require('./routes/scoreApplication'));
+
 // 分數兌換模組（公開的員工自助 /public/* + 後台管理；內部自行處理 auth）
 app.use('/api/point-redemption', require('./routes/pointRedemption'));
 
