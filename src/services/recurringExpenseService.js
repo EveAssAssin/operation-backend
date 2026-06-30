@@ -237,8 +237,9 @@ async function ensurePaymentForMonth(expense, yearMonth) {
 }
 
 /** 確保所有 active expense 都已有「本月」payment row。回傳建立的數量。 */
-async function ensureCurrentMonthPayments() {
-  const yearMonth = todayStr().slice(0, 7);
+/** 補建指定月份所有 active expense 的 payment row（沒給月份 = 本月） */
+async function ensurePaymentsForMonth(yearMonth) {
+  if (!yearMonth) yearMonth = todayStr().slice(0, 7);
   const actives = await listExpenses({ active: true });
   let created = 0;
   for (const exp of actives) {
@@ -252,6 +253,11 @@ async function ensureCurrentMonthPayments() {
     if (!exists) created++;
   }
   return { yearMonth, total_active: actives.length, created };
+}
+
+// 舊名相容
+async function ensureCurrentMonthPayments() {
+  return ensurePaymentsForMonth();
 }
 
 
@@ -499,12 +505,11 @@ async function listDepartments() {
     .map(r => ({ id: r.store_erpid, name: r.store_name }));
 }
 
-
 module.exports = {
   // CRUD
   listExpenses, getExpense, createExpense, updateExpense, deleteExpense,
   // Payment 補建 / 查詢 / 狀態
-  ensurePaymentForMonth, ensureCurrentMonthPayments,
+  ensurePaymentForMonth, ensureCurrentMonthPayments, ensurePaymentsForMonth,
   listPaymentsByMonth, getTodayDuePayments,
   markPaid, unmarkPaid, markNotified,
   // 對象清單

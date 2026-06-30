@@ -49,10 +49,8 @@ router.get('/payments', async (req, res) => {
     const today = svc.todayStr();
     const targetMonth = month || today.slice(0, 7);
 
-    // 如果是本月，自動補建缺漏的 payment row
-    if (targetMonth === today.slice(0, 7)) {
-      await svc.ensureCurrentMonthPayments();
-    }
+    // 任意月份都自動補建缺漏的 payment row（未來月份也能預覽）
+    await svc.ensurePaymentsForMonth(targetMonth);
 
     const payments = await svc.listPaymentsByMonth(targetMonth);
     ok(res, { month: targetMonth, payments });
