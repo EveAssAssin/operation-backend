@@ -511,4 +511,32 @@ router.post('/import/confirm', async (req, res) => {
   }
 });
 
+
+// ══════════════════════════════════════════════════════════
+// 產出本月元大匯款 Excel
+// POST /api/checks/export-elton/:yearMonth   body: { checkIds?: string[] }
+// ══════════════════════════════════════════════════════════
+router.post('/export-elton/:yearMonth', async (req, res) => {
+  try {
+    const { yearMonth } = req.params;
+    if (!/^\d{4}-\d{2}$/.test(yearMonth)) {
+      return err(res, { message: 'yearMonth 格式錯誤，請用 YYYY-MM' }, 400);
+    }
+    const checkIds = Array.isArray(req.body?.checkIds) ? req.body.checkIds : null;
+
+    const result = await svc.exportEltonBatchForMonth(yearMonth, checkIds);
+    if (result.count === 0) {
+      return err(res, { message: '此月份沒有可匯出的支票（沒有 pending 狀態）' }, 400);
+    }
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(result.filename)}"`);
+    res.setHeader('X-Export-Count', result.count);
+    res.send(result.buffer);
+  } catch (e) {
+    console.error('[Checks Export Elton]', e);
+    err(res, { message: e.message || '匯出失敗' }, 500);
+  }
+});
+
 module.exports = router;

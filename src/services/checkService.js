@@ -2,7 +2,18 @@
 // 支票紀錄系統服務層（v2 schema）
 
 const supabase = require('../config/supabase');
+const XLSX     = require('xlsx');
 const { prevWorkingDay } = require('./taiwanHolidayService');
+
+// ── 出款人 → 甲存帳號 對照 ────────────────────────────────
+// 高銀 016 / 分行 2184；三信暫無資料（先留空）
+const DRAWER_ACCOUNTS = {
+  '高銀|黃信儒': { account: '218101114762', bankCode: '016', branch: '2184' },
+  '高銀|黃志雄': { account: '218101110643', bankCode: '016', branch: '2184' },
+};
+function lookupDrawerAccount(bankName, drawerName) {
+  return DRAWER_ACCOUNTS[`${bankName}|${drawerName}`] || { account: '', bankCode: '', branch: '' };
+}
 
 // ── 工具：今天台北日期 ────────────────────────────────────
 function todayTaipei() {
@@ -503,13 +514,126 @@ async function getRenewalReminders() {
     .eq('status', 'active')   // 只看進行中的批次
     .order('created_at', { ascending: false });
   if (error) throw error;
-
   // 只回傳「剩最後 1 張待出款」的批次
   return (data || []).filter(b => {
     const pendingCount = (b.checks || []).filter(c => c.status === 'pending').length;
     return pendingCount === 1;
   });
 }
+
+// ── 產出本月元大匯款 Excel ────────────────────────────────
+async function exportEltonBatchForMonth(yearMonth, checkIds = null) {
+  let q = supabase
+    .from('checks')
+    .select(`
+      id, seq_no, amount, due_date, status, notes,
+      check_batches (
+        id, batch_no, drawer_name, bank_name, check_count, notes,
+        check_subjects ( id, name )
+      )
+    `)
+    .order('due_date', { ascending: true });
+
+  if (Array.isArray(checkIds) && checkIds.length > 0) {
+    q = q.in('id', checkIds);
+  } else {
+    const [y, m] = yearMonth.split('-').map(Number);
+    const firstDay = `${yearMonth}-01`;
+    const lastDay  = `${yearMonth}-${String(new Date(y, m, 0).getDate()).padStart(2, '0')}`;
+    q = q.gte('due_date', firstDay).lte('due_date', lastDay).eq('status', 'pending');
+  }
+  const { data: checks, error } = await q;
+  if (error) throw new Error(error.message);
+
+  const { data: payer, error: pErr } = await supabase
+    .from('company_profile')
+    .select('*')
+    .eq('id', 1)
+    .maybeSingle();
+  if (pErr) throw new Error(pErr.message);
+  if (!payer) throw new Error('請先到「公司資料」頁設定付款方資料');
+
+  const items = (checks || []).map(ch => {
+    const b = ch.check_batches || {};
+    const subject = b.check_subjects?.name || '';
+    const acc = lookupDrawerAccount(b.bank_name || '', b.drawer_name || '');
+    const memo = (b.notes && b.notes.trim()) ||
+                 `${subject}${b.check_count ? b.check_count : ''}${b.check_count ? '-' : ''}${ch.seq_no}`;
+    return {
+      due_date:     ch.due_date,
+      amount:       Number(ch.amount),
+      account_no:   acc.account,
+      account_name: b.drawer_name || '',
+      bank_code:    acc.bankCode,
+      branch_code:  acc.branch,
+      memo,
+    };
+  });
+
+  const firstDue = items[0]?.due_date || `${yearMonth}-15`;
+  const paymentDateYmd = String(firstDue).replace(/-/g, '');
+
+  const data = [];
+  data.push([]);
+  data.push([]);
+  data.push(['', '', '', '付款日期', '付款帳號', '付款戶名', '付款總行', '付款分行', '逾時處理指示',
+             '', '', '', '', '', '', 'V20130123版']);
+  data.push(['', '', '',
+    paymentDateYmd,
+    payer.payer_account_no   || '',
+    payer.payer_account_name || '',
+    payer.payer_bank_code    || '',
+    payer.payer_branch_code  || '',
+    payer.default_overdue_code || '1',
+  ]);
+  data.push([]);
+  data.push([
+    '', '', '日期', '收款金額', '收款帳號', '收款戶名', '收款總行', '收款分行',
+    '識別碼類別', '識別碼', '手續費負擔別', '通知方式',
+    'FAX傳真號碼', 'E-mail Address', 'FXML URL', '銷帳參考資料', '附言',
+  ]);
+  data.push([
+    '', '', '', 38, '00000000000001', '王大明', '806', '0998', '53', 'A123456789',
+    '15', '0', '', '', '', '', '範本資料，勿刪除！',
+  ]);
+
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    const [y, m, d] = String(it.due_date).split('-').map(Number);
+    const rocDate = `${y - 1911}${String(m).padStart(2, '0')}${String(d).padStart(2, '0')}`;
+    data.push([
+      '',
+      i === 0 ? '開始=＞' : '',
+      rocDate,
+      it.amount,
+      it.account_no,
+      it.account_name,
+      it.bank_code,
+      it.branch_code,
+      '', '',
+      payer.default_fee_burden    || '15',
+      payer.default_notify_method || '0',
+      '', '', '', '',
+      it.memo,
+    ]);
+  }
+
+  const ws = XLSX.utils.aoa_to_sheet(data);
+  ws['!cols'] = [
+    { wch: 6 }, { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 18 }, { wch: 22 },
+    { wch: 8 }, { wch: 8 }, { wch: 10 }, { wch: 14 }, { wch: 12 }, { wch: 10 },
+    { wch: 14 }, { wch: 18 }, { wch: 14 }, { wch: 14 }, { wch: 20 },
+  ];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, '工作表1');
+
+  return {
+    buffer:   XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }),
+    filename: `${yearMonth}_元大支票_出款.xlsx`,
+    count:    items.length,
+  };
+}
+
 
 module.exports = {
   getSubjects, createSubject, updateSubject,
@@ -519,4 +643,5 @@ module.exports = {
   getNotifyTargets, createNotifyTarget, updateNotifyTarget, deleteNotifyTarget,
   deleteBatch, clearAll, bulkPayPast, mergeSubjects,
   getSubjectsTree, getRenewalReminders,
+  exportEltonBatchForMonth,
 };
