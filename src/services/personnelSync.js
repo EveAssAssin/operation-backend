@@ -6,6 +6,21 @@ const supabase = require('../config/supabase');
 const { syncAllEmployees } = require('./leftHandApi');
 const { SYNC_TYPE, SYNC_STATUS } = require('../config/constants');
 
+// ─── 特殊部門種子清單 ──────────────────────────────────────────
+// 這些部門不會出現在左手 API 的 getstoredatas（因為它們不是「門市」），
+// 但我們需要它們存在於 departments 表，讓：
+//   1. chi-lens 帳單同步能對應（例：中部加工中心 → store_erpid=00010）
+//   2. Step 2b 掃描時能主動 getEmployeesByGroup 撈整組人員
+//
+// 未來新增特殊單位時，加一行到這裡即可：
+//   { store_erpid: '00011', store_name: '南部加工中心' },
+// 加完 push 上去，下次同步時就會自動 upsert 到 departments。
+const SPECIAL_DEPARTMENTS = [
+  { store_erpid: '00010', store_name: '中部加工中心' },
+  // 未來南部加工中心出現時，把下一行取消註解並填入正確 erpid：
+  // { store_erpid: '00011', store_name: '南部加工中心' },
+];
+
 /**
  * 執行完整人員同步
  * @param {string} syncType - 'manual' | 'scheduled'
@@ -34,7 +49,24 @@ async function runEmployeeSync(syncType = SYNC_TYPE.MANUAL, triggeredBy = null) 
   console.log(`[Sync] 開始同步（${syncType}），Log ID：${logId}`);
 
   try {
+    // ── 先 seed 特殊部門（不在左手 API 的 getstoredatas 但業務上需要）──
+    if (SPECIAL_DEPARTMENTS.length > 0) {
+      const { error: seedErr } = await supabase
+        .from('departments')
+        .upsert(
+          SPECIAL_DEPARTMENTS.map(d => ({ ...d, updated_at: new Date().toISOString() })),
+          { onConflict: 'store_erpid', ignoreDuplicates: false }
+        );
+      if (seedErr) {
+        console.error('[Sync] 特殊部門 seed 失敗（不影響主流程）：', seedErr.message);
+      } else {
+        console.log(`[Sync] 特殊部門 seed 完成：${SPECIAL_DEPARTMENTS.length} 筆`);
+      }
+    }
+
     // ── 取得已知部門清單，補入行政部門 erpid ────────────────
+    // 這時 SPECIAL_DEPARTMENTS 已經在 departments 表，會被自動納入 extraGroupErpIds，
+    // 讓 Step 2b 主動去 getEmployeesByGroup 撈成員（就算目前沒人也不會出錯）
     const { data: knownDepts } = await supabase
       .from('departments')
       .select('store_erpid');
