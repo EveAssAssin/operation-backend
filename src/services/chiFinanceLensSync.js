@@ -31,6 +31,7 @@ const SOURCE_CODE = 'CHI-LENS';
 const BRANCH_ALIASES = {
   '樂活高大門市': '高應大店',     // chi-finance 用「高大」，內部叫「高應大」
   '中部加工中心': '中部加工中心',  // 對應 departments.store_erpid='00010' 的內部單位
+  '南部加工中心': '南部加工中心',  // 對應 departments.store_erpid='00011' 的內部單位
 };
 
 // ─── 排除清單（不算入任何門市的內部單位）─────────────────────

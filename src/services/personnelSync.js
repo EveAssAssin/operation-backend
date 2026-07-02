@@ -17,8 +17,7 @@ const { SYNC_TYPE, SYNC_STATUS } = require('../config/constants');
 // 加完 push 上去，下次同步時就會自動 upsert 到 departments。
 const SPECIAL_DEPARTMENTS = [
   { store_erpid: '00010', store_name: '中部加工中心' },
-  // 未來南部加工中心出現時，把下一行取消註解並填入正確 erpid：
-  // { store_erpid: '00011', store_name: '南部加工中心' },
+  { store_erpid: '00011', store_name: '南部加工中心' },   // 2026-05 起 chi-finance 開始傳，暫用 00011（未來 ERP 給正確編號再改）
 ];
 
 /**
