@@ -88,6 +88,15 @@ async function runEmployeeSync(syncType = SYNC_TYPE.MANUAL, triggeredBy = null) 
         };
       }
     });
+
+    // ── SPECIAL_DEPARTMENTS 強制勝出（永久修 bug）──────────────
+    // 左手 API 對加工中心這類群組回的 groupname 可能是純數字（例：'00010'），
+    // 會經由 Step 5a departments[] 或員工反推寫進 allDeptMap，把正確名字
+    // 「中部加工中心」覆蓋成「00010」。此處明確用 SPECIAL_DEPARTMENTS 的 name
+    // 蓋回去，確保這些單位的 store_name 永遠正確。
+    SPECIAL_DEPARTMENTS.forEach(d => {
+      allDeptMap[d.store_erpid] = { ...(allDeptMap[d.store_erpid] || {}), ...d };
+    });
     // 處理 store_erpid 為空的特殊部門員工：改為 '000000'
     const SPECIAL_DEPT_ERPID = '000000';
     let hasSpecialDept = false;
