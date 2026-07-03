@@ -147,8 +147,10 @@ async function updateCategory(id, payload) {
  */
 async function getBills(opts = {}) {
   const { period, source_id, status, page = 1, limit = 20 } = opts;
-  const from = (Math.max(1, page) - 1) * Math.min(100, limit);
+  const pageInt  = Math.max(1, Number(page));
+  const limitInt = Math.min(100, Number(limit) || 20);
 
+  // 1. bills（撈全部符合條件，不分頁，後面合併時再切）
   let query = supabase
     .from('bills')
     .select(`
@@ -158,26 +160,88 @@ async function getBills(opts = {}) {
       created_by_type, created_at,
       billing_sources!source_id ( id, name, source_type, sync_method ),
       accounting_categories!accounting_category_id ( id, name, code )
-    `, { count: 'exact' })
-    .order('created_at', { ascending: false })
-    .range(from, from + Math.min(100, limit) - 1);
+    `)
+    .order('created_at', { ascending: false });
 
   if (period)    query = query.eq('period', period);
   if (source_id) query = query.eq('source_id', source_id);
   if (status)    query = query.eq('status', status);
 
-  const { data, error, count } = await query;
+  const { data: bills, error } = await query;
   if (error) throw new Error(`查詢帳單失敗：${error.message}`);
 
+  // 2. operational_expenses 也算「帳單」，轉成同格式
+  //    篩了 source_id 時不含（opex 沒有 source_id）
+  //    篩了 status 且非 'confirmed' 時不含（opex 視為已確認）
+  let opex = [];
+  if (!source_id && (!status || status === 'confirmed')) {
+    let oq = supabase
+      .from('operational_expenses')
+      .select(`
+        id, entry_date, period_from, period_to, category_id, fact_id, store_erpid,
+        total_amount, notes, created_at,
+        category:entity_fact_categories!category_id ( id, code, name, icon ),
+        fact:entity_facts!fact_id ( id, store_name, store_erpid, data )
+      `)
+      .order('created_at', { ascending: false });
+    if (period) {
+      oq = oq.gte('period_from', `${period}-01`).lt('period_from', _nextMonthFirstDay(period));
+    }
+    const { data: opRows, error: oErr } = await oq;
+    if (oErr) console.warn('[getBills] 撈 operational_expenses 失敗：', oErr.message);
+    else opex = (opRows || []).map(_mapOpexAsBill);
+  }
+
+  const merged = [...(bills || []), ...opex]
+    .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+
+  const total = merged.length;
+  const offset = (pageInt - 1) * limitInt;
+  const paged = merged.slice(offset, offset + limitInt);
+
   return {
-    data,
+    data: paged,
     pagination: {
-      total: count,
-      page:  Math.max(1, page),
-      limit: Math.min(100, limit),
-      pages: Math.ceil(count / Math.min(100, limit)),
+      total,
+      page:  pageInt,
+      limit: limitInt,
+      pages: Math.max(1, Math.ceil(total / limitInt)),
     },
   };
+}
+
+// 把 operational_expense 轉成 bill 格式
+function _mapOpexAsBill(x) {
+  const factLabel = x.fact ? _factSummary(x.fact) : '';
+  return {
+    id:                     'opex-' + x.id,
+    bill_no:                'OPEX-' + (x.entry_date || '').replace(/-/g, '').slice(0, 6) + '-' + String(x.id).slice(0, 6),
+    period:                 (x.period_from || '').slice(0, 7),
+    title:                  `${x.category ? (x.category.name + ' ') : ''}${factLabel || ''}`.trim() || '營運費用',
+    total_amount:           x.total_amount,
+    status:                 'confirmed',
+    source_id:              null,
+    accounting_category_id: null,
+    invoice_no:             null,
+    invoice_date:           null,
+    submitted_at:           null,
+    confirmed_at:           x.created_at,
+    created_by_type:        'system',
+    created_at:             x.created_at,
+    billing_sources:        { id: null, name: '營運費用', source_type: 'operational', sync_method: 'manual' },
+    accounting_categories:  x.category ? { id: x.category.id, name: x.category.name, code: x.category.code } : null,
+    __is_operational:       true,
+  };
+}
+function _factSummary(fact) {
+  const d = fact.data || {};
+  const vals = Object.values(d).filter(v => v != null && String(v).trim() !== '').map(v => String(v).trim());
+  return [...vals.slice(0, 2), fact.store_name || ''].filter(Boolean).join(' · ');
+}
+function _nextMonthFirstDay(yyyymm) {
+  const [y, m] = yyyymm.split('-').map(Number);
+  const nm = m === 12 ? { y: y + 1, m: 1 } : { y, m: m + 1 };
+  return `${nm.y}-${String(nm.m).padStart(2, '0')}-01`;
 }
 
 /**
@@ -312,7 +376,6 @@ async function updateBillAllocations(billId, allocations) {
 async function changeBillStatus(id, newStatus, userId, extra = {}) {
   const now = new Date().toISOString();
   const update = { status: newStatus, updated_at: now };
-
   if (newStatus === 'submitted')   { update.submitted_at   = now; }
   if (newStatus === 'confirmed')   { update.confirmed_at   = now; update.confirmed_by   = userId; }
   if (newStatus === 'distributed') { update.distributed_at = now; update.distributed_by = userId; }
@@ -333,12 +396,7 @@ async function changeBillStatus(id, newStatus, userId, extra = {}) {
 // 月報：門市帳單彙總
 // ============================================================
 
-/**
- * 取得某月份所有門市的帳單彙總
- * 回傳：每個門市的分配總額，以及各來源類型的小計
- */
 async function getMonthSummaryV2(period) {
-  // 取得該月份所有已確認或已分配的帳單分配
   const { data, error } = await supabase
     .from('bill_allocations')
     .select(`
@@ -353,7 +411,6 @@ async function getMonthSummaryV2(period) {
 
   if (error) throw new Error(`取得月報失敗：${error.message}`);
 
-  // 依門市彙總
   const storeMap = {};
   for (const row of (data || [])) {
     const { store_erpid, store_name, allocated_amount, bills: bill } = row;
@@ -392,22 +449,18 @@ async function getMonthSummaryV2(period) {
 }
 
 module.exports = {
-  // 來源單位
   getSources,
   getSourceById,
   createSource,
   updateSource,
-  // 會計科目
   getCategories,
   createCategory,
   updateCategory,
-  // 帳單
   getBills,
   getBillById,
   createBill,
   updateBill,
   updateBillAllocations,
   changeBillStatus,
-  // 月報
   getMonthSummaryV2,
 };
