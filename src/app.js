@@ -100,6 +100,9 @@ app.use('/api/push-groups', authenticate, require('./routes/pushGroups'));
 // 常態費用模組（需登入）
 app.use('/api/recurring-expenses', authenticate, require('./routes/recurringExpenses'));
 
+// 營運費用模組（電費/水費/電話 ...，需登入）
+app.use('/api/operational-expenses', require('./routes/operationalExpenses'));
+
 // 系統更新模組（從 GitHub 抓 commits 展示開發績效，需登入）
 app.use('/api/system-updates', authenticate, require('./routes/systemUpdates'));
 
