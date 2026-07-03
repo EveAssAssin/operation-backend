@@ -459,6 +459,21 @@ async function getMonthSummaryV2(period) {
       .eq('year_month', period);
     if (opErr) console.warn('[getMonthSummaryV2] opex allocations 失敗：', opErr.message);
 
+    // 撈 departments 對照表，補 store_name（先前的 storeMap 只有從 bill_allocations 帶來的名字）
+    const missingErpids = Array.from(new Set(
+      (opAllocs || [])
+        .map(a => a.store_erpid)
+        .filter(id => id && !storeMap[id])
+    ));
+    let deptMap = {};
+    if (missingErpids.length > 0) {
+      const { data: depts } = await supabase
+        .from('departments')
+        .select('store_erpid, store_name')
+        .in('store_erpid', missingErpids);
+      for (const d of (depts || [])) if (d.store_erpid) deptMap[d.store_erpid] = d.store_name;
+    }
+
     for (const a of (opAllocs || [])) {
       const { store_erpid, amount } = a;
       if (!store_erpid) continue;
@@ -466,7 +481,7 @@ async function getMonthSummaryV2(period) {
       if (!storeMap[store_erpid]) {
         storeMap[store_erpid] = {
           store_erpid,
-          store_name: '',
+          store_name: deptMap[store_erpid] || '',
           total:       0,
           admin_dept:  0,
           vendor:      0,
