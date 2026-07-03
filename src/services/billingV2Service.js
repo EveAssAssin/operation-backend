@@ -444,8 +444,57 @@ async function getMonthSummaryV2(period) {
       source_type: sourceType,
     });
   }
+  // ── 加入 operational_expense_allocations（year_month = period）─────
+  try {
+    const { data: opAllocs, error: opErr } = await supabase
+      .from('operational_expense_allocations')
+      .select(`
+        store_erpid, year_month, amount,
+        opex:operational_expense_id (
+          id, entry_date,
+          category:entity_fact_categories!category_id ( name, icon ),
+          fact:entity_facts!fact_id ( store_name, data )
+        )
+      `)
+      .eq('year_month', period);
+    if (opErr) console.warn('[getMonthSummaryV2] opex allocations 失敗：', opErr.message);
 
-  return Object.values(storeMap).sort((a, b) => a.store_name?.localeCompare(b.store_name, 'zh-Hant'));
+    for (const a of (opAllocs || [])) {
+      const { store_erpid, amount } = a;
+      if (!store_erpid) continue;
+      const amt = parseFloat(amount) || 0;
+      if (!storeMap[store_erpid]) {
+        storeMap[store_erpid] = {
+          store_erpid,
+          store_name: '',
+          total:       0,
+          admin_dept:  0,
+          vendor:      0,
+          operational: 0,
+          bills:       [],
+        };
+      }
+      const s = storeMap[store_erpid];
+      s.total       += amt;
+      s.operational += amt;
+      const opex = a.opex || {};
+      const catName = opex.category?.name || '';
+      const catIcon = opex.category?.icon || '';
+      const factHint = opex.fact?.store_name || '';
+      s.bills.push({
+        bill_id:     'opex-' + opex.id,
+        bill_no:     'OPEX-' + String(opex.id || '').slice(0, 8),
+        title:       `${catIcon ? catIcon + ' ' : ''}${catName || '營運費用'}${factHint ? ' · ' + factHint : ''}`.trim(),
+        amount:      amt,
+        source_name: '營運費用',
+        source_type: 'operational',
+      });
+    }
+  } catch (e) {
+    console.warn('[getMonthSummaryV2] 合併 opex 失敗：', e.message);
+  }
+
+  return Object.values(storeMap).sort((a, b) => (a.store_name || '').localeCompare(b.store_name || '', 'zh-Hant'));
 }
 
 module.exports = {
