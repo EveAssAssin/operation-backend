@@ -146,6 +146,38 @@ async function syncChiFinanceLens(period) {
     return { skipped: true, reason: 'before_api_start' };
   }
 
+  // 1-1. 確保「以來源單位名稱」為名的會計科目存在，作為 API 同步帳單的預設分類
+  let defaultCategoryId = null;
+  {
+    const { data: existCat } = await supabase
+      .from('accounting_categories')
+      .select('id')
+      .eq('source_id', source.id)
+      .eq('name', source.name)
+      .maybeSingle();
+    if (existCat?.id) {
+      defaultCategoryId = existCat.id;
+    } else {
+      const nowIso = new Date().toISOString();
+      const { data: newCat, error: catErr } = await supabase
+        .from('accounting_categories')
+        .insert({
+          source_id: source.id,
+          name: source.name,
+          is_active: true,
+          created_at: nowIso,
+          updated_at: nowIso,
+        })
+        .select('id')
+        .single();
+      if (catErr) {
+        console.warn(`[ChiLens] 自動建會計科目失敗（不影響同步）：${catErr.message}`);
+      } else {
+        defaultCategoryId = newCat?.id || null;
+      }
+    }
+  }
+
   // 2. 拉資料
   const groups = await fetchMonthData(year, month);
 
@@ -230,6 +262,7 @@ async function syncChiFinanceLens(period) {
     const sourceRef = `chi-lens-${store_erpid}-${period}`;
     const billPayload = {
       source_id:        source.id,
+      accounting_category_id: defaultCategoryId,
       period,
       title:            `路奇天格鏡片費用 ${period} ${branchName}`,
       total_amount:     stat.net,
@@ -330,8 +363,8 @@ async function syncChiFinanceLens(period) {
     total_return:         totalReturn,
     total_net:            totalCompletion - totalReturn,
     unmapped_branches:    unmappedBranches,
-    skipped_branches:     skippedBranches,       // chi-finance 內部單位，刻意排除
-    write_errors:         writeErrors,           // ⚠️ 寫入失敗時看這個欄位
+    skipped_branches:     skippedBranches,
+    write_errors:         writeErrors,
   };
   console.log(`[ChiLens] ${period} 完成`, result);
   return result;
