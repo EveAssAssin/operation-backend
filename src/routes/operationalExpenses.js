@@ -61,4 +61,25 @@ router.put('/:id/allocations', async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
+// ══════════════════════════════════════════════════════════
+// 異常偵測 + 歷史序列（給圖表用）
+// GET /api/operational-expenses/anomalies?month=YYYY-MM
+// GET /api/operational-expenses/facts/:fact_id/history?months=12
+// ══════════════════════════════════════════════════════════
+const anomalySvc = require('../services/opexAnomalyService');
+
+router.get('/anomalies', async (req, res) => {
+  try {
+    const month = req.query.month || new Date().toISOString().slice(0, 7);
+    ok(res, await anomalySvc.detectAnomalies(month));
+  } catch (e) { fail(res, e); }
+});
+
+router.get('/facts/:fact_id/history', async (req, res) => {
+  try {
+    const months = Math.min(24, parseInt(req.query.months) || 12);
+    ok(res, await anomalySvc.getFactHistory(req.params.fact_id, months));
+  } catch (e) { fail(res, e); }
+});
+
 module.exports = router;
