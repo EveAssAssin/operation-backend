@@ -62,9 +62,51 @@ router.put('/:id/allocations', async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════
-// 異常偵測 + 歷史序列（給圖表用）
-// GET /api/operational-expenses/anomalies?month=YYYY-MM
-// GET /api/operational-expenses/facts/:fact_id/history?months=12
+// 營運報表
+// GET /api/operational-expenses/report?from=YYYY-MM&to=YYYY-MM&category_id=&store_erpid=&store_scope=
+// GET /api/operational-expenses/report/export?...
+// ══════════════════════════════════════════════════════════
+const reportSvc = require('../services/opexReportService');
+const XLSX      = require('xlsx');
+
+router.get('/report', async (req, res) => {
+  try {
+    const opts = {
+      from:        req.query.from,
+      to:          req.query.to,
+      categoryId:  req.query.category_id || null,
+      storeErpid:  req.query.store_erpid || null,
+      storeScope:  req.query.store_scope || 'all',
+    };
+    ok(res, await reportSvc.getReport(opts));
+  } catch (e) { fail(res, e); }
+});
+
+router.get('/report/export', async (req, res) => {
+  try {
+    const opts = {
+      from:        req.query.from,
+      to:          req.query.to,
+      categoryId:  req.query.category_id || null,
+      storeErpid:  req.query.store_erpid || null,
+      storeScope:  req.query.store_scope || 'all',
+    };
+    const data = await reportSvc.getReport(opts);
+    const wsSummary = XLSX.utils.json_to_sheet(data.summary);
+    const wsDetail  = XLSX.utils.json_to_sheet(data.detail);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, wsSummary, '月度彙總');
+    XLSX.utils.book_append_sheet(wb, wsDetail, '明細');
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    const filename = `營運報表_${opts.from}_${opts.to}.xlsx`;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+    res.send(buffer);
+  } catch (e) { fail(res, e); }
+});
+
+// ══════════════════════════════════════════════════════════
+// 異常偵測 + 歷史序列
 // ══════════════════════════════════════════════════════════
 const anomalySvc = require('../services/opexAnomalyService');
 
