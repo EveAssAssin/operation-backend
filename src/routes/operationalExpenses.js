@@ -1,17 +1,16 @@
 // routes/operationalExpenses.js
 // 營運費用 REST API
-//   GET    /api/operational-expenses                        列出（可篩 ?from=&to=&category_id=&fact_id=&store_erpid=）
-//   GET    /api/operational-expenses/:id
-//   POST   /api/operational-expenses                        建立（body 可含 allocations）
-//   PATCH  /api/operational-expenses/:id                    更新主表欄位
-//   DELETE /api/operational-expenses/:id
-//   PUT    /api/operational-expenses/:id/allocations        覆寫分帳（body: { allocations: [...] }）
-//   GET    /api/operational-expenses/facts/:category_id     取分類底下的 facts（電號下拉用）
+//
+// 注意：Express router 是按定義順序匹配的，所以 static path (/report, /anomalies, /facts/...)
+//       必須放在動態 /:id 之前，否則會被 UUID 驗證擋掉
 
 const express  = require('express');
 const router   = express.Router();
 const { authenticate } = require('../middleware/auth');
 const svc      = require('../services/operationalExpenseService');
+const reportSvc  = require('../services/opexReportService');
+const anomalySvc = require('../services/opexAnomalyService');
+const XLSX       = require('xlsx');
 
 router.use(authenticate);
 
@@ -22,18 +21,11 @@ function fail(res, e)   {
   res.status(500).json({ success: false, message: e.message || '伺服器錯誤' });
 }
 
+// ══════════════════════════════════════════════════════════
+// (1) LIST + POST
+// ══════════════════════════════════════════════════════════
 router.get('/', async (req, res) => {
   try { ok(res, await svc.listExpenses(req.query || {})); }
-  catch (e) { fail(res, e); }
-});
-
-router.get('/facts/:category_id', async (req, res) => {
-  try { ok(res, await svc.listFactsByCategory(req.params.category_id)); }
-  catch (e) { fail(res, e); }
-});
-
-router.get('/:id', async (req, res) => {
-  try { ok(res, await svc.getExpense(req.params.id)); }
   catch (e) { fail(res, e); }
 });
 
@@ -44,31 +36,9 @@ router.post('/', async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
-router.patch('/:id', async (req, res) => {
-  try { ok(res, await svc.updateExpense(req.params.id, req.body || {})); }
-  catch (e) { fail(res, e); }
-});
-
-router.delete('/:id', async (req, res) => {
-  try { ok(res, await svc.deleteExpense(req.params.id)); }
-  catch (e) { fail(res, e); }
-});
-
-router.put('/:id/allocations', async (req, res) => {
-  try {
-    const allocs = Array.isArray(req.body?.allocations) ? req.body.allocations : [];
-    ok(res, await svc.replaceAllocations(req.params.id, allocs));
-  } catch (e) { fail(res, e); }
-});
-
 // ══════════════════════════════════════════════════════════
-// 營運報表
-// GET /api/operational-expenses/report?from=YYYY-MM&to=YYYY-MM&category_id=&store_erpid=&store_scope=
-// GET /api/operational-expenses/report/export?...
+// (2) 營運報表（靜態 path，必須先於 /:id 定義）
 // ══════════════════════════════════════════════════════════
-const reportSvc = require('../services/opexReportService');
-const XLSX      = require('xlsx');
-
 router.get('/report', async (req, res) => {
   try {
     const opts = {
@@ -106,10 +76,8 @@ router.get('/report/export', async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════
-// 異常偵測 + 歷史序列
+// (3) 異常偵測（靜態 path）
 // ══════════════════════════════════════════════════════════
-const anomalySvc = require('../services/opexAnomalyService');
-
 router.get('/anomalies', async (req, res) => {
   try {
     const month = req.query.month || new Date().toISOString().slice(0, 7);
@@ -117,10 +85,45 @@ router.get('/anomalies', async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
+// ══════════════════════════════════════════════════════════
+// (4) facts 相關（靜態 path）
+// ══════════════════════════════════════════════════════════
+router.get('/facts/:category_id', async (req, res) => {
+  try { ok(res, await svc.listFactsByCategory(req.params.category_id)); }
+  catch (e) { fail(res, e); }
+});
+
 router.get('/facts/:fact_id/history', async (req, res) => {
   try {
     const months = Math.min(24, parseInt(req.query.months) || 12);
     ok(res, await anomalySvc.getFactHistory(req.params.fact_id, months));
+  } catch (e) { fail(res, e); }
+});
+
+// ══════════════════════════════════════════════════════════
+
+// ══════════════════════════════════════════════════════════
+// (5) 動態 /:id 路由（放最後）
+// ══════════════════════════════════════════════════════════
+router.get('/:id', async (req, res) => {
+  try { ok(res, await svc.getExpense(req.params.id)); }
+  catch (e) { fail(res, e); }
+});
+
+router.patch('/:id', async (req, res) => {
+  try { ok(res, await svc.updateExpense(req.params.id, req.body || {})); }
+  catch (e) { fail(res, e); }
+});
+
+router.delete('/:id', async (req, res) => {
+  try { ok(res, await svc.deleteExpense(req.params.id)); }
+  catch (e) { fail(res, e); }
+});
+
+router.put('/:id/allocations', async (req, res) => {
+  try {
+    const allocs = Array.isArray(req.body?.allocations) ? req.body.allocations : [];
+    ok(res, await svc.replaceAllocations(req.params.id, allocs));
   } catch (e) { fail(res, e); }
 });
 
