@@ -295,9 +295,14 @@ async function syncChiFinanceLens(period) {
     const vName = vendorName(vendor);
     const vendorSuffix = vendor ? `-${vendor}` : '';    // 沒 vendor 時就寫舊格式（backward compat）
     const sourceRef = `chi-lens-${store_erpid}-${period}${vendorSuffix}`;
+    // bill_no 有 DB unique constraint —— 必須明確給每張 bill 唯一值
+    // 格式：CHILENS-<erpid>-<YYYYMM>[-<vendor>]
+    const periodCompact = period.replace(/-/g, '');
+    const billNo = `CHILENS-${store_erpid}-${periodCompact}${vendorSuffix}`;
     const billPayload = {
       source_id:        source.id,
       accounting_category_id: defaultCategoryId,
+      bill_no:          billNo,
       period,
       title:            vendor
         ? `路奇創意科技-${vName} 鏡片費用 ${period} ${branchName}`
