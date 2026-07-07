@@ -1,5 +1,10 @@
 // services/chiFinanceLensSync.js
-// 路奇天格鏡片帳單同步（chi-finance-system）
+// 路奇創意科技鏡片帳單同步（chi-finance-system）
+//
+// 2026-07 API 改版：
+//   - 回傳每筆有 lohas_erp_id → 直接對應樂活門市（不再靠 branch_name 對照）
+//   - 有 vendor 欄位（RK01=天格 / RK02=康德）
+//   - 同一門市可能同時有兩家廠商 → 每 (門市, 廠商) 一張 bill
 //
 // 來源 API：
 //   GET https://chi-finance-system.onrender.com/api/public/lens-billing?year=YYYY&month=M
@@ -25,6 +30,13 @@ const axios    = require('axios');
 const supabase = require('../config/supabase');
 
 const SOURCE_CODE = 'CHI-LENS';
+
+// vendor 代號 → 顯示名稱（來自 API 文件）
+const VENDOR_MAP = {
+  'RK01': '天格',
+  'RK02': '康德',
+};
+const vendorName = (v) => VENDOR_MAP[v] || v || '未知';
 
 // ─── 手動別名表（chi-finance branch_name → 樂活 departments.store_name）─────
 // 給自動正規化抓不到的特殊命名用。新增別名時請維持「鍵 = chi-finance 名稱」格式
@@ -181,56 +193,63 @@ async function syncChiFinanceLens(period) {
   // 2. 拉資料
   const groups = await fetchMonthData(year, month);
 
-  // 3. 對照表
+  // 3. 對照表（仍保留，作為 lohas_erp_id 缺失時的 fallback）
   const branchMap = await buildBranchMap();
 
-  // 4. 彙總：依 branch_name 加總（completions 加、returns 減）+ 收集明細
-  const perBranch = {};   // branch_name → { net, completionCount, returnCount, items: [] }
+  // 4. 彙總：依 (門市 erpid, 廠商) 分桶 —— 同店不同廠商各一張 bill
+  const perBucket = {};   // key `${store_erpid}|${vendor}` → { store_erpid, store_name, vendor, net, completionCount, returnCount, items:[] }
+  const unmappedRawItems = [];   // 沒有 lohas_erp_id 又對不到 branchMap 的髒資料
   let totalCompletion = 0, totalReturn = 0;
-  for (const g of groups) {
-    for (const c of (g.completions || [])) {
-      const name = c.branch_name || '(未知門市)';
-      perBranch[name] ??= { net: 0, completionCount: 0, returnCount: 0, items: [] };
-      const amt = Number(c.client_total) || 0;
-      perBranch[name].net += amt;
-      perBranch[name].completionCount += 1;
-      perBranch[name].items.push({
-        type:           'completion',
-        seq_no:         c.seq_no,
-        item_date:      c.item_date,
-        customer_order: c.customer_order,
-        doc_number:     c.doc_number,
-        product_spec:   c.product_spec,
-        quantity:       Number(c.quantity) || 0,
-        markup:         Number(c.markup) || 0,
-        unit_price:     Number(c.client_unit_price) || 0,
-        total:          amt,
-      });
-      totalCompletion += amt;
+
+  // helper：把 completions/returns 每筆丟進對應 bucket
+  function pushItem(row, isReturn) {
+    const branch = row.branch_name || '(未知門市)';
+    const vendor = row.vendor || '';
+    // 先看 API 有沒有直接給 lohas_erp_id
+    let store_erpid = String(row.lohas_erp_id || '').trim();
+    // fallback：舊資料沒 lohas_erp_id → 走原本的 branch_name 對照
+    if (!store_erpid) {
+      store_erpid = lookupStoreErpid(branch, branchMap) || '';
     }
-    for (const r of (g.returns || [])) {
-      const name = r.branch_name || '(未知門市)';
-      perBranch[name] ??= { net: 0, completionCount: 0, returnCount: 0, items: [] };
-      const amt = Number(r.client_total) || 0;
-      perBranch[name].net -= amt;
-      perBranch[name].returnCount += 1;
-      perBranch[name].items.push({
-        type:           'return',
-        seq_no:         r.seq_no,
-        item_date:      r.item_date,
-        customer_order: r.customer_order,
-        doc_number:     r.doc_number,
-        product_spec:   r.product_spec,
-        quantity:       Number(r.quantity) || 0,
-        markup:         Number(r.markup) || 0,
-        unit_price:     Number(r.client_unit_price) || 0,
-        total:          -amt,   // 退回用負數，呈現時方便加總
-      });
-      totalReturn += amt;
+    if (!store_erpid) {
+      unmappedRawItems.push({ branch_name: branch, vendor, seq_no: row.seq_no, amount: Number(row.client_total) || 0 });
+      return;
     }
+    const key = `${store_erpid}|${vendor}`;
+    perBucket[key] ??= {
+      store_erpid,
+      store_name:  branch,
+      vendor,
+      net: 0, completionCount: 0, returnCount: 0, items: [],
+    };
+    const b = perBucket[key];
+    const amt = Number(row.client_total) || 0;
+    const signedAmt = isReturn ? -amt : amt;
+    if (isReturn) { b.returnCount++; b.net -= amt; totalReturn += amt; }
+    else          { b.completionCount++; b.net += amt; totalCompletion += amt; }
+    b.items.push({
+      type:           isReturn ? 'return' : 'completion',
+      vendor,
+      vendor_name:    vendorName(vendor),
+      seq_no:         row.seq_no,
+      item_date:      row.item_date,
+      customer_order: row.customer_order,
+      doc_number:     row.doc_number,
+      product_spec:   row.product_spec,
+      quantity:       Number(row.quantity) || 0,
+      markup:         Number(row.markup) || 0,
+      unit_price:     Number(row.client_unit_price) || 0,
+      total:          signedAmt,
+    });
   }
-  // 把每家明細按日期 + seq 排序
-  for (const b of Object.values(perBranch)) {
+
+  for (const g of groups) {
+    for (const c of (g.completions || [])) pushItem(c, false);
+    for (const r of (g.returns     || [])) pushItem(r, true);
+  }
+
+  // 每桶明細按日期 + seq 排序
+  for (const b of Object.values(perBucket)) {
     b.items.sort((a, b) => {
       const d = (a.item_date || '').localeCompare(b.item_date || '');
       if (d !== 0) return d;
@@ -238,41 +257,59 @@ async function syncChiFinanceLens(period) {
     });
   }
 
-  // 5. 寫入 bills + bill_allocations（每個門市一張 bill）
+  // 5. 寫入 bills + bill_allocations（每 (門市, 廠商) 一張 bill）
   //    用「先查再 insert/update」明確處理，避開 partial unique index 與 onConflict 對應問題
   const now = new Date().toISOString();
-  const unmappedBranches = [];
   const skippedBranches = [];      // 在 SKIP_BRANCHES 中的，已被刻意忽略
   const writeErrors = [];
   let syncedStores = 0, insertedCount = 0, updatedCount = 0;
 
-  for (const [branchName, stat] of Object.entries(perBranch)) {
-    // 排除：chi-finance 內部單位（如「中部加工中心」），不算進任何門市帳
-    if (SKIP_BRANCHES.has(branchName)) {
-      skippedBranches.push({ branch_name: branchName, net: stat.net });
-      continue;
+  // 5-0. 清除舊格式 aggregate bill（升級前的 `chi-lens-<erpid>-<period>` 形式）
+  //      避免與新格式 `chi-lens-<erpid>-<period>-<vendor>` 並存造成重複顯示
+  {
+    const oldRefLike = `chi-lens-%-${period}`;
+    const { data: oldBills } = await supabase
+      .from('bills')
+      .select('id, source_ref')
+      .like('source_ref', oldRefLike)
+      .eq('period', period);
+    const legacyBillIds = (oldBills || [])
+      .filter(b => /^chi-lens-[^-]+-\d{4}-\d{2}$/.test(b.source_ref))  // 只匹配舊格式（沒有 vendor 尾巴）
+      .map(b => b.id);
+    if (legacyBillIds.length > 0) {
+      await supabase.from('bill_allocations').delete().in('bill_id', legacyBillIds);
+      await supabase.from('bills').delete().in('id', legacyBillIds);
+      console.log(`[ChiLens] 已清除 ${legacyBillIds.length} 筆舊格式 aggregate bill（升級為分廠商版本）`);
     }
-    const store_erpid = lookupStoreErpid(branchName, branchMap);
-    if (!store_erpid) {
-      unmappedBranches.push({ branch_name: branchName, net: stat.net });
+  }
+
+  for (const [bucketKey, stat] of Object.entries(perBucket)) {
+    const { store_erpid, store_name: branchName, vendor } = stat;
+    // 排除：chi-finance 內部單位（例如「中部加工中心」，如果有的話）
+    if (SKIP_BRANCHES.has(branchName)) {
+      skippedBranches.push({ branch_name: branchName, vendor, net: stat.net });
       continue;
     }
     if (stat.net === 0 && stat.completionCount === 0 && stat.returnCount === 0) continue;
 
-    const sourceRef = `chi-lens-${store_erpid}-${period}`;
+    const vName = vendorName(vendor);
+    const vendorSuffix = vendor ? `-${vendor}` : '';    // 沒 vendor 時就寫舊格式（backward compat）
+    const sourceRef = `chi-lens-${store_erpid}-${period}${vendorSuffix}`;
     const billPayload = {
       source_id:        source.id,
       accounting_category_id: defaultCategoryId,
       period,
-      title:            `路奇天格鏡片費用 ${period} ${branchName}`,
+      title:            vendor
+        ? `路奇創意科技-${vName} 鏡片費用 ${period} ${branchName}`
+        : `路奇創意科技鏡片費用 ${period} ${branchName}`,
       total_amount:     stat.net,
-      description:      `完成 ${stat.completionCount} 筆 / 退回 ${stat.returnCount} 筆`,
+      description:      `${vendor ? vName + '｜' : ''}完成 ${stat.completionCount} 筆 / 退回 ${stat.returnCount} 筆`,
       status:           'confirmed',
       source_ref:       sourceRef,
-      items:            stat.items,                 // 把該門市明細存進 JSONB
+      items:            stat.items,                 // 把該門市明細存進 JSONB（含 vendor 欄位）
       created_by_type:  'system',
       confirmed_at:     now,
-      notes:            `自動同步自路奇天格 (chi-finance) ${period}`,
+      notes:            `自動同步自路奇創意科技 (chi-finance) ${period}${vendor ? ` [${vName}]` : ''}`,
       updated_at:       now,
     };
 
@@ -356,13 +393,13 @@ async function syncChiFinanceLens(period) {
     synced_stores:        syncedStores,
     inserted_count:       insertedCount,
     updated_count:        updatedCount,
-    total_branches:       Object.keys(perBranch).length,
+    total_buckets:        Object.keys(perBucket).length,
     completion_count:     groups.reduce((s, g) => s + (g.completions?.length || 0), 0),
     return_count:         groups.reduce((s, g) => s + (g.returns?.length || 0), 0),
     total_completion:     totalCompletion,
     total_return:         totalReturn,
     total_net:            totalCompletion - totalReturn,
-    unmapped_branches:    unmappedBranches,
+    unmapped_branches:    unmappedRawItems,   // 保留欄位名讓前端不用改；內容改成明細 items
     skipped_branches:     skippedBranches,
     write_errors:         writeErrors,
   };
