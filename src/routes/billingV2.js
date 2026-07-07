@@ -143,9 +143,9 @@ router.patch('/categories/:id', authorize('billing.manage'), async (req, res) =>
  */
 router.get('/bills', async (req, res) => {
   try {
-    const { period, source_id, status, page = 1, limit = 20 } = req.query;
+    const { period, source_id, status, vendor, page = 1, limit = 20 } = req.query;
     const result = await svc.getBills({
-      period, source_id, status,
+      period, source_id, status, vendor,
       page:  parseInt(page),
       limit: parseInt(limit),
     });

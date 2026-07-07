@@ -31,12 +31,41 @@ const supabase = require('../config/supabase');
 
 const SOURCE_CODE = 'CHI-LENS';
 
-// vendor 代號 → 顯示名稱（來自 API 文件）
-const VENDOR_MAP = {
-  'RK01': '天格',
-  'RK02': '康德',
-};
-const vendorName = (v) => VENDOR_MAP[v] || v || '未知';
+// vendor 代號 → 顯示名稱：從 chi_vendors 表動態讀
+// syncChiFinanceLens() 開頭會先 buildVendorMap() 填 currentVendorMap
+let currentVendorMap = {};
+const vendorName = (v) => currentVendorMap[v] || v || '未知';
+
+// 讀 chi_vendors 表 → { code: name }
+async function buildVendorMap() {
+  const { data, error } = await supabase
+    .from('chi_vendors')
+    .select('code, name');
+  if (error) {
+    console.warn('[ChiLens] 讀 chi_vendors 失敗，僅用代號顯示：', error.message);
+    return {};
+  }
+  const map = {};
+  (data || []).forEach(v => { map[v.code] = v.name; });
+  return map;
+}
+
+// 遇到新 code：auto-upsert 到 chi_vendors（name 先設 = code，之後管理員改）
+async function autoUpsertVendorCodes(codes) {
+  const uniq = [...new Set(codes.filter(c => c && !currentVendorMap[c]))];
+  if (uniq.length === 0) return;
+  const now = new Date().toISOString();
+  const rows = uniq.map(c => ({ code: c, name: c, is_active: true, display_order: 99, updated_at: now }));
+  const { error } = await supabase
+    .from('chi_vendors')
+    .upsert(rows, { onConflict: 'code', ignoreDuplicates: true });
+  if (error) {
+    console.warn('[ChiLens] auto-upsert chi_vendors 失敗：', error.message);
+    return;
+  }
+  uniq.forEach(c => { currentVendorMap[c] = c; });
+  console.log(`[ChiLens] auto-upsert 新 vendor code：${uniq.join(', ')}`);
+}
 
 // ─── 手動別名表（chi-finance branch_name → 樂活 departments.store_name）─────
 // 給自動正規化抓不到的特殊命名用。新增別名時請維持「鍵 = chi-finance 名稱」格式
@@ -195,6 +224,16 @@ async function syncChiFinanceLens(period) {
 
   // 3. 對照表（仍保留，作為 lohas_erp_id 缺失時的 fallback）
   const branchMap = await buildBranchMap();
+
+  // 3-b. 讀 chi_vendors → currentVendorMap
+  currentVendorMap = await buildVendorMap();
+  // 掃這批資料的 vendor codes，把 DB 沒有的自動補進去
+  const allVendorCodes = [];
+  for (const g of groups) {
+    for (const c of (g.completions || [])) if (c.vendor) allVendorCodes.push(c.vendor);
+    for (const r of (g.returns     || [])) if (r.vendor) allVendorCodes.push(r.vendor);
+  }
+  await autoUpsertVendorCodes(allVendorCodes);
 
   // 4. 彙總：依 (門市 erpid, 廠商) 分桶 —— 同店不同廠商各一張 bill
   const perBucket = {};   // key `${store_erpid}|${vendor}` → { store_erpid, store_name, vendor, net, completionCount, returnCount, items:[] }

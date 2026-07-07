@@ -146,7 +146,7 @@ async function updateCategory(id, payload) {
  * @param {object} opts - { period, source_id, status, page, limit }
  */
 async function getBills(opts = {}) {
-  const { period, source_id, status, page = 1, limit = 20 } = opts;
+  const { period, source_id, status, vendor, page = 1, limit = 20 } = opts;
   const pageInt  = Math.max(1, Number(page));
   const limitInt = Math.min(100, Number(limit) || 20);
 
@@ -166,6 +166,8 @@ async function getBills(opts = {}) {
   if (period)    query = query.eq('period', period);
   if (source_id) query = query.eq('source_id', source_id);
   if (status)    query = query.eq('status', status);
+  // vendor filter：用 source_ref 尾巴（chi-lens-<erpid>-<period>-<vendor>）
+  if (vendor)    query = query.ilike('source_ref', `chi-lens-%-${vendor}`);
 
   const { data: bills, error } = await query;
   if (error) throw new Error(`查詢帳單失敗：${error.message}`);
@@ -174,7 +176,7 @@ async function getBills(opts = {}) {
   //    篩了 source_id 時不含（opex 沒有 source_id）
   //    篩了 status 且非 'confirmed' 時不含（opex 視為已確認）
   let opex = [];
-  if (!source_id && (!status || status === 'confirmed')) {
+  if (!source_id && !vendor && (!status || status === 'confirmed')) {
     let oq = supabase
       .from('operational_expenses')
       .select(`

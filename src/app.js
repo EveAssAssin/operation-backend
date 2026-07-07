@@ -78,6 +78,7 @@ app.use('/api/hub', require('./routes/hub'));
 
 // 開帳系統 v2（需登入）
 app.use('/api/billing-v2', authenticate, require('./routes/billingV2'));
+app.use('/api/chi-vendors', authenticate, require('./routes/chiVendors'));
 
 // 廠商後台入口（獨立 JWT，不共用 SSO）
 app.use('/api/vendor', require('./routes/vendor'));
