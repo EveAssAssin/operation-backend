@@ -215,31 +215,65 @@ router.patch('/applicants/:id', async (req, res) => {
 });
 
 // PUT /api/recruitment/applicants/:id
-// 編輯基本資料（姓名 / 代碼 / 手機 / 平台 / 投遞門市 / 面試日期 / 面試時間）
+// 編輯基本資料（姓名 / 代碼 / 手機 / 平台 / 投遞門市 / 面試日期 / 面試時間 / 狀態 / 婉拒原因）
 router.put('/applicants/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { name, code, phone, platform, target_store_erpid, target_store_name,
-            interview_date, interview_time } = req.body;
+            interview_date, interview_time, status, reject_reason } = req.body;
     if (!name || !platform) return bad(res, 'name 與 platform 為必填');
+
+    const updates = {
+      name,
+      code:               code               || null,
+      phone:              phone              || null,
+      platform,
+      target_store_erpid: target_store_erpid || null,
+      target_store_name:  target_store_name  || null,
+      interview_date:     interview_date     || null,
+      interview_time:     interview_time     || null,
+      updated_at:         new Date().toISOString(),
+    };
+
+    // 狀態變更（選填）
+    const VALID_STATUSES = ['pending', 'rejected', 'invited', 'notified_intent', 'notified_chat', 'notified_invite', 'notified_intent_2', 'notified_no_response'];
+    if (status !== undefined && status !== null && status !== '') {
+      if (!VALID_STATUSES.includes(status)) {
+        return bad(res, `status 必須為 ${VALID_STATUSES.join(' | ')}`);
+      }
+      if (status === 'rejected' && !reject_reason) {
+        return bad(res, '婉拒時 reject_reason 為必填');
+      }
+      updates.status = status;
+      if (status === 'rejected') {
+        updates.reject_reason = reject_reason;
+      } else {
+        updates.reject_reason = null; // 非婉拒狀態清空原因
+      }
+    }
 
     const { data, error } = await supabase
       .from('recruitment_applicants')
-      .update({
-        name,
-        code:               code               || null,
-        phone:              phone              || null,
-        platform,
-        target_store_erpid: target_store_erpid || null,
-        target_store_name:  target_store_name  || null,
-        interview_date:     interview_date     || null,
-        interview_time:     interview_time     || null,
-        updated_at:         new Date().toISOString(),
-      })
+      .update(updates)
       .eq('id', id)
       .select()
       .single();
     if (error) throw error;
+
+    // 若改成 invited 但沒有既有面試紀錄，補建一筆
+    if (status === 'invited') {
+      const { data: existing } = await supabase
+        .from('recruitment_interviews')
+        .select('id')
+        .eq('applicant_id', id)
+        .maybeSingle();
+      if (!existing) {
+        await supabase
+          .from('recruitment_interviews')
+          .insert({ applicant_id: id });
+      }
+    }
+
     ok(res, data);
   } catch (e) { fail(res, e); }
 });
