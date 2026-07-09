@@ -139,7 +139,7 @@ router.get('/applicants', async (req, res) => {
 // POST /api/recruitment/applicants
 router.post('/applicants', async (req, res) => {
   try {
-    const { date, platform, name, code, phone, target_store_erpid, target_store_name, need_id } = req.body;
+    const { date, platform, name, code, phone, target_store_erpid, target_store_name, target_store_note, need_id } = req.body;
     if (!platform || !name) return bad(res, 'platform 與 name 為必填');
 
     const { data, error } = await supabase
@@ -151,6 +151,7 @@ router.post('/applicants', async (req, res) => {
         phone:              phone              || null,
         target_store_erpid: target_store_erpid || null,
         target_store_name:  target_store_name  || null,
+        target_store_note:  target_store_note  || null,
         need_id:            need_id            || null,
         status: 'pending',
       })
@@ -219,7 +220,7 @@ router.patch('/applicants/:id', async (req, res) => {
 router.put('/applicants/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, code, phone, platform, target_store_erpid, target_store_name,
+    const { name, code, phone, platform, target_store_erpid, target_store_name, target_store_note,
             interview_date, interview_time, status, reject_reason } = req.body;
     if (!name || !platform) return bad(res, 'name 與 platform 為必填');
 
@@ -230,6 +231,7 @@ router.put('/applicants/:id', async (req, res) => {
       platform,
       target_store_erpid: target_store_erpid || null,
       target_store_name:  target_store_name  || null,
+      target_store_note:  target_store_note  || null,
       interview_date:     interview_date     || null,
       interview_time:     interview_time     || null,
       updated_at:         new Date().toISOString(),
