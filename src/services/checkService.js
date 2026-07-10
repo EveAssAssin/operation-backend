@@ -391,6 +391,97 @@ async function getUpcomingChecks(days = 7) {
 }
 
 // ══════════════════════════════════════════════════════════
+// 月份支票清單（給前端「月度出款清單」用）
+//   分類：逾期 / 本日到期 / 未付 / 已付
+//   分群：依 drawer_name（黃信儒 / 黃志雄 ...）
+//   月份定義：以 due_date 落在該月為主；已付以 due_date 為準
+//   逾期範圍：pending 且 due_date < today（不限月份，避免遺漏跨月未付款）
+// ══════════════════════════════════════════════════════════
+async function getMonthChecks(month) {
+  const today = todayTaipei();
+  // 解析月份
+  const [yearStr, mStr] = String(month || today.slice(0, 7)).split('-');
+  const year = parseInt(yearStr);
+  const m    = parseInt(mStr);
+  if (!year || !m || m < 1 || m > 12) throw new Error(`month 格式錯誤：${month}`);
+
+  const monthStart = `${year}-${String(m).padStart(2, '0')}-01`;
+  const lastDay    = new Date(year, m, 0).getDate();
+  const monthEnd   = `${year}-${String(m).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+
+  // ── ① 本月所有支票（含 pending + paid，其他狀態排除）──
+  const { data: monthly, error: e1 } = await supabase
+    .from('checks')
+    .select(CHECK_SELECT)
+    .in('status', ['pending', 'paid'])
+    .gte('due_date', monthStart)
+    .lte('due_date', monthEnd)
+    .order('due_date');
+  if (e1) throw e1;
+
+  // ── ② 本月以前的 pending（逾期，這些也要列出來讓使用者處理）──
+  const { data: overduePrior, error: e2 } = await supabase
+    .from('checks')
+    .select(CHECK_SELECT)
+    .eq('status', 'pending')
+    .lt('due_date', monthStart);
+  if (e2) throw e2;
+
+  // 合併並分類
+  const grouped = {};
+  const ensureBucket = (drawer) => {
+    if (!grouped[drawer]) grouped[drawer] = { overdue: [], due_today: [], unpaid: [], paid: [] };
+    return grouped[drawer];
+  };
+
+  // 分類：本月的
+  for (const c of (monthly || [])) {
+    const drawer = c.batch?.drawer_name || '未知';
+    const b = ensureBucket(drawer);
+    if (c.status === 'paid') {
+      b.paid.push({ ...c, category: 'paid' });
+    } else if (c.due_date < today) {
+      b.overdue.push({ ...c, category: 'overdue', is_overdue: true });
+    } else if (c.due_date === today) {
+      b.due_today.push({ ...c, category: 'due_today' });
+    } else {
+      b.unpaid.push({ ...c, category: 'unpaid' });
+    }
+  }
+  // 分類：跨月來的逾期
+  for (const c of (overduePrior || [])) {
+    const drawer = c.batch?.drawer_name || '未知';
+    const b = ensureBucket(drawer);
+    b.overdue.push({ ...c, category: 'overdue', is_overdue: true });
+  }
+
+  // 每群 sort（都依 due_date 升冪）
+  for (const drawer of Object.keys(grouped)) {
+    for (const cat of ['overdue', 'due_today', 'unpaid', 'paid']) {
+      grouped[drawer][cat].sort((a, b) => (a.due_date || '').localeCompare(b.due_date || ''));
+    }
+  }
+
+  // 各出款人小計
+  const sum = arr => arr.reduce((s, c) => s + (parseFloat(c.amount) || 0), 0);
+  const summary = Object.entries(grouped).map(([drawer, g]) => ({
+    drawer_name:     drawer,
+    overdue_count:   g.overdue.length,
+    overdue_amount:  sum(g.overdue),
+    due_today_count: g.due_today.length,
+    due_today_amount: sum(g.due_today),
+    unpaid_count:    g.unpaid.length,
+    unpaid_amount:   sum(g.unpaid),
+    paid_count:      g.paid.length,
+    paid_amount:     sum(g.paid),
+    pending_amount:  sum(g.overdue) + sum(g.due_today) + sum(g.unpaid),
+    total_amount:    sum(g.overdue) + sum(g.due_today) + sum(g.unpaid) + sum(g.paid),
+  })).sort((a, b) => a.drawer_name.localeCompare(b.drawer_name, 'zh-Hant'));
+
+  return { month, today, grouped, summary };
+}
+
+// ══════════════════════════════════════════════════════════
 // 通知名單
 // ══════════════════════════════════════════════════════════
 async function getNotifyTargets() {
@@ -639,7 +730,7 @@ module.exports = {
   getSubjects, createSubject, updateSubject,
   getBatches, getBatchById, createBatch, updateBatch, syncBatchStatus,
   payCheck, bounceCheck, voidCheck, updateCheck,
-  getTodayDueChecks, getUpcomingChecks,
+  getTodayDueChecks, getUpcomingChecks, getMonthChecks,
   getNotifyTargets, createNotifyTarget, updateNotifyTarget, deleteNotifyTarget,
   deleteBatch, clearAll, bulkPayPast, mergeSubjects,
   getSubjectsTree, getRenewalReminders,

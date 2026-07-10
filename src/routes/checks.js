@@ -118,6 +118,14 @@ router.get('/upcoming', async (req, res) => {
   } catch(e) { err(res, e, 500); }
 });
 
+// 月度出款清單：依出款人分群，分類（逾期/本日到期/未付/已付）
+router.get('/month', async (req, res) => {
+  try {
+    const month = req.query.month || new Date().toISOString().slice(0, 7);
+    ok(res, await svc.getMonthChecks(month));
+  } catch(e) { err(res, e, 500); }
+});
+
 // ══════════════════════════════════════════════════════════
 // 台灣假日手動更新
 // ══════════════════════════════════════════════════════════
