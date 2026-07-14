@@ -145,7 +145,43 @@ async function listFactsByCategory(categoryId) {
   return data || [];
 }
 
+/**
+ * 查詢某個 fact 的已分帳月份
+ * @param {string} factId  fact_id (UUID)
+ * @param {string|null} excludeExpenseId  編輯時要排除自己（避免自己的分帳被當成「已存在」）
+ * @returns {{ allocated: string[], last: string|null, next_suggested: string|null }}
+ */
+async function getFactAllocatedMonths(factId, excludeExpenseId = null) {
+  // 先撈這個 fact 底下所有 expenses（含 allocations）
+  let q = supabase
+    .from('operational_expenses')
+    .select('id, allocations:operational_expense_allocations(year_month)')
+    .eq('fact_id', factId);
+  if (excludeExpenseId) q = q.neq('id', excludeExpenseId);
+  const { data, error } = await q;
+  if (error) throw new Error(error.message);
+
+  // 收集去重
+  const set = new Set();
+  for (const e of (data || [])) {
+    for (const a of (e.allocations || [])) {
+      if (a.year_month) set.add(a.year_month);
+    }
+  }
+  const allocated = Array.from(set).sort();
+  const last = allocated.length > 0 ? allocated[allocated.length - 1] : null;
+  // 建議：last 的下一個月，沒有則不建議
+  let nextSuggested = null;
+  if (last) {
+    const [y, m] = last.split('-').map(Number);
+    const nm = m === 12 ? 1 : m + 1;
+    const ny = m === 12 ? y + 1 : y;
+    nextSuggested = `${ny}-${String(nm).padStart(2, '0')}`;
+  }
+  return { allocated, last, next_suggested: nextSuggested };
+}
+
 module.exports = {
   listExpenses, getExpense, createExpense, updateExpense, deleteExpense,
-  replaceAllocations, listFactsByCategory,
+  replaceAllocations, listFactsByCategory, getFactAllocatedMonths,
 };

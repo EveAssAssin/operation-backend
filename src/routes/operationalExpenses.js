@@ -100,6 +100,14 @@ router.get('/facts/:fact_id/history', async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
+// 查 fact 已分帳月份（給新增/編輯時擋雙分帳用）
+router.get('/facts/:fact_id/allocated-months', async (req, res) => {
+  try {
+    const exclude = req.query.exclude_expense_id || null;
+    ok(res, await svc.getFactAllocatedMonths(req.params.fact_id, exclude));
+  } catch (e) { fail(res, e); }
+});
+
 // ══════════════════════════════════════════════════════════
 
 // ══════════════════════════════════════════════════════════
