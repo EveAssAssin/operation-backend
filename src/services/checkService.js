@@ -20,10 +20,30 @@ function todayTaipei() {
   return new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Taipei' });
 }
 
-// ── 工具：計算每張票的 display_date ──────────────────────
+// ── 工具：計算每張票的 display_date / payment_date ──────────────────────
 async function enrichCheckWithDisplayDate(check) {
-  check.display_date = await prevWorkingDay(check.due_date);
+  const d = await prevWorkingDay(check.due_date);
+  check.display_date = d;
+  check.payment_date = d;
   return check;
+}
+
+/**
+ * 為一組 checks 附加 payment_date（= 到期日前一個工作天）
+ * 目的：把 prevWorkingDay 邏輯統一在此，避免各 API 各自重算
+ * 快取同一 due_date 只算一次
+ */
+async function attachPaymentDates(checks) {
+  if (!Array.isArray(checks) || checks.length === 0) return checks;
+  const cache = new Map();
+  for (const c of checks) {
+    if (!c || !c.due_date) continue;
+    if (!cache.has(c.due_date)) {
+      cache.set(c.due_date, await prevWorkingDay(c.due_date));
+    }
+    c.payment_date = cache.get(c.due_date);
+  }
+  return checks;
 }
 
 // ══════════════════════════════════════════════════════════
@@ -326,6 +346,7 @@ async function getTodayDueChecks() {
 
   // ── 合併並依出款人分群 ────────────────────────────────
   const all = [...todayChecks, ...overdueChecks];
+  await attachPaymentDates(all);
   const grouped = {};
   for (const c of all) {
     const key = c.batch?.drawer_name || '未知';
@@ -384,7 +405,7 @@ async function getUpcomingChecks(days = 7) {
     const diffMs = new Date(disp) - new Date(today);
     const diffDays = Math.ceil(diffMs / 86400000);
     if (diffDays >= 0 && diffDays <= days) {
-      result.push({ ...c, display_date: disp, days_until: diffDays });
+      result.push({ ...c, display_date: disp, payment_date: disp, days_until: diffDays });
     }
   }
   return result;
@@ -426,6 +447,10 @@ async function getMonthChecks(month) {
     .eq('status', 'pending')
     .lt('due_date', monthStart);
   if (e2) throw e2;
+
+  // 為每張支票補上 payment_date（前一個工作天）
+  await attachPaymentDates(monthly || []);
+  await attachPaymentDates(overduePrior || []);
 
   // 合併並分類
   const grouped = {};
@@ -644,6 +669,9 @@ async function exportEltonBatchForMonth(yearMonth, checkIds = null) {
   if (pErr) throw new Error(pErr.message);
   if (!payer) throw new Error('請先到「公司資料」頁設定付款方資料');
 
+  // 為每張票計算 payment_date（= 到期日前一個工作天，Elton 匯款系統看的是這個）
+  await attachPaymentDates(checks || []);
+
   const items = (checks || []).map(ch => {
     const b = ch.check_batches || {};
     const subject = b.check_subjects?.name || '';
@@ -652,6 +680,7 @@ async function exportEltonBatchForMonth(yearMonth, checkIds = null) {
                  `${subject}${b.check_count ? b.check_count : ''}${b.check_count ? '-' : ''}${ch.seq_no}`;
     return {
       due_date:     ch.due_date,
+      payment_date: ch.payment_date || ch.due_date,  // 前一個工作天
       amount:       Number(ch.amount),
       account_no:   acc.account,
       account_name: b.drawer_name || '',
@@ -661,8 +690,11 @@ async function exportEltonBatchForMonth(yearMonth, checkIds = null) {
     };
   });
 
-  const firstDue = items[0]?.due_date || `${yearMonth}-15`;
-  const paymentDateYmd = String(firstDue).replace(/-/g, '');
+  // 檔頭付款日：所有票裡最早的 payment_date
+  const earliestPay = items.length > 0
+    ? items.reduce((min, x) => (x.payment_date < min ? x.payment_date : min), items[0].payment_date)
+    : `${yearMonth}-15`;
+  const paymentDateYmd = String(earliestPay).replace(/-/g, '');
 
   const data = [];
   data.push([]);
@@ -690,7 +722,8 @@ async function exportEltonBatchForMonth(yearMonth, checkIds = null) {
 
   for (let i = 0; i < items.length; i++) {
     const it = items[i];
-    const [y, m, d] = String(it.due_date).split('-').map(Number);
+    // 每列的「日期」欄：付款日（到期日前一個工作天）— 元大匯款用這個
+    const [y, m, d] = String(it.payment_date).split('-').map(Number);
     const rocDate = `${y - 1911}${String(m).padStart(2, '0')}${String(d).padStart(2, '0')}`;
     data.push([
       '',
