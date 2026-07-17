@@ -136,6 +136,37 @@ router.get('/applicants', async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
+// GET /api/recruitment/applicants/check-rejection-history?name=xxx&phone=xxx
+// 檢查同姓名 + 同手機 半年內的婉拒歷史（給新增投遞者時警告用）
+router.get('/applicants/check-rejection-history', async (req, res) => {
+  try {
+    const { name, phone } = req.query;
+    if (!name || !phone) {
+      return ok(res, { has_history: false, count: 0, records: [] });
+    }
+    // 半年前的日期
+    const sixMonthsAgo = new Date();
+    sixMonthsAgo.setDate(sixMonthsAgo.getDate() - 180);
+    const cutoff = sixMonthsAgo.toISOString();
+
+    const { data, error } = await supabase
+      .from('recruitment_applicants')
+      .select('id, date, name, phone, target_store_name, reject_reason, status, created_at')
+      .eq('name', name.trim())
+      .eq('phone', phone.trim())
+      .in('status', ['rejected', 'rejected_again'])
+      .gte('created_at', cutoff)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+
+    ok(res, {
+      has_history: (data || []).length > 0,
+      count: (data || []).length,
+      records: data || [],
+    });
+  } catch (e) { fail(res, e); }
+});
+
 // POST /api/recruitment/applicants
 router.post('/applicants', async (req, res) => {
   try {
@@ -169,11 +200,11 @@ router.patch('/applicants/:id', async (req, res) => {
     const { id }    = req.params;
     const { status, reject_reason, interview_date, interview_time } = req.body;
 
-    const VALID_STATUSES = ['pending', 'rejected', 'invited', 'notified_intent', 'notified_chat', 'notified_invite', 'notified_intent_2', 'notified_no_response'];
+    const VALID_STATUSES = ['pending', 'rejected', 'rejected_again', 'invited', 'notified_intent', 'notified_chat', 'notified_invite', 'notified_intent_2', 'notified_no_response'];
     if (!VALID_STATUSES.includes(status)) {
       return bad(res, `status 必須為 ${VALID_STATUSES.join(' | ')}`);
     }
-    if (status === 'rejected' && !reject_reason) {
+    if ((status === 'rejected' || status === 'rejected_again') && !reject_reason) {
       return bad(res, '婉拒時 reject_reason 為必填');
     }
     if (status === 'invited' && !interview_date) {
@@ -181,7 +212,7 @@ router.patch('/applicants/:id', async (req, res) => {
     }
 
     const updates = { status, updated_at: new Date().toISOString() };
-    if (status === 'rejected') updates.reject_reason  = reject_reason;
+    if (status === 'rejected' || status === 'rejected_again') updates.reject_reason  = reject_reason;
     if (status === 'invited')  {
       updates.interview_date = interview_date;
       updates.interview_time = interview_time || null;
@@ -238,16 +269,16 @@ router.put('/applicants/:id', async (req, res) => {
     };
 
     // 狀態變更（選填）
-    const VALID_STATUSES = ['pending', 'rejected', 'invited', 'notified_intent', 'notified_chat', 'notified_invite', 'notified_intent_2', 'notified_no_response'];
+    const VALID_STATUSES = ['pending', 'rejected', 'rejected_again', 'invited', 'notified_intent', 'notified_chat', 'notified_invite', 'notified_intent_2', 'notified_no_response'];
     if (status !== undefined && status !== null && status !== '') {
       if (!VALID_STATUSES.includes(status)) {
         return bad(res, `status 必須為 ${VALID_STATUSES.join(' | ')}`);
       }
-      if (status === 'rejected' && !reject_reason) {
+      if ((status === 'rejected' || status === 'rejected_again') && !reject_reason) {
         return bad(res, '婉拒時 reject_reason 為必填');
       }
       updates.status = status;
-      if (status === 'rejected') {
+      if (status === 'rejected' || status === 'rejected_again') {
         updates.reject_reason = reject_reason;
       } else {
         updates.reject_reason = null; // 非婉拒狀態清空原因
