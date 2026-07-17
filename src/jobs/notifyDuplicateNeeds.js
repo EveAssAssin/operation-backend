@@ -1,16 +1,24 @@
 // jobs/notifyDuplicateNeeds.js
 // 每天 11:00 檢查重複的人力需求並推播給建需求的人
-//   重複定義：同一門市有 2 筆以上 status='open' 的需求
+//   重複定義：同一門市「且」同一備註 有 2 筆以上 status='open' 的需求
+//     ─ 備註空白視為同一組（都是「未註記」）
+//     ─ 同門市但不同備註（例：營運部/人事行政 vs 營運部/稽查專員）→ 不算重複
 //   推播對象：每筆需求的 created_by_app_number（若 null 則跳過該筆，不推）
-//   每位 created_by_app_number 一天最多收到一則「該門市重複」的提醒（去重）
+//   每位 created_by_app_number 一天最多收到一則「該組重複」的提醒（去重）
 
 const cron     = require('node-cron');
 const supabase = require('../config/supabase');
 const { pushToUser } = require('../services/linePushService');
 
+// 備註正規化：null / undefined / 全空白 都當「」，前後去空白
+function normalizeNote(note) {
+  return String(note || '').trim();
+}
+
 /**
- * 找出有重複 open 需求的門市，及對應的需求紀錄
- * @returns {Map<store_erpid, { store_name, needs: [] }>}
+ * 找出有重複 open 需求的（門市 + 備註）組，及對應的需求紀錄
+ * @returns {Map<key, { store_erpid, store_name, note, needs: [] }>}
+ *   key = `${store_erpid}|${normalizeNote(note)}`
  */
 async function findDuplicateStores() {
   const { data, error } = await supabase
@@ -20,10 +28,18 @@ async function findDuplicateStores() {
     .order('created_at', { ascending: true });
   if (error) throw error;
 
-  const map = new Map(); // store_erpid -> { store_name, needs: [] }
+  const map = new Map(); // key -> { store_erpid, store_name, note, needs: [] }
   for (const n of (data || [])) {
-    const key = n.store_erpid;
-    if (!map.has(key)) map.set(key, { store_name: n.store_name, needs: [] });
+    const noteKey = normalizeNote(n.note);
+    const key = `${n.store_erpid}|${noteKey}`;
+    if (!map.has(key)) {
+      map.set(key, {
+        store_erpid: n.store_erpid,
+        store_name:  n.store_name,
+        note:        noteKey,
+        needs:       [],
+      });
+    }
     map.get(key).needs.push(n);
   }
   // 過濾出重複的
@@ -36,11 +52,15 @@ async function findDuplicateStores() {
 
 /**
  * 組推播訊息
+ * @param {string} storeName
+ * @param {Array}  needs
+ * @param {string} note  該組的備註（空字串表示無備註）
  */
-function buildMessage(storeName, needs) {
+function buildMessage(storeName, needs, note = '') {
+  const noteTag = note ? `／${note}` : '（無備註）';
   let msg = `⚠ 人力需求重複提醒\n`;
   msg += '─'.repeat(20) + '\n';
-  msg += `此門市【${storeName}】已派工人力需求了，請確認正確人力需求？\n`;
+  msg += `【${storeName}${noteTag}】已建立過相同需求，請確認是否為重複派工。\n`;
   msg += '─'.repeat(20) + '\n';
   msg += `目前 ${needs.length} 筆 open 需求：\n`;
   for (const n of needs) {
@@ -84,10 +104,10 @@ async function checkAndNotify() {
 
   let pushed = 0;
   for (const [appNumber, stores] of userMap) {
-    // 一個人可能有多家門市重複；合併成一則訊息
+    // 一個人可能有多組（門市+備註）重複；合併成一則訊息
     let combined = '';
     for (const s of stores) {
-      combined += buildMessage(s.store_name, s.needs) + '\n\n';
+      combined += buildMessage(s.store_name, s.needs, s.note) + '\n\n';
     }
     try {
       await pushToUser(appNumber, combined.trim());
