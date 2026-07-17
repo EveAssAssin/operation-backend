@@ -136,6 +136,38 @@ router.get('/applicants', async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
+// GET /api/recruitment/applicants/pending-follow-ups?days=3
+// 待追蹤：follow_up_date <= 今天 + days，且狀態非 rejected/rejected_again
+// 回：{ overdue: [...], today: [...], upcoming: [...] }
+router.get('/applicants/pending-follow-ups', async (req, res) => {
+  try {
+    const days = parseInt(req.query.days) || 3;
+    const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Taipei' });
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() + days);
+    const cutoffStr = cutoff.toISOString().slice(0, 10);
+
+    const { data, error } = await supabase
+      .from('recruitment_applicants')
+      .select('id, date, name, phone, platform, target_store_name, target_store_note, status, tag_stars, tag_notes, candidate_status, expected_reply_date, follow_up_date, follow_up_notes')
+      .not('follow_up_date', 'is', null)
+      .lte('follow_up_date', cutoffStr)
+      .not('status', 'in', '("rejected","rejected_again")')
+      .order('follow_up_date', { ascending: true });
+    if (error) throw error;
+
+    const overdue  = [];
+    const todayArr = [];
+    const upcoming = [];
+    for (const a of (data || [])) {
+      if (a.follow_up_date < today)      overdue.push(a);
+      else if (a.follow_up_date === today) todayArr.push(a);
+      else                                  upcoming.push(a);
+    }
+    ok(res, { today, overdue, today_list: todayArr, upcoming });
+  } catch (e) { fail(res, e); }
+});
+
 // GET /api/recruitment/applicants/check-rejection-history?name=xxx&phone=xxx
 // 檢查同姓名 + 同手機 半年內的婉拒歷史（給新增投遞者時警告用）
 router.get('/applicants/check-rejection-history', async (req, res) => {
@@ -251,8 +283,12 @@ router.patch('/applicants/:id', async (req, res) => {
 router.put('/applicants/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, code, phone, platform, target_store_erpid, target_store_name, target_store_note,
-            interview_date, interview_time, status, reject_reason } = req.body;
+    const {
+      name, code, phone, platform, target_store_erpid, target_store_name, target_store_note,
+      interview_date, interview_time, status, reject_reason,
+      // Batch 2 新增：標記 / 待追蹤
+      tag_stars, tag_notes, candidate_status, expected_reply_date, follow_up_date, follow_up_notes,
+    } = req.body;
     if (!name || !platform) return bad(res, 'name 與 platform 為必填');
 
     const updates = {
@@ -265,6 +301,13 @@ router.put('/applicants/:id', async (req, res) => {
       target_store_note:  target_store_note  || null,
       interview_date:     interview_date     || null,
       interview_time:     interview_time     || null,
+      // Batch 2 欄位（NULL 化空值）
+      tag_stars:           (tag_stars === undefined || tag_stars === null || tag_stars === '') ? null : Number(tag_stars),
+      tag_notes:           tag_notes           || null,
+      candidate_status:    candidate_status    || null,
+      expected_reply_date: expected_reply_date || null,
+      follow_up_date:      follow_up_date      || null,
+      follow_up_notes:     follow_up_notes     || null,
       updated_at:         new Date().toISOString(),
     };
 
@@ -407,13 +450,24 @@ router.get('/interviews/:id', async (req, res) => {
 // PATCH /api/recruitment/interviews/:id
 router.patch('/interviews/:id', async (req, res) => {
   try {
-    const { notes, result, education_linked, onboarding_url, pending_reason } = req.body;
+    const {
+      notes, result, education_linked, onboarding_url, pending_reason,
+      // Batch 2 新增
+      tag_stars, tag_notes, candidate_status, expected_reply_date, follow_up_date, follow_up_notes,
+    } = req.body;
     const updates = { updated_at: new Date().toISOString() };
     if (notes            !== undefined) updates.notes            = notes;
     if (result           !== undefined) updates.result           = result;
     if (education_linked !== undefined) updates.education_linked = education_linked;
     if (onboarding_url   !== undefined) updates.onboarding_url   = onboarding_url;
     if (pending_reason   !== undefined) updates.pending_reason   = pending_reason;
+    // Batch 2 欄位（僅在有帶時才更新）
+    if (tag_stars           !== undefined) updates.tag_stars           = (tag_stars === null || tag_stars === '') ? null : Number(tag_stars);
+    if (tag_notes           !== undefined) updates.tag_notes           = tag_notes           || null;
+    if (candidate_status    !== undefined) updates.candidate_status    = candidate_status    || null;
+    if (expected_reply_date !== undefined) updates.expected_reply_date = expected_reply_date || null;
+    if (follow_up_date      !== undefined) updates.follow_up_date      = follow_up_date      || null;
+    if (follow_up_notes     !== undefined) updates.follow_up_notes     = follow_up_notes     || null;
     if (result && !updates.completed_at) updates.completed_at = new Date().toISOString();
 
     const { data, error } = await supabase
