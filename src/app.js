@@ -178,7 +178,7 @@ app.post('/api/internal/sync-line-uid', async (req, res) => {
   }
 });
 
-// ── 排程任務 ──────────────────────────────────────────────
+// ── 排程任務 modules（實際 start 放 bootstrap 內）─────────
 const { startScheduledSync }                  = require('./jobs/syncEmployees');
 const { startLineUidScheduledSync }           = require('./jobs/syncLineUid');
 const { startBillingScheduledSync }           = require('./jobs/syncBilling');
@@ -190,18 +190,7 @@ const { startDuplicateNeedsNotifyJob }        = require('./jobs/notifyDuplicateN
 const { startAppointedUnitJobs }              = require('./jobs/syncAppointedUnits');
 const { startScheduledNotifyDispatcher }      = require('./jobs/scheduledNotifyDispatcher');
 const { init: initHolidays }                  = require('./services/taiwanHolidayService');
-
-startScheduledSync();
-startLineUidScheduledSync();
-startBillingScheduledSync();
-startHubPoller();                  // 每 5 分鐘自動掃 Hub 收件匣
-startCheckNotifyJob();             // 每天 10:00 支票到期通知
-startRecurringExpenseNotifyJob();  // 每天 09:00 常態費用到期通知
-startOpexAnomalyJob();             // 每天 09:00 營運費用異常掃描 + LINE 推播
-startDuplicateNeedsNotifyJob();    // 每天 11:00 重複人力需求提醒
-startAppointedUnitJobs();          // 特約單位 / 廠商員工 同步
-startScheduledNotifyDispatcher();  // 每分鐘掃自訂排程推播
-initHolidays();                    // 預載台灣假日快取（本年 + 明年）
+const { runMigrations }                       = require('./lib/migrator');
 
 // ── 錯誤處理 ──────────────────────────────────────────────
 app.use((req, res) => {
@@ -213,7 +202,35 @@ app.use((err, req, res, next) => {
   res.status(500).json({ success: false, message: '伺服器內部錯誤' });
 });
 
-// ── 啟動 ──────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`🚀 營運部系統 Backend 啟動 → port ${PORT}`);
-});
+// ── Bootstrap：先 migration → 再啟動 scheduled jobs → 最後 listen ─
+(async () => {
+  // 1. 先跑 migration。失敗就直接 exit（避免 app 用不對的 schema 跑起來）
+  if (String(process.env.RUN_MIGRATIONS_ON_START || 'true').toLowerCase() !== 'false') {
+    try {
+      await runMigrations({ mode: 'auto' });
+    } catch (err) {
+      console.error('[Bootstrap] Migration 失敗，停止啟動：', err.message);
+      process.exit(1);
+    }
+  } else {
+    console.log('[Bootstrap] RUN_MIGRATIONS_ON_START=false，跳過 migration');
+  }
+
+  // 2. 啟動排程任務
+  startScheduledSync();
+  startLineUidScheduledSync();
+  startBillingScheduledSync();
+  startHubPoller();                  // 每 5 分鐘自動掃 Hub 收件匣
+  startCheckNotifyJob();             // 每天 10:00 支票到期通知
+  startRecurringExpenseNotifyJob();  // 每天 09:00 常態費用到期通知
+  startOpexAnomalyJob();             // 每天 09:00 營運費用異常掃描 + LINE 推播
+  startDuplicateNeedsNotifyJob();    // 每天 11:00 重複人力需求提醒
+  startAppointedUnitJobs();          // 特約單位 / 廠商員工 同步
+  startScheduledNotifyDispatcher();  // 每分鐘掃自訂排程推播
+  initHolidays();                    // 預載台灣假日快取（本年 + 明年）
+
+  // 3. 開始接請求
+  app.listen(PORT, () => {
+    console.log(`🚀 營運部系統 Backend 啟動 → port ${PORT}`);
+  });
+})();
