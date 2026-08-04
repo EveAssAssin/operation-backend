@@ -243,6 +243,80 @@ async function submitRequest(id, { actorType, actorId }) {
 // ────────────────────────────────────────────────────────────
 //   內部：若請款來自 market，非同步回推 status 給 market
 // ────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
+//   自動建 bill：source_system=market/chi_lens 且有 ticket_details 時，
+//   通過時把明細按門市 aggregate 建成 bills + bill_allocations，
+//   讓外部請款能認列進門市月報。
+// ────────────────────────────────────────────────────────────
+async function maybeCreateLinkedBill(row) {
+  if (!row) return null;
+  if (row.source_system === 'internal') return null;
+  if (row.linked_bill_id) return row.linked_bill_id;   // 已建過
+  const details = Array.isArray(row.ticket_details) ? row.ticket_details : null;
+  if (!details || details.length === 0) return null;   // 沒明細就不能建
+
+  // 依 store_erpid 加總金額（多張同一門市的單合併為一筆 allocation）
+  const byStore = new Map();
+  for (const d of details) {
+    const erpid = String(d.store_erpid || '').trim();
+    if (!erpid) continue;
+    const amt = Number(d.amount || 0);
+    if (!amt) continue;
+    const cur = byStore.get(erpid) || { store_erpid: erpid, store_name: d.store_name || null, amount: 0 };
+    cur.amount += amt;
+    if (!cur.store_name && d.store_name) cur.store_name = d.store_name;
+    byStore.set(erpid, cur);
+  }
+  const allocations = Array.from(byStore.values());
+  if (allocations.length === 0) {
+    console.warn('[vendorPayment] maybeCreateLinkedBill: 無有效 store_erpid，跳過');
+    return null;
+  }
+  const totalFromAllocs = allocations.reduce((s, a) => s + a.amount, 0);
+
+  // 1. 建 bill（bill_no 由 trigger 自動產）
+  const { data: bill, error: billErr } = await supabase
+    .from('bills')
+    .insert({
+      source_id:    row.source_id,
+      period:       row.period,
+      title:        row.title || `${row.engineer_name || '外部'} 請款`,
+      description:  `由請款單 ${row.request_no || row.id} 自動建立（來源=${row.source_system}）`,
+      total_amount: totalFromAllocs,
+      status:       'confirmed',    // 通過即代表已確認
+    })
+    .select('id, bill_no')
+    .single();
+  if (billErr) {
+    console.error('[vendorPayment] 自動建 bill 失敗：', billErr.message);
+    return null;
+  }
+
+  // 2. 建 bill_allocations
+  const rows = allocations.map(a => ({
+    bill_id:          bill.id,
+    store_erpid:      a.store_erpid,
+    store_name:       a.store_name,
+    allocated_amount: a.amount,
+    allocation_note:  `來自請款 ${row.request_no}`,
+  }));
+  const { error: allocErr } = await supabase.from('bill_allocations').insert(rows);
+  if (allocErr) {
+    console.error('[vendorPayment] 建 bill_allocations 失敗：', allocErr.message);
+    // 不 rollback bill，讓人工修正；記錄警告
+  }
+
+  // 3. 回填 linked_bill_id 到 request
+  await supabase
+    .from('vendor_payment_requests')
+    .update({ linked_bill_id: bill.id })
+    .eq('id', row.id);
+
+  console.log(`[vendorPayment] ✅ 通過 ${row.request_no} 自動建 bill ${bill.bill_no}，分配到 ${allocations.length} 個門市`);
+  return bill.id;
+}
+
+
 function fireWebhookIfMarket(row, opStatus, note) {
   // 相容舊呼叫；實際 dispatch 由 source_system 決定
   return fireWebhookIfExternal(row, opStatus, note);
@@ -276,6 +350,13 @@ async function approveRequest(id, actorSystemId) {
     }).eq('id', id).eq('status', 'submitted').select().single();
   if (error) throw new Error(error.message);
   if (!data) throw new Error('只有送審中的請款可通過');
+
+  // 若外部來源 + 有 ticket_details：自動建 bill + allocations（進門市月報）
+  try {
+    const billId = await maybeCreateLinkedBill(data);
+    if (billId) data.linked_bill_id = billId;
+  } catch (e) { console.warn("[vendorPayment] maybeCreateLinkedBill:", e?.message); }
+
     fireWebhookIfMarket(data, 'operation_approved');
   return data;
 }

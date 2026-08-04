@@ -85,7 +85,28 @@ async function handleRequested(body) {
   const source_id = await ensureEngineerSource();
   const period    = periodFromIso(body.requested_at) || periodFromIso(new Date().toISOString());
   const engineer  = body.engineer.name;
-  const tickets   = body.tickets?.numbers || [];
+
+  // 兩相容 tickets shape：
+  //   舊：body.tickets = { count, ids, numbers }              → 只有單號，無門市/金額
+  //   新：body.tickets = [{ number, store_erpid, store_name, amount, ... }, ...]
+  //       → approve 時會自動建 bills + bill_allocations
+  let tickets = [];            // string 陣列（單號），存進 vendor_payment_requests.ticket_numbers
+  let ticketDetails = null;    // 新 shape 才會有；存進 vendor_payment_requests.ticket_details
+  if (Array.isArray(body.tickets)) {
+    // 新 shape
+    ticketDetails = body.tickets.map(t => ({
+      number:      t.number || t.doc_number || null,
+      store_erpid: t.store_erpid || null,
+      store_name:  t.store_name  || null,
+      amount:      Number(t.amount || 0),
+      // 保留其他欄位供日後對照
+      raw: t,
+    }));
+    tickets = ticketDetails.map(t => t.number).filter(Boolean);
+  } else if (body.tickets && Array.isArray(body.tickets.numbers)) {
+    // 舊 shape
+    tickets = body.tickets.numbers;
+  }
   const ticketStr = tickets.length ? tickets.join('、') : '(無)';
 
   const insertData = {
@@ -107,6 +128,7 @@ async function handleRequested(body) {
     market_payment_request_id: body.payment_request_id,
     engineer_name:             engineer,
     ticket_numbers:            tickets,
+    ticket_details:            ticketDetails,   // 若新 shape 才有值
     bank_snapshot:             body.bank_info || null,
   };
 
