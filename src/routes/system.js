@@ -16,12 +16,14 @@ const { authenticate, authorize } = require('../middleware/auth');
 router.use(authenticate);
 
 // 營運部系統的有效角色
-const VALID_ROLES = ['super_admin', 'operation_lead', 'operation_staff'];
+const VALID_ROLES = ['super_admin', 'operation_lead', 'operation_staff', 'operation_accounting', 'operation_hr'];
 
-// 各角色可以授予的角色範圍（operation_lead 只能管 operation_staff）
+// 各角色可以授予的角色範圍
+//   super_admin：可授予全部
+//   operation_lead：可授予基層三種（staff / accounting / hr）
 function getAllowedRoles(requesterRole) {
   if (requesterRole === 'super_admin') return VALID_ROLES;
-  if (requesterRole === 'operation_lead') return ['operation_staff'];
+  if (requesterRole === 'operation_lead') return ['operation_staff', 'operation_accounting', 'operation_hr'];
   return [];
 }
 
@@ -41,7 +43,7 @@ router.get('/employees', authorize('system_user.view'), async (req, res) => {
     } = req.query;
 
     const pageNum  = Math.max(1, parseInt(page));
-    const limitNum = Math.min(100, Math.max(1, parseInt(limit)));
+    const limitNum = Math.min(1000, Math.max(1, parseInt(limit)));
 
     // 1. 取得所有在職員工
     let empQuery = supabase
@@ -89,6 +91,36 @@ router.get('/employees', authorize('system_user.view'), async (req, res) => {
         line_uid:       emp.line_uid || null,
       };
     });
+
+    // 3.5 補上：只有 system_users 但沒對應 employees 的「孤兒帳號」
+    //     （例：會計、其他部門支援人員 — 有系統權限但不在營運部員工名單）
+    const empAppNumbers = new Set((allEmployees || []).map(e => e.app_number));
+    const orphanUsers = (sysUsers || [])
+      .filter(su => su.is_active && !empAppNumbers.has(su.member_id))
+      .filter(su => {
+        // 套用相同的 keyword 篩選
+        if (!keyword) return true;
+        const kw = keyword.toLowerCase();
+        return (su.name || '').toLowerCase().includes(kw)
+            || (su.erpid || '').toLowerCase().includes(kw)
+            || (su.member_id || '').toLowerCase().includes(kw);
+      })
+      .map(su => ({
+        employee_id:    null,
+        erpid:          su.erpid || null,
+        app_number:     su.member_id,
+        name:           su.name || '(未同步姓名)',
+        jobtitle:       '(外部/系統帳號)',
+        store_name:     '—',
+        store_erpid:    null,
+        has_access:     true,
+        system_user_id: su.id,
+        role:           su.role,
+        last_login_at:  su.last_login_at,
+        line_uid:       null,
+        is_orphan:      true,   // 前端可以特別標示
+      }));
+    merged = [...merged, ...orphanUsers];
 
     // 4. 篩選有/無權限
     if (has_access === 'true')  merged = merged.filter(m => m.has_access);
