@@ -120,6 +120,9 @@ app.use('/api/doc-library', authenticate, require('./routes/documentLibrary'));
 // 對外 API — 特約廠商綁定報表（x-api-key 認證，給其他部門/系統用）
 app.use('/api/external/appointed-units', require('./routes/appointedUnitsExternal'));
 
+// 對外 API — market 端外部工務師請款事件收件（x-api-key 認證）
+app.use('/api/external/repair-payments', require('./routes/externalPayments'));
+
 // 任務派發模組（送任務到市場部，需登入）
 app.use('/api/quests', authenticate, require('./routes/quests'));
 
