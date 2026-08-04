@@ -123,6 +123,9 @@ app.use('/api/external/appointed-units', require('./routes/appointedUnitsExterna
 // 對外 API — market 端外部工務師請款事件收件（x-api-key 認證）
 app.use('/api/external/repair-payments', require('./routes/externalPayments'));
 
+// 對外 API — 路奇天格鏡片請款事件收件（獨立 CHI_LENS_API_KEY）
+app.use('/api/external/chi-finance-lens', require('./routes/chiFinanceLensPayments'));
+
 // 任務派發模組（送任務到市場部，需登入）
 app.use('/api/quests', authenticate, require('./routes/quests'));
 

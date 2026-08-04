@@ -35,6 +35,24 @@ router.put('/company-profile',
 // ════════════════════════════════════════════════════════════
 //                  系統人員端（會計審核）
 // ════════════════════════════════════════════════════════════
+// 未審核外部請款筆數（給 Layout 紅點 badge 用；免權限但需登入）
+router.get('/pending-count', authenticate, async (req, res) => {
+  try {
+    const supabase = require('../config/supabase');
+    const src = String(req.query.source_system || 'all').toLowerCase();
+    let q = supabase.from('vendor_payment_requests').select('id', { count: 'exact', head: true }).eq('status', 'submitted');
+    if (src === 'market')   q = q.eq('source_system', 'market');
+    else if (src === 'chi_lens') q = q.eq('source_system', 'chi_lens');
+    else if (src === 'external') q = q.in('source_system', ['market','chi_lens']);
+    // 'all' 就不過濾 source_system
+    const { count, error } = await q;
+    if (error) return res.status(500).json({ success: false, message: error.message });
+    return res.json({ success: true, data: { count: count || 0, source_system: src } });
+  } catch (e) {
+    return res.status(500).json({ success: false, message: e.message });
+  }
+});
+
 router.use(authenticate);
 router.use(authorize('operation_staff','operation_accounting','operation_hr','operation_lead','dept_head','super_admin'));
 

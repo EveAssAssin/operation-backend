@@ -8,6 +8,7 @@
 
 const supabase = require('../config/supabase');
 const { notifyMarketStatus } = require('./marketWebhook');
+const { notifyChiLensStatus } = require('./chiLensWebhook');
 
 // ════════════════════════════════════════════════════════════
 //                  廠商銀行帳號
@@ -243,14 +244,27 @@ async function submitRequest(id, { actorType, actorId }) {
 //   內部：若請款來自 market，非同步回推 status 給 market
 // ────────────────────────────────────────────────────────────
 function fireWebhookIfMarket(row, opStatus, note) {
-  if (!row || row.source_system !== 'market' || !row.market_payment_request_id) return;
-  // fire-and-forget（不 await；失敗只 log，不影響本地流程）
-  notifyMarketStatus(row.market_payment_request_id, {
+  // 相容舊呼叫；實際 dispatch 由 source_system 決定
+  return fireWebhookIfExternal(row, opStatus, note);
+}
+
+function fireWebhookIfExternal(row, opStatus, note) {
+  if (!row || !row.source_system || row.source_system === 'internal') return;
+  if (!row.market_payment_request_id) return;   // 兩種來源都存在 market_payment_request_id 欄位
+  const externalId = row.market_payment_request_id;
+  const bodyBase = {
     status:         opStatus,
     operation_note: note || null,
     operation_ref:  row.request_no || null,
     updated_at:     new Date().toISOString(),
-  }).catch(err => console.warn('[vendorPayment] webhook fire failed:', err?.message));
+  };
+  if (row.source_system === 'market') {
+    notifyMarketStatus(externalId, bodyBase)
+      .catch(err => console.warn('[vendorPayment] market webhook failed:', err?.message));
+  } else if (row.source_system === 'chi_lens') {
+    notifyChiLensStatus(externalId, bodyBase)
+      .catch(err => console.warn('[vendorPayment] chi-lens webhook failed:', err?.message));
+  }
 }
 
 async function approveRequest(id, actorSystemId) {

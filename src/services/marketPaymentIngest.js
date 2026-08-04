@@ -17,6 +17,7 @@
 //     → 回 { success, operation_ref }
 
 const supabase = require('../config/supabase');
+const { notifyOpsNewRequest } = require('./paymentNotifyOps');
 
 // 全部外部工務師共用一筆 billing_sources；不為每個工務師建 source，避免污染
 const EXTERNAL_ENGINEER_SOURCE_CODE = 'EXTERNAL_ENGINEER';
@@ -115,6 +116,18 @@ async function handleRequested(body) {
     .select('id, request_no')
     .single();
   if (error) throw new Error(`vendor_payment_requests 建立失敗：${error.message}`);
+
+  // 通知營運部主管 + 會計（fire-and-forget）
+  notifyOpsNewRequest({
+    source_system: 'market',
+    external_id:   body.payment_request_id,
+    request_no:    data.request_no,
+    subject_label: '外部工務師',
+    subject_name:  engineer,
+    total_amount:  Number(body.total_amount) || 0,
+    item_count:    tickets.length,
+    period,
+  }).catch(err => console.warn('[market ingest] notify failed:', err?.message));
 
   return { operation_ref: data.request_no };
 }
