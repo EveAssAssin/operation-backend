@@ -7,6 +7,7 @@
 //   - 公司付款方資料（單例）
 
 const supabase = require('../config/supabase');
+const { notifyMarketStatus } = require('./marketWebhook');
 
 // ════════════════════════════════════════════════════════════
 //                  廠商銀行帳號
@@ -238,6 +239,20 @@ async function submitRequest(id, { actorType, actorId }) {
   return data;
 }
 
+// ────────────────────────────────────────────────────────────
+//   內部：若請款來自 market，非同步回推 status 給 market
+// ────────────────────────────────────────────────────────────
+function fireWebhookIfMarket(row, opStatus, note) {
+  if (!row || row.source_system !== 'market' || !row.market_payment_request_id) return;
+  // fire-and-forget（不 await；失敗只 log，不影響本地流程）
+  notifyMarketStatus(row.market_payment_request_id, {
+    status:         opStatus,
+    operation_note: note || null,
+    operation_ref:  row.request_no || null,
+    updated_at:     new Date().toISOString(),
+  }).catch(err => console.warn('[vendorPayment] webhook fire failed:', err?.message));
+}
+
 async function approveRequest(id, actorSystemId) {
   const { data, error } = await supabase.from('vendor_payment_requests')
     .update({
@@ -247,6 +262,7 @@ async function approveRequest(id, actorSystemId) {
     }).eq('id', id).eq('status', 'submitted').select().single();
   if (error) throw new Error(error.message);
   if (!data) throw new Error('只有送審中的請款可通過');
+    fireWebhookIfMarket(data, 'operation_approved');
   return data;
 }
 
@@ -261,6 +277,7 @@ async function rejectRequest(id, reason, actorSystemId) {
     }).eq('id', id).in('status', ['submitted', 'approved']).select().single();
   if (error) throw new Error(error.message);
   if (!data) throw new Error('只有送審中/已通過的請款可退回');
+    fireWebhookIfMarket(data, 'operation_rejected', reason);
   return data;
 }
 
@@ -273,6 +290,7 @@ async function markPaid(id, actorSystemId) {
     }).eq('id', id).eq('status', 'approved').select().single();
   if (error) throw new Error(error.message);
   if (!data) throw new Error('只有已通過的請款可標記撥款');
+    fireWebhookIfMarket(data, 'operation_completed');
   return data;
 }
 
