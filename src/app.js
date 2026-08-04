@@ -193,6 +193,7 @@ const { startCheckNotifyJob }                 = require('./jobs/checkNotify');
 const { startRecurringExpenseNotifyJob }      = require('./jobs/notifyRecurringExpenses');
 const { start: startOpexAnomalyJob }          = require('./jobs/notifyOpexAnomalies');
 const { startDuplicateNeedsNotifyJob }        = require('./jobs/notifyDuplicateNeeds');
+const { startFollowUpNotifyJob }              = require('./jobs/notifyRecruitmentFollowUps');
 const { startAppointedUnitJobs }              = require('./jobs/syncAppointedUnits');
 const { startScheduledNotifyDispatcher }      = require('./jobs/scheduledNotifyDispatcher');
 const { init: initHolidays }                  = require('./services/taiwanHolidayService');
@@ -231,6 +232,7 @@ app.use((err, req, res, next) => {
   startRecurringExpenseNotifyJob();  // 每天 09:00 常態費用到期通知
   startOpexAnomalyJob();             // 每天 09:00 營運費用異常掃描 + LINE 推播
   startDuplicateNeedsNotifyJob();    // 每天 11:00 重複人力需求提醒
+  startFollowUpNotifyJob();          // 每天 09:00 履歷追蹤提醒（只推一次）
   startAppointedUnitJobs();          // 特約單位 / 廠商員工 同步
   startScheduledNotifyDispatcher();  // 每分鐘掃自訂排程推播
   initHolidays();                    // 預載台灣假日快取（本年 + 明年）

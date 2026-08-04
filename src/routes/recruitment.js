@@ -137,8 +137,9 @@ router.get('/applicants', async (req, res) => {
 });
 
 // GET /api/recruitment/applicants/pending-follow-ups?days=3
-// 待追蹤：follow_up_date <= 今天 + days，且狀態非 rejected/rejected_again
-// 回：{ overdue: [...], today: [...], upcoming: [...] }
+// 待追蹤：履歷 + 面試 兩張表都撈，follow_up_date <= 今天 + days
+// 回：{ today, overdue: [...], today_list: [...], upcoming: [...] }
+//     每筆帶 source: 'applicant' | 'interview' 區分來源
 router.get('/applicants/pending-follow-ups', async (req, res) => {
   try {
     const days = parseInt(req.query.days) || 3;
@@ -147,22 +148,66 @@ router.get('/applicants/pending-follow-ups', async (req, res) => {
     cutoff.setDate(cutoff.getDate() + days);
     const cutoffStr = cutoff.toISOString().slice(0, 10);
 
-    const { data, error } = await supabase
+    // 1) 履歷
+    const { data: applicants, error: e1 } = await supabase
       .from('recruitment_applicants')
       .select('id, date, name, phone, platform, target_store_name, target_store_note, status, tag_stars, tag_notes, candidate_status, expected_reply_date, follow_up_date, follow_up_notes')
       .not('follow_up_date', 'is', null)
       .lte('follow_up_date', cutoffStr)
       .not('status', 'in', '("rejected","rejected_again")')
       .order('follow_up_date', { ascending: true });
-    if (error) throw error;
+    if (e1) throw e1;
+
+    // 2) 面試（join applicants 拿姓名/門市等資料）
+    const { data: interviews, error: e2 } = await supabase
+      .from('recruitment_interviews')
+      .select(`
+        id, follow_up_date, follow_up_notes, tag_stars, tag_notes, candidate_status,
+        expected_reply_date, result,
+        applicant:recruitment_applicants(id, name, phone, platform, target_store_name, target_store_note, status)
+      `)
+      .not('follow_up_date', 'is', null)
+      .lte('follow_up_date', cutoffStr)
+      .order('follow_up_date', { ascending: true });
+    if (e2) throw e2;
+
+    // 合併：加 source 標記；面試展平帶回 applicant 欄位
+    const merged = [];
+    for (const a of (applicants || [])) {
+      merged.push({ source: 'applicant', ...a });
+    }
+    for (const iv of (interviews || [])) {
+      const ap = iv.applicant || {};
+      // 若對應 applicant 已婉拒，跳過（避免推重複人選）
+      if (ap.status === 'rejected' || ap.status === 'rejected_again') continue;
+      merged.push({
+        source:              'interview',
+        id:                  iv.id,
+        applicant_id:        ap.id || null,
+        name:                ap.name || '—',
+        phone:               ap.phone || null,
+        platform:            ap.platform || null,
+        target_store_name:   ap.target_store_name || null,
+        target_store_note:   ap.target_store_note || null,
+        status:              ap.status || null,
+        interview_result:    iv.result || null,
+        tag_stars:           iv.tag_stars,
+        tag_notes:           iv.tag_notes,
+        candidate_status:    iv.candidate_status,
+        expected_reply_date: iv.expected_reply_date,
+        follow_up_date:      iv.follow_up_date,
+        follow_up_notes:     iv.follow_up_notes,
+      });
+    }
+    merged.sort((a, b) => (a.follow_up_date || '').localeCompare(b.follow_up_date || ''));
 
     const overdue  = [];
     const todayArr = [];
     const upcoming = [];
-    for (const a of (data || [])) {
-      if (a.follow_up_date < today)      overdue.push(a);
-      else if (a.follow_up_date === today) todayArr.push(a);
-      else                                  upcoming.push(a);
+    for (const item of merged) {
+      if (item.follow_up_date < today)      overdue.push(item);
+      else if (item.follow_up_date === today) todayArr.push(item);
+      else                                    upcoming.push(item);
     }
     ok(res, { today, overdue, today_list: todayArr, upcoming });
   } catch (e) { fail(res, e); }
@@ -291,6 +336,19 @@ router.put('/applicants/:id', async (req, res) => {
     } = req.body;
     if (!name || !platform) return bad(res, 'name 與 platform 為必填');
 
+    // 若使用者修改 follow_up_date，先撈舊值比對；有改動就清 notified_at 讓下次排程再推
+    let followUpDateChanged = false;
+    if (follow_up_date !== undefined) {
+      const { data: old } = await supabase
+        .from('recruitment_applicants')
+        .select('follow_up_date')
+        .eq('id', id)
+        .maybeSingle();
+      const oldVal = old?.follow_up_date || null;
+      const newVal = follow_up_date || null;
+      if (oldVal !== newVal) followUpDateChanged = true;
+    }
+
     const updates = {
       name,
       code:               code               || null,
@@ -310,6 +368,7 @@ router.put('/applicants/:id', async (req, res) => {
       follow_up_notes:     follow_up_notes     || null,
       updated_at:         new Date().toISOString(),
     };
+    if (followUpDateChanged) updates.follow_up_notified_at = null;
 
     // 狀態變更（選填）
     const VALID_STATUSES = ['pending', 'rejected', 'rejected_again', 'invited', 'notified_intent', 'notified_chat', 'notified_invite', 'notified_intent_2', 'notified_no_response'];
@@ -466,8 +525,19 @@ router.patch('/interviews/:id', async (req, res) => {
     if (tag_notes           !== undefined) updates.tag_notes           = tag_notes           || null;
     if (candidate_status    !== undefined) updates.candidate_status    = candidate_status    || null;
     if (expected_reply_date !== undefined) updates.expected_reply_date = expected_reply_date || null;
-    if (follow_up_date      !== undefined) updates.follow_up_date      = follow_up_date      || null;
     if (follow_up_notes     !== undefined) updates.follow_up_notes     = follow_up_notes     || null;
+    // follow_up_date 有變 → 清 notified_at 讓下次排程重推
+    if (follow_up_date      !== undefined) {
+      const { data: oldIv } = await supabase
+        .from('recruitment_interviews')
+        .select('follow_up_date')
+        .eq('id', req.params.id)
+        .maybeSingle();
+      const oldVal = oldIv?.follow_up_date || null;
+      const newVal = follow_up_date || null;
+      updates.follow_up_date = newVal;
+      if (oldVal !== newVal) updates.follow_up_notified_at = null;
+    }
     if (result && !updates.completed_at) updates.completed_at = new Date().toISOString();
 
     const { data, error } = await supabase
