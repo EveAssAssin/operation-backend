@@ -44,13 +44,8 @@ async function computeDueDates(expense, yearMonth) {
 
   let adjusted;
   if (expense.holiday_rule === 'previous_workday') {
-    // 用既有 taiwanHolidayService 的工具
-    const { isHoliday } = require('./taiwanHolidayService');
-    if (await isHoliday(original)) {
-      adjusted = await prevWorkingDay(original);
-    } else {
-      adjusted = original;
-    }
+    // 一律往前推一個工作天（跟支票邏輯一致）— 不管原始日是不是假日
+    adjusted = await prevWorkingDay(original);
   } else {
     adjusted = original;
   }
@@ -505,6 +500,44 @@ async function listDepartments() {
     .map(r => ({ id: r.store_erpid, name: r.store_name }));
 }
 
+/**
+ * 對「所有 pending」的 payments 重算 due_date（用新的規則）
+ * paid / skipped 的不動（保留歷史）
+ * 回：{ scanned, updated }
+ */
+async function recomputeAllPendingDueDates() {
+  // 撈所有 pending payments 及對應 expense 設定
+  const { data: payments, error } = await supabase
+    .from('recurring_expense_payments')
+    .select('id, expense_id, year_month, original_due_date, due_date, status, recurring_expenses(id, holiday_rule, cycle_day)')
+    .eq('status', 'pending');
+  if (error) throw error;
+
+  let updated = 0;
+  const cache = new Map();  // 快取 prevWorkingDay 呼叫
+  for (const p of (payments || [])) {
+    const exp = p.recurring_expenses;
+    if (!exp) continue;
+    const original = p.original_due_date;
+    let newDue = original;
+    if (exp.holiday_rule === 'previous_workday') {
+      if (!cache.has(original)) {
+        cache.set(original, await prevWorkingDay(original));
+      }
+      newDue = cache.get(original);
+    }
+    if (newDue !== p.due_date) {
+      const { error: uErr } = await supabase
+        .from('recurring_expense_payments')
+        .update({ due_date: newDue })
+        .eq('id', p.id);
+      if (uErr) throw uErr;
+      updated++;
+    }
+  }
+  return { scanned: (payments || []).length, updated };
+}
+
 module.exports = {
   // CRUD
   listExpenses, getExpense, createExpense, updateExpense, deleteExpense,
@@ -516,6 +549,8 @@ module.exports = {
   listStores, listDepartments,
   // 元大匯款
   exportEltonBatchForMonth,
+  // 補算
+  recomputeAllPendingDueDates,
   // 工具（給 cron / route 共用）
   todayStr, ymOf, computeDueDates,
 };

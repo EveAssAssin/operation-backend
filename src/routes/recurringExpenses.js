@@ -106,6 +106,16 @@ router.post('/payments/:id/unpay', async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
+// POST /api/recurring-expenses/recompute-due-dates
+// 對所有 pending payments 重算 due_date（用新規則：一律前推一個工作天）
+// 只影響 pending，paid / skipped 不動
+router.post('/recompute-due-dates', async (req, res) => {
+  try {
+    const result = await svc.recomputeAllPendingDueDates();
+    ok(res, result);
+  } catch (e) { fail(res, e); }
+});
+
 
 // ════════════════════════════════════════════════════════════
 // 費用主檔 CRUD
