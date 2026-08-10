@@ -255,15 +255,22 @@ async function maybeCreateLinkedBill(row) {
   const details = Array.isArray(row.ticket_details) ? row.ticket_details : null;
   if (!details || details.length === 0) return null;   // 沒明細就不能建
 
-  // 依 store_erpid 加總金額（多張同一門市的單合併為一筆 allocation）
+  // 依 store_erpid 加總金額（多張同一門市的單合併為一筆 allocation），
+  // 同時收集哪些單號屬於該門市，供 allocation_note 用
   const byStore = new Map();
   for (const d of details) {
     const erpid = String(d.store_erpid || '').trim();
     if (!erpid) continue;
     const amt = Number(d.amount || 0);
     if (!amt) continue;
-    const cur = byStore.get(erpid) || { store_erpid: erpid, store_name: d.store_name || null, amount: 0 };
+    const cur = byStore.get(erpid) || {
+      store_erpid: erpid,
+      store_name:  d.store_name || null,
+      amount:      0,
+      numbers:     [],
+    };
     cur.amount += amt;
+    if (d.number) cur.numbers.push(d.number);
     if (!cur.store_name && d.store_name) cur.store_name = d.store_name;
     byStore.set(erpid, cur);
   }
@@ -274,16 +281,52 @@ async function maybeCreateLinkedBill(row) {
   }
   const totalFromAllocs = allocations.reduce((s, a) => s + a.amount, 0);
 
+  // 把 ticket_details 轉成 bills.items 格式（配合前端 BillItemsTable 期望的欄位）
+  const items = details.map((d, i) => ({
+    type:            'completion',
+    seq_no:          i + 1,
+    item_date:       d.item_date || d.raw?.item_date || null,
+    customer_order:  d.raw?.customer_order || null,
+    doc_number:      d.number || null,
+    product_spec:    d.description || d.raw?.description || d.note || d.raw?.note || null,
+    quantity:        1,
+    unit_price:      Number(d.amount || 0),
+    total:           Number(d.amount || 0),
+    // 額外欄位保留（前端未來想顯示可用）
+    store_erpid:     d.store_erpid || null,
+    store_name:      d.store_name  || null,
+    detail_url:      d.detail_url || d.raw?.detail_url || null,
+    engineer:        row.engineer_name || null,
+  }));
+
+  // notes：把工務師 + 銀行資訊摘要塞進來，讓 bill 詳情頁一眼看到
+  const bank = row.bank_snapshot || {};
+  const bankLine = bank.account_number
+    ? `匯款帳號：${bank.account_holder_name || '?'}｜${bank.bank_name || ''}${bank.bank_code ? '（' + bank.bank_code + (bank.branch_code ? '-' + bank.branch_code : '') + '）' : ''}｜${bank.account_number}`
+    : null;
+  const engineerLine = row.engineer_name
+    ? `外部工務師：${row.engineer_name}`
+    : (row.vendor_code ? `路奇 vendor：${row.vendor_code}` : null);
+  const notes = [engineerLine, bankLine].filter(Boolean).join('\n') || null;
+
+  const nowIso = new Date().toISOString();
+
   // 1. 建 bill（bill_no 由 trigger 自動產）
   const { data: bill, error: billErr } = await supabase
     .from('bills')
     .insert({
-      source_id:    row.source_id,
-      period:       row.period,
-      title:        row.title || `${row.engineer_name || '外部'} 請款`,
-      description:  `由請款單 ${row.request_no || row.id} 自動建立（來源=${row.source_system}）`,
-      total_amount: totalFromAllocs,
-      status:       'confirmed',    // 通過即代表已確認
+      source_id:       row.source_id,
+      period:          row.period,
+      title:           row.title || `${row.engineer_name || row.vendor_code || '外部'} 請款`,
+      description:     `由請款單 ${row.request_no || row.id} 自動建立（source_system=${row.source_system}）`,
+      total_amount:    totalFromAllocs,
+      status:          'confirmed',       // 通過即代表已確認
+      items,                              // 明細列表（前端會用 BillItemsTable 顯示）
+      source_ref:      row.request_no,    // 外部參考單號 = 請款單號（雙向可追）
+      submitted_at:    nowIso,
+      confirmed_at:    nowIso,
+      created_by_type: 'system',
+      notes,
     })
     .select('id, bill_no')
     .single();
@@ -292,18 +335,20 @@ async function maybeCreateLinkedBill(row) {
     return null;
   }
 
-  // 2. 建 bill_allocations
+  // 2. 建 bill_allocations（allocation_note 帶上該門市對應的單號）
   const rows = allocations.map(a => ({
     bill_id:          bill.id,
     store_erpid:      a.store_erpid,
     store_name:       a.store_name,
     allocated_amount: a.amount,
-    allocation_note:  `來自請款 ${row.request_no}`,
+    allocation_note:  a.numbers.length
+      ? `來自請款 ${row.request_no}；含 ${a.numbers.length} 張單：${a.numbers.join('、')}`
+      : `來自請款 ${row.request_no}`,
   }));
   const { error: allocErr } = await supabase.from('bill_allocations').insert(rows);
   if (allocErr) {
     console.error('[vendorPayment] 建 bill_allocations 失敗：', allocErr.message);
-    // 不 rollback bill，讓人工修正；記錄警告
+    // 不 rollback bill，讓人工修正；紀錄警告
   }
 
   // 3. 回填 linked_bill_id 到 request
@@ -312,7 +357,7 @@ async function maybeCreateLinkedBill(row) {
     .update({ linked_bill_id: bill.id })
     .eq('id', row.id);
 
-  console.log(`[vendorPayment] ✅ 通過 ${row.request_no} 自動建 bill ${bill.bill_no}，分配到 ${allocations.length} 個門市`);
+  console.log(`[vendorPayment] ✅ 通過 ${row.request_no} 自動建 bill ${bill.bill_no}，分配到 ${allocations.length} 個門市，${items.length} 筆明細`);
   return bill.id;
 }
 
