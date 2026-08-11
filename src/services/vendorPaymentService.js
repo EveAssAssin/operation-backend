@@ -282,22 +282,36 @@ async function maybeCreateLinkedBill(row) {
   const totalFromAllocs = allocations.reduce((s, a) => s + a.amount, 0);
 
   // 把 ticket_details 轉成 bills.items 格式（配合前端 BillItemsTable 期望的欄位）
-  const items = details.map((d, i) => ({
-    type:            'completion',
-    seq_no:          i + 1,
-    item_date:       d.item_date || d.raw?.item_date || null,
-    customer_order:  d.raw?.customer_order || null,
-    doc_number:      d.number || null,
-    product_spec:    d.description || d.raw?.description || d.note || d.raw?.note || null,
-    quantity:        1,
-    unit_price:      Number(d.amount || 0),
-    total:           Number(d.amount || 0),
-    // 額外欄位保留（前端未來想顯示可用）
-    store_erpid:     d.store_erpid || null,
-    store_name:      d.store_name  || null,
-    detail_url:      d.detail_url || d.raw?.detail_url || null,
-    engineer:        row.engineer_name || null,
-  }));
+  //   多來源相容：market 每張 ticket = 一列；chi-lens 完成/退回逐筆 = 一列
+  const items = details.map((d, i) => {
+    const raw = d.raw || {};
+    const type = d.type || raw.type || 'completion';
+    const amt  = Number(d.amount || 0);           // return 時已為負
+    const quantity   = Number(d.quantity ?? raw.quantity ?? 1);
+    const unitPrice  = Number(
+      d.unit_price ?? raw.unit_price ?? raw.client_unit_price ??
+      (quantity && quantity !== 0 ? Math.abs(amt) / Math.abs(quantity) : Math.abs(amt))
+    );
+    return {
+      type,
+      seq_no:          d.seq_no ?? raw.seq_no ?? (i + 1),
+      item_date:       d.item_date || raw.item_date || null,
+      customer_order:  d.customer_order || raw.customer_order || null,
+      doc_number:      d.number || raw.doc_number || null,
+      product_spec:    d.product_spec || raw.product_spec || d.description || raw.description || d.note || raw.note || null,
+      quantity,
+      markup:          Number(d.markup ?? raw.markup ?? 0),
+      unit_price:      unitPrice,
+      total:           amt,   // return 為負值，前端會以紅字 + 「退回」badge 顯示
+      // 額外欄位保留（BillItemsTable 已支援顯示）
+      vendor:          d.vendor || raw.vendor || null,
+      vendor_name:     d.vendor_name || raw.vendor_name || null,
+      store_erpid:     d.store_erpid || raw.lohas_erp_id || null,
+      store_name:      d.store_name  || raw.branch_name || null,
+      detail_url:      d.detail_url || raw.detail_url || null,
+      engineer:        row.engineer_name || null,
+    };
+  });
 
   // notes：把工務師 + 銀行資訊摘要塞進來，讓 bill 詳情頁一眼看到
   const bank = row.bank_snapshot || {};

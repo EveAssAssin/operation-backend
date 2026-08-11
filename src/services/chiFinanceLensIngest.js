@@ -57,6 +57,16 @@ async function ensureChiLensVendorSource(vendorCode, vendorNameHint = null) {
 // ─────────────────────────────────────────────────
 //  helper
 // ─────────────────────────────────────────────────
+async function lookupStoreErpidByName(branchName) {
+  if (!branchName) return null;
+  const { data } = await supabase
+    .from('departments')
+    .select('store_erpid')
+    .eq('store_name', branchName)
+    .maybeSingle();
+  return data?.store_erpid || null;
+}
+
 function periodFromIso(iso) {
   const d = iso ? new Date(iso) : new Date();
   if (isNaN(d.getTime())) return null;
@@ -82,36 +92,113 @@ async function findRequestByChiId(chiId) {
 // ─────────────────────────────────────────────────
 async function handleRequested(body) {
   if (!body.payment_request_id) throw new Error('缺少 payment_request_id');
-  if (!body.vendor_code)        throw new Error('缺少 vendor_code');
 
   const existing = await findRequestByChiId(body.payment_request_id);
   if (existing) return { operation_ref: existing.request_no, reused: true };
 
-  const { source_id, name: sourceName } =
-    await ensureChiLensVendorSource(body.vendor_code, body.vendor_name);
+  // ── 兩相容 shape ─────────────────────────────────────────
+  //   新（推薦）：body.details = { completions:[...], returns:[...] }
+  //     每筆有 seq_no, item_date, customer_order, branch_name, lohas_erp_id,
+  //     doc_number, product_spec, quantity, client_unit_price, client_total, vendor
+  //   舊：body.items.descriptions = ["...", "..."]
+  let ticketDetails = [];   // 統一 shape 存 vendor_payment_requests.ticket_details
+  let totalFromDetails = 0;
+  const vendorsSeen = new Set();
+  let hasNewShape = false;
 
-  const period    = body.period || periodFromIso(body.requested_at) || periodFromIso(new Date().toISOString());
-  const items     = body.items?.descriptions || [];
-  const itemStr   = items.length ? items.slice(0, 5).join('、') + (items.length > 5 ? '…' : '') : '(無明細)';
+  const details = body.details;
+  if (details && (Array.isArray(details.completions) || Array.isArray(details.returns))) {
+    hasNewShape = true;
+    const completions = details.completions || [];
+    const returnRows  = details.returns     || [];
+
+    for (const row of completions) {
+      const amt = Number(row.client_total || 0);
+      totalFromDetails += amt;
+      if (row.vendor) vendorsSeen.add(row.vendor);
+      ticketDetails.push({
+        type:        'completion',
+        number:      row.doc_number || null,
+        store_erpid: row.lohas_erp_id || null,     // 稍後補 branch_name lookup
+        store_name:  row.branch_name  || null,
+        amount:      amt,
+        item_date:   row.item_date || null,
+        description: row.product_spec || null,     // maybeCreateLinkedBill 會轉成 product_spec 或 fallback description
+        raw:         row,                          // 原始 chi-lens 完整欄位保留給 bills.items 用
+      });
+    }
+    for (const row of returnRows) {
+      const amt = Number(row.client_total || 0);
+      totalFromDetails -= amt;
+      if (row.vendor) vendorsSeen.add(row.vendor);
+      ticketDetails.push({
+        type:        'return',
+        number:      row.doc_number || null,
+        store_erpid: row.lohas_erp_id || null,
+        store_name:  row.branch_name  || null,
+        amount:      -amt,                         // 負值：讓後續 aggregate by store 直接扣掉
+        item_date:   row.item_date || null,
+        description: row.product_spec || null,
+        raw:         row,
+      });
+    }
+    // 若某些 row 沒 lohas_erp_id → 用 branch_name 查 departments 補上
+    for (const t2 of ticketDetails) {
+      if (!t2.store_erpid && t2.store_name) {
+        t2.store_erpid = await lookupStoreErpidByName(t2.store_name);
+      }
+    }
+  }
+
+  // ── vendor_code 決定 billing_source ───────────────────
+  //   1. 優先 body.vendor_code（top-level）
+  //   2. 沒有時從 details 內 vendor 推斷；多 vendor → 用 'MIXED'
+  let vendorCode = body.vendor_code;
+  if (!vendorCode) {
+    if      (vendorsSeen.size === 1) vendorCode = Array.from(vendorsSeen)[0];
+    else if (vendorsSeen.size > 1)   vendorCode = 'MIXED';
+    else throw new Error('缺少 vendor_code 且 details 內沒有 vendor');
+  }
+
+  const { source_id, name: sourceName } =
+    await ensureChiLensVendorSource(vendorCode, body.vendor_name);
+
+  const period = body.period || periodFromIso(body.requested_at) || periodFromIso(new Date().toISOString());
+  const totalAmount = Number(body.total_amount) || totalFromDetails || 0;
+
+  // 舊 shape 的 description fallback
+  let oldItemsStr = '';
+  if (!hasNewShape) {
+    const items = body.items?.descriptions || [];
+    oldItemsStr = items.length ? items.slice(0, 5).join('、') + (items.length > 5 ? '…' : '') : '(無明細)';
+  }
+  const detailCount = hasNewShape
+    ? { completion: (details.completions || []).length, return: (details.returns || []).length }
+    : null;
 
   const insertData = {
     source_id,
     period,
-    title:         `${sourceName} — 鏡片款（${items.length || 0} 筆明細）`,
-    description:   [
-      `路奇天格廠商：${sourceName}（code=${body.vendor_code}）`,
-      `明細：${itemStr}`,
+    title: hasNewShape
+      ? `${sourceName} — 鏡片款（完成 ${detailCount.completion}／退回 ${detailCount.return}）`
+      : `${sourceName} — 鏡片款`,
+    description: [
+      `路奇天格廠商：${sourceName}（code=${vendorCode}${vendorsSeen.size > 1 ? '，含多 vendor：' + Array.from(vendorsSeen).join(',') : ''}）`,
+      hasNewShape
+        ? `明細：完成 ${detailCount.completion} 筆／退回 ${detailCount.return} 筆（合計 NT$${totalFromDetails.toLocaleString()}）`
+        : `明細：${oldItemsStr}`,
       body.note ? `備註：${body.note}` : null,
     ].filter(Boolean).join('\n'),
-    total_amount:  Number(body.total_amount) || 0,
+    total_amount:  totalAmount,
     status:        'submitted',
     submitted_at:  body.requested_at || new Date().toISOString(),
     remit_memo:    `${period.slice(-2)}-${sourceName.slice(0, 4)}-鏡片`,
     created_by_type: 'system',
     source_system:             'chi_lens',
-    market_payment_request_id: body.payment_request_id,     // 複用欄位存 chi-lens 端 UUID
-    vendor_code:               body.vendor_code,
+    market_payment_request_id: body.payment_request_id,   // 複用此欄位存 chi-lens 端 UUID
+    vendor_code:               vendorCode,
     bank_snapshot:             body.bank_info || null,
+    ticket_details:            hasNewShape ? ticketDetails : null,
   };
 
   const { data, error } = await supabase
@@ -128,8 +215,8 @@ async function handleRequested(body) {
     request_no:    data.request_no,
     subject_label: '路奇天格',
     subject_name:  sourceName,
-    total_amount:  Number(body.total_amount) || 0,
-    item_count:    items.length,
+    total_amount:  totalAmount,
+    item_count:    hasNewShape ? ticketDetails.length : (body.items?.descriptions?.length || 0),
     period,
   }).catch(err => console.warn('[chi-lens ingest] notify failed:', err?.message));
 
