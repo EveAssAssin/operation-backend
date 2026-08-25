@@ -547,4 +547,24 @@ router.post('/export-elton/:yearMonth', async (req, res) => {
   }
 });
 
+// ══════════════════════════════════════════════════════════
+// POST /api/checks/export-unpaid
+// 匯出所有 pending 支票，依出款人分工作表（黃信儒 / 黃志雄）
+// ══════════════════════════════════════════════════════════
+router.post('/export-unpaid', async (req, res) => {
+  try {
+    const result = await svc.exportUnpaidByDrawer();
+    if (result.count === 0) {
+      return err(res, { message: '目前沒有未出款的支票' }, 400);
+    }
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(result.filename)}"`);
+    res.setHeader('X-Export-Count', result.count);
+    res.send(result.buffer);
+  } catch (e) {
+    console.error('[Checks Export Unpaid]', e);
+    err(res, { message: e.message || '匯出失敗' }, 500);
+  }
+});
+
 module.exports = router;

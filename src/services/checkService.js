@@ -758,6 +758,85 @@ async function exportEltonBatchForMonth(yearMonth, checkIds = null) {
   };
 }
 
+// ══════════════════════════════════════════════════════════
+// 未出款匯出：所有 pending 的支票，依出款人分兩個工作表
+// ══════════════════════════════════════════════════════════
+async function exportUnpaidByDrawer() {
+  const { data: checks, error } = await supabase
+    .from('checks')
+    .select(`
+      id, seq_no, check_no, amount, due_date, notes,
+      check_batches (
+        id, batch_no, drawer_name, bank_name, check_count,
+        check_subjects ( id, name )
+      )
+    `)
+    .eq('status', 'pending')
+    .order('due_date', { ascending: true });
+  if (error) throw new Error(error.message);
+
+  // 補上 payment_date（前一工作天）
+  await attachPaymentDates(checks || []);
+
+  // 依 drawer 分組
+  const groups = { '黃信儒': [], '黃志雄': [], '其他': [] };
+  for (const ch of (checks || [])) {
+    const drawer = ch.check_batches?.drawer_name || '其他';
+    if (groups[drawer]) groups[drawer].push(ch);
+    else groups['其他'].push(ch);
+  }
+
+  // 產工作表 helper
+  const buildSheet = (list) => {
+    const header = ['科目', '批次編號', '批次', '銀行', '第X張/共X張', '票號', '到期日', '付款日', '金額', '備註'];
+    const rows = list.map(ch => {
+      const b = ch.check_batches || {};
+      return [
+        b.check_subjects?.name || '',
+        b.batch_no || '',
+        b.id || '',
+        b.bank_name || '',
+        `${ch.seq_no}/${b.check_count || '?'}`,
+        ch.check_no || '',
+        ch.due_date || '',
+        ch.payment_date || '',
+        Number(ch.amount) || 0,
+        ch.notes || '',
+      ];
+    });
+    // 加合計列
+    const total = list.reduce((s, ch) => s + (Number(ch.amount) || 0), 0);
+    if (list.length > 0) {
+      rows.push(['', '', '', '', '', '', '', '合計', total, `${list.length} 張`]);
+    }
+    const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
+    ws['!cols'] = [
+      { wch: 20 }, { wch: 20 }, { wch: 8 }, { wch: 8 }, { wch: 12 },
+      { wch: 16 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 20 },
+    ];
+    return ws;
+  };
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, buildSheet(groups['黃信儒']), '黃信儒');
+  XLSX.utils.book_append_sheet(wb, buildSheet(groups['黃志雄']), '黃志雄');
+  if (groups['其他'].length > 0) {
+    XLSX.utils.book_append_sheet(wb, buildSheet(groups['其他']), '其他');
+  }
+
+  const totalCount = (checks || []).length;
+  const today = todayTaipei();
+  return {
+    buffer:   XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }),
+    filename: `未出款支票_${today}.xlsx`,
+    count:    totalCount,
+    by_drawer: {
+      黃信儒: groups['黃信儒'].length,
+      黃志雄: groups['黃志雄'].length,
+      其他:   groups['其他'].length,
+    },
+  };
+}
 
 module.exports = {
   getSubjects, createSubject, updateSubject,
@@ -767,5 +846,5 @@ module.exports = {
   getNotifyTargets, createNotifyTarget, updateNotifyTarget, deleteNotifyTarget,
   deleteBatch, clearAll, bulkPayPast, mergeSubjects,
   getSubjectsTree, getRenewalReminders,
-  exportEltonBatchForMonth,
+  exportEltonBatchForMonth, exportUnpaidByDrawer,
 };
