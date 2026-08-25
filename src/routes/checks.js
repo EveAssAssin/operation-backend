@@ -552,18 +552,29 @@ router.post('/export-elton/:yearMonth', async (req, res) => {
 // 匯出所有 pending 支票，依出款人分工作表（黃信儒 / 黃志雄）
 // ══════════════════════════════════════════════════════════
 router.post('/export-unpaid', async (req, res) => {
+  let stage = 'init';
   try {
+    stage = 'call svc.exportUnpaidByDrawer';
     const result = await svc.exportUnpaidByDrawer();
-    if (result.count === 0) {
+    stage = 'check count';
+    if (!result || result.count === 0) {
       return err(res, { message: '目前沒有未出款的支票' }, 400);
     }
+    stage = 'set headers';
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(result.filename)}"`);
-    res.setHeader('X-Export-Count', result.count);
+    res.setHeader('X-Export-Count', String(result.count));
+    stage = 'send buffer';
     res.send(result.buffer);
   } catch (e) {
-    console.error('[Checks Export Unpaid]', e);
-    err(res, { message: e.message || '匯出失敗' }, 500);
+    console.error('[Checks Export Unpaid] stage=' + stage, e);
+    // 若 header 還沒送出，回 JSON 錯誤；否則放棄
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        message: `[stage=${stage}] ${e?.message || e || '未知錯誤'}`,
+      });
+    }
   }
 });
 
