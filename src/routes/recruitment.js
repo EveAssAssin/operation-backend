@@ -11,6 +11,8 @@ const { sendSms } = require('../services/smsService');
 
 // multer：暫存記憶體，上傳後轉 Supabase Storage
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
+// 影片專用（額度大：500MB）
+const uploadVideo = multer({ storage: multer.memoryStorage(), limits: { fileSize: 500 * 1024 * 1024 } });
 
 router.use(authorize('operation_staff', 'operation_lead', 'dept_head', 'super_admin'));
 
@@ -578,6 +580,39 @@ router.post('/interviews/:id/audio', upload.single('audio'), async (req, res) =>
     const { data, error } = await supabase
       .from('recruitment_interviews')
       .update({ audio_url: audioUrl, updated_at: new Date().toISOString() })
+      .eq('id', id)
+      .select()
+      .single();
+    if (error) throw error;
+    ok(res, data);
+  } catch (e) { fail(res, e); }
+});
+
+// POST /api/recruitment/interviews/:id/video
+// multipart/form-data, field: video（限 500MB）
+router.post('/interviews/:id/video', uploadVideo.single('video'), async (req, res) => {
+  try {
+    if (!req.file) return bad(res, '未收到影片檔案');
+    const { id } = req.params;
+    const ext    = (req.file.originalname.split('.').pop() || 'mp4').toLowerCase();
+    const path   = `videos/${id}.${ext}`;
+
+    const { error: upErr } = await supabase.storage
+      .from('recruitment-audio')
+      .upload(path, req.file.buffer, {
+        contentType: req.file.mimetype || 'video/mp4',
+        upsert: true,
+      });
+    if (upErr) throw upErr;
+
+    const { data: urlData } = supabase.storage
+      .from('recruitment-audio')
+      .getPublicUrl(path);
+    const videoUrl = urlData.publicUrl;
+
+    const { data, error } = await supabase
+      .from('recruitment_interviews')
+      .update({ video_url: videoUrl, updated_at: new Date().toISOString() })
       .eq('id', id)
       .select()
       .single();
