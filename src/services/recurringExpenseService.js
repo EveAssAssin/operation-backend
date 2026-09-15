@@ -258,20 +258,30 @@ async function ensureCurrentMonthPayments() {
 
 // ── 查詢 payment ───────────────────────────────────────────
 
-/** 列出某月 payments（含 expense 名稱） */
+/** 列出某月 payments（含 expense 名稱）
+ *  過濾規則：
+ *    - 若 expense 已停用（is_active=false）且 payment 還是 pending → 不顯示
+ *      （已 paid / skipped 的保留，因為屬歷史紀錄）
+ */
 async function listPaymentsByMonth(yearMonth) {
   const { data, error } = await supabase
     .from('recurring_expense_payments')
     .select(`
       *,
       recurring_expenses (
-        id, name, description, cycle_day, holiday_rule
+        id, name, description, cycle_day, holiday_rule, is_active
       )
     `)
     .eq('year_month', yearMonth)
     .order('due_date', { ascending: true });
   if (error) throw error;
-  return data || [];
+  return (data || []).filter(p => {
+    const exp = p.recurring_expenses;
+    if (!exp) return true; // 沒 join 到（orphan），保留
+    // 已停用 + 未付 → 藏起來
+    if (exp.is_active === false && p.status === 'pending') return false;
+    return true;
+  });
 }
 
 /** 取今天應付且未付的 payments（用於排程推播） */
@@ -282,14 +292,16 @@ async function getTodayDuePayments() {
     .select(`
       *,
       recurring_expenses (
-        id, name
+        id, name, is_active
       )
     `)
     .eq('due_date', today)
     .eq('status', 'pending')
     .order('bill_target_name', { ascending: true });
   if (error) throw error;
-  return { date: today, payments: data || [] };
+  // 過濾已停用的 expense（避免推播提醒已停用項目）
+  const filtered = (data || []).filter(p => p.recurring_expenses?.is_active !== false);
+  return { date: today, payments: filtered };
 }
 
 /** 標記為已付 */
