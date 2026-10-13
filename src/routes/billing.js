@@ -308,15 +308,13 @@ router.post('/ad-sync-v2', async (req, res) => {
   const log = (msg, extra) => result.steps.push({ time: new Date().toISOString(), msg, ...(extra || {}) });
 
   try {
-    const month = req.body?.month || req.query.month || new Date().toISOString().slice(0, 7);
-    result.month = month;
-    log(`start month=${month}`);
+    log(`start (使用固定 API: /ad-budgets/public/store-budget/latest，自動抓最新月）`);
 
-    // Step 1: 撈 API
+    // Step 1: 撈 API（固定端點，不帶 month 參數）
     const axios = require('axios');
     const apiUrl = process.env.AD_BUDGET_API_URL;
     if (!apiUrl) throw new Error('AD_BUDGET_API_URL 環境變數未設');
-    const target = `${apiUrl}/ad-budgets/public/campaigns?month=${month}`;
+    const target = `${apiUrl}/ad-budgets/public/store-budget/latest`;
     log(`calling: ${target}`);
 
     let apiResp;
@@ -325,12 +323,16 @@ router.post('/ad-sync-v2', async (req, res) => {
     } catch (apiErr) {
       throw new Error(`呼叫廣告 API 失敗: ${apiErr.message} (status=${apiErr.response?.status || 'n/a'})`);
     }
-    const campaigns = apiResp.data?.campaigns || [];
-    log(`got ${campaigns.length} campaigns`);
+    const month  = apiResp.data?.month;
+    const stores = apiResp.data?.stores || [];
+    result.month = month;
+    log(`got month=${month}, ${stores.length} stores`);
 
-    if (campaigns.length === 0) {
+    if (!month) throw new Error('API 回應缺少 month 欄位');
+
+    if (stores.length === 0) {
       result.success = true;
-      result.summary = { msg: `月份 ${month} 無廣告資料`, synced: 0, rows_in_db: 0 };
+      result.summary = { msg: `月份 ${month} 無門市資料`, synced: 0, rows_in_db: 0 };
       return res.json(result);
     }
 
@@ -342,15 +344,15 @@ router.post('/ad-sync-v2', async (req, res) => {
     for (const d of (dep.data || [])) if (d.store_name) storeNameMap[d.store_name] = d.store_erpid;
     log(`departments map: ${Object.keys(storeNameMap).length} entries`);
 
-    // Step 3: 展開 rows
+    // Step 3: 展開 rows（新資料結構：stores[].campaigns[]）
     const rows = [];
-    for (const camp of campaigns) {
-      for (const sd of (camp.store_budget_detail || [])) {
-        const erpid = storeNameMap[sd.store_name] || `ad-store-${sd.store_id}`;
-        const isActual = sd.actual_spend_share != null;
-        const amount = Number(isActual ? sd.actual_spend_share : sd.budget_share) || 0;
+    for (const store of stores) {
+      const erpid = storeNameMap[store.store_name] || `ad-store-${store.store_id}`;
+      for (const camp of (store.campaigns || [])) {
+        const isActual = camp.actual_spend_share != null;
+        const amount = Number(isActual ? camp.actual_spend_share : camp.budget_share) || 0;
         rows.push({
-          order_id:         `ad-${camp.id}-${sd.store_id}`,
+          order_id:         `ad-${camp.id}-${store.store_id}`,
           source_type:      'ad_budget',
           store_erpid:      erpid,
           amount,
@@ -359,16 +361,16 @@ router.post('/ad-sync-v2', async (req, res) => {
           billing_category: '企劃部',
           items: [{
             item_name: camp.name,
-            description: [camp.platform, camp.channel, camp.strategy].filter(Boolean).join(' / '),
+            description: [camp.platform].filter(Boolean).join(' / '),
             amount,
             status: 'completed',
           }],
-          remark: `${camp.name}（${camp.platform || camp.channel}）${camp.start_date}～${camp.end_date}${isActual ? '' : '【預算分攤】'}`,
+          remark: `${camp.name}（${camp.platform || ''}）${camp.start_date || ''}～${camp.end_date || ''}${isActual ? '' : '【預算分攤】'}`,
           updated_at: new Date().toISOString(),
         });
       }
     }
-    log(`expanded ${rows.length} rows from ${campaigns.length} campaigns`);
+    log(`expanded ${rows.length} rows from ${stores.length} stores`);
     const fallbackCount = rows.filter(r => r.store_erpid.startsWith('ad-store-')).length;
     if (fallbackCount > 0) log(`⚠️ ${fallbackCount} rows use fallback store_erpid (未對應到 departments)`);
 
@@ -405,7 +407,7 @@ router.post('/ad-sync-v2', async (req, res) => {
     result.success = true;
     result.summary = {
       msg: '同步完成',
-      campaigns: campaigns.length,
+      stores: stores.length,
       expanded_rows: rows.length,
       fallback_count: fallbackCount,
       rows_in_db: rowsInDb,
@@ -511,34 +513,31 @@ router.post('/ad-sync-debug', async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-// GET /api/billing/ad-debug?month=YYYY-MM
+// GET /api/billing/ad-debug
 // 直接打廣告費 API 回原始結果（不寫 DB）— 用來確認資料來源狀態
+// 固定打 /ad-budgets/public/store-budget/latest（企畫部已改成固定端點）
 // ─────────────────────────────────────────────────────────────
 router.get('/ad-debug', async (req, res) => {
   const axios = require('axios');
-  const month = req.query.month || new Date().toISOString().slice(0, 7);
   const url   = process.env.AD_BUDGET_API_URL;
   if (!url) {
     return res.status(503).json({ success: false, message: 'AD_BUDGET_API_URL 未設定' });
   }
-  const target = `${url}/ad-budgets/public/campaigns?month=${month}`;
+  const target = `${url}/ad-budgets/public/store-budget/latest`;
   try {
     const resp = await axios.get(target, { timeout: 15000 });
     const raw  = resp.data;
-    const campaigns = Array.isArray(raw?.campaigns) ? raw.campaigns
-                     : Array.isArray(raw)            ? raw
-                     : null;
+    const stores = Array.isArray(raw?.stores) ? raw.stores : null;
     res.json({
       success:        true,
       called_url:     target,
       http_status:    resp.status,
+      resp_month:     raw?.month || null,
       resp_type:      typeof raw,
-      resp_is_array:  Array.isArray(raw),
       resp_top_keys:  raw && typeof raw === 'object' && !Array.isArray(raw) ? Object.keys(raw) : null,
-      campaigns_count: campaigns ? campaigns.length : '無 campaigns 欄位',
-      first_campaign: campaigns?.[0] || null,
-      // 萬一格式怪，把整個 raw 截短回傳
-      raw_preview: typeof raw === 'string' ? raw.slice(0, 500) : raw,
+      stores_count:   stores ? stores.length : '無 stores 欄位',
+      first_store:    stores?.[0] || null,
+      raw_preview:    typeof raw === 'string' ? raw.slice(0, 500) : raw,
     });
   } catch (err) {
     res.status(500).json({

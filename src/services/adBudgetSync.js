@@ -1,6 +1,6 @@
 // services/adBudgetSync.js
 // 企劃部廣告費同步（新版）
-//   來源 API：AD_BUDGET_API_URL + /ad-budgets/public/store-budget?month=YYYY-MM
+//   來源 API：AD_BUDGET_API_URL + /ad-budgets/public/store-budget/latest  （固定端點，自動抓最新月）
 //
 // API 結構（新版：以「門市」為主）：
 //   {
@@ -42,26 +42,29 @@ async function buildStoreNameMap() {
 }
 
 /**
- * 同步指定月份的廣告費（以門市為主）
- * @param {string} month - YYYY-MM
- * @returns {{ synced, stores, meta_total, google_total, additional_total, unmapped }}
+ * 同步廣告費（以門市為主）— 固定抓最新月（企畫部已換成 /latest 端點）
+ * month 參數會被忽略（保留簽名避免呼叫端出錯）
+ * @returns {{ synced, stores, month, meta_total, google_total, additional_total, unmapped }}
  */
-async function syncAdBudget(month) {
+async function syncAdBudget(_ignoredMonth) {
   if (!AD_BUDGET_API_URL) {
     throw new Error('[AdBudget] 未設定環境變數 AD_BUDGET_API_URL');
   }
-  console.log(`[AdBudget] 開始同步月份：${month}`);
+  console.log('[AdBudget] 開始同步（固定端點：/latest）');
 
-  // 1. 撈 API
-  const resp = await axios.get(`${AD_BUDGET_API_URL}/ad-budgets/public/store-budget`, {
-    params:  { month },
+  // 1. 撈 API（固定端點）
+  const resp = await axios.get(`${AD_BUDGET_API_URL}/ad-budgets/public/store-budget/latest`, {
     timeout: 20000,
   });
 
+  const month  = resp.data?.month;
   const stores = resp.data?.stores;
+  if (!month) throw new Error('[AdBudget] API 回應缺少 month 欄位');
+  console.log(`[AdBudget] 回傳月份：${month}`);
+
   if (!Array.isArray(stores) || stores.length === 0) {
     console.log(`[AdBudget] 月份 ${month} 無門市資料`);
-    return { synced: 0, stores: 0 };
+    return { synced: 0, stores: 0, month };
   }
 
   // 2. 門市對照表
@@ -147,6 +150,7 @@ async function syncAdBudget(month) {
   return {
     synced: rows.length,
     stores: rows.length,
+    month,
     meta_total:       resp.data?.total_meta_spend,
     google_total:     resp.data?.total_google_spend,
     additional_total: resp.data?.total_additional_spend,
