@@ -129,11 +129,9 @@ async function syncMonth(month, syncType = 'manual') {
       console.warn(`[EducationBonus] 月份 ${month} 同步失敗（不影響主流程）：${err.message}`)
     );
 
-    // 同步企劃部廣告費（AD_BUDGET_API_URL 未設定時自動跳過）
-    const { syncAdBudget } = require('./adBudgetSync');
-    await syncAdBudget(month).catch(err =>
-      console.warn(`[AdBudget] 月份 ${month} 同步失敗（不影響主流程）：${err.message}`)
-    );
+    // 企劃部廣告費：已由 /api/billing/ad-sync-v2 統一處理（寫 ad-{camp_id}-{store_id} 格式）
+    // 不再呼叫 syncAdBudget（會寫 ad-store-% 格式造成資料重複）
+    // 使用者需到企劃開帳頁手動按同步
 
     // 同步路奇天格鏡片帳單（CHI_FINANCE_API_KEY 未設定 / 來源未建立時自動跳過）
     const { syncChiFinanceLens } = require('./chiFinanceLensSync');
@@ -229,13 +227,7 @@ async function incrementalSync() {
       );
     }
 
-    // 增量同步額外加掛：企劃部廣告費（同步本月與上月，避免漏單）
-    const { syncAdBudget } = require('./adBudgetSync');
-    for (const m of [prevStr, cur]) {
-      await syncAdBudget(m).catch(err =>
-        console.warn(`[AdBudget] 增量 ${m} 同步失敗（不影響主流程）：${err.message}`)
-      );
-    }
+    // 企劃部廣告費：已由 /api/billing/ad-sync-v2 統一處理，此處不再重複呼叫
 
     await writeSyncLog({
       sync_type:     'incremental',
