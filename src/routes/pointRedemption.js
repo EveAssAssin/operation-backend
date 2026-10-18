@@ -46,7 +46,15 @@ router.get('/public/verify', async (req, res) => {
 router.get('/public/catalog', async (req, res) => {
   try {
     const items = await svc.listItems({ activeOnly: true });
-    ok(res, items);
+    // 帶 app_number → 依員工身分（辦公室/門市）換算 min_balance_after，前端照舊讀這欄即可
+    let isOffice = false;
+    if (req.query.app_number) {
+      try { isOffice = (await svc.verifyEmployee(req.query.app_number)).is_office; } catch { /* 查不到就用門市規則 */ }
+    }
+    ok(res, items.map(it => ({
+      ...it,
+      min_balance_after: svc.effectiveMinAfter(it, isOffice),
+    })));
   } catch (e) { fail(res, e); }
 });
 

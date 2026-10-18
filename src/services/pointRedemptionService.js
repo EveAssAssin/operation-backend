@@ -61,6 +61,11 @@ function normalizeItemPayload(p = {}) {
   if (p.is_active !== undefined)   out.is_active   = !!p.is_active;
   if (p.sort_order !== undefined)  out.sort_order  = Math.trunc(Number(p.sort_order) || 0);
   if (p.min_balance_after !== undefined) out.min_balance_after = Math.max(0, Math.trunc(Number(p.min_balance_after) || 0));
+  if (p.min_balance_after_office !== undefined) {
+    out.min_balance_after_office = (p.min_balance_after_office === null || p.min_balance_after_office === '')
+      ? null
+      : Math.max(0, Math.trunc(Number(p.min_balance_after_office) || 0));
+  }
   return out;
 }
 
@@ -104,12 +109,44 @@ async function deleteItem(id) {
 // ───────────────────────────────────────────────────────────
 // 員工身份驗證（公開入口用 app_number）
 // ───────────────────────────────────────────────────────────
+// ── 辦公室（內部部門）判斷 ────────────────────────────────
+// 規則：部門名稱不含「店」→ 內部部門（含「商城門市」）
+// 例外：名稱沒有「店」但其實是門市的，列在 STORE_ERPID_OVERRIDES
+const STORE_ERPID_OVERRIDES = new Set([
+  '120069',   // SUBANG SS15（馬來西亞門市）
+]);
+function isOfficeDept(storeName, storeErpid) {
+  if (storeErpid && STORE_ERPID_OVERRIDES.has(String(storeErpid))) return false;
+  const name = String(storeName || '').trim();
+  if (!name) return true;            // 無部門資料 → 視為內部
+  return !name.includes('店');
+}
+
+// 依身分取品項的「兌換後最低餘額」
+function effectiveMinAfter(item, isOffice) {
+  if (!item) return 0;
+  if (isOffice && item.min_balance_after_office !== null && item.min_balance_after_office !== undefined) {
+    return Math.max(0, Number(item.min_balance_after_office) || 0);
+  }
+  return Math.max(0, Number(item.min_balance_after || 0));
+}
+
+// 依 erpid 查是否為辦公室人員（審核時用）
+async function isOfficeByErpid(erpid) {
+  const { data } = await supabase
+    .from('employees')
+    .select('store_erpid, store_name')
+    .eq('erpid', String(erpid))
+    .maybeSingle();
+  return isOfficeDept(data?.store_name, data?.store_erpid);
+}
+
 async function verifyEmployee(appNumber) {
   const app = String(appNumber || '').trim();
   if (!app) throw new Error('缺少員工編號 app_number');
   const { data: emp, error } = await supabase
     .from('employees')
-    .select('erpid, app_number, name, store_name, is_active')
+    .select('erpid, app_number, name, store_erpid, store_name, is_active')
     .eq('app_number', app)
     .eq('is_active', true)
     .single();
@@ -120,6 +157,8 @@ async function verifyEmployee(appNumber) {
     app_number: emp.app_number,
     name:       emp.name,
     store_name: emp.store_name || null,
+    store_erpid: emp.store_erpid || null,
+    is_office:  isOfficeDept(emp.store_name, emp.store_erpid),
   };
 }
 
@@ -298,7 +337,7 @@ async function redeem({ app_number, item_id, quantity = 1 }) {
   const balance   = await getBalance(employee.erpid);
   const unitCost  = Number(item.points_cost);
   const cost      = unitCost * qty;                      // 總扣分
-  const minAfter  = Math.max(0, Number(item.min_balance_after || 0));
+  const minAfter  = effectiveMinAfter(item, employee.is_office);
   const remaining = balance.totalScore - cost;
 
   if (balance.totalScore < cost) {
@@ -371,7 +410,7 @@ async function approveRedemption(id, approver) {
   // 餘額重檢 + 門檻重檢
   const balance = await getBalance(record.employee_erpid);
   const cost    = Number(record.points_cost);
-  const minAfter = Math.max(0, Number(item?.min_balance_after || 0));
+  const minAfter = effectiveMinAfter(item, await isOfficeByErpid(record.employee_erpid));
   const remaining = balance.totalScore - cost;
   if (balance.totalScore < cost) {
     throw new Error(`員工分數不足（目前 ${balance.totalScore} 分，需要 ${cost} 分），無法通過`);
@@ -485,6 +524,8 @@ async function fulfill(id, fulfilledBy) {
 }
 
 module.exports = {
+  isOfficeDept,
+  effectiveMinAfter,
   ITEM_TYPES,
   listItems,
   getItem,
