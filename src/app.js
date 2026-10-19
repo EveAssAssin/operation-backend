@@ -105,6 +105,9 @@ app.use('/api/recurring-expenses', authenticate, require('./routes/recurringExpe
 // 營運費用模組（電費/水費/電話 ...，需登入）
 app.use('/api/operational-expenses', require('./routes/operationalExpenses'));
 
+// 門市月報帳本（科目表／帳本列／每店加總，需 billing 查看）
+app.use('/api/ledger', require('./routes/ledger'));
+
 // 系統更新模組（從 GitHub 抓 commits 展示開發績效，需登入）
 app.use('/api/system-updates', authenticate, require('./routes/systemUpdates'));
 
