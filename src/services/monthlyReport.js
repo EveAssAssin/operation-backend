@@ -594,7 +594,7 @@ async function build(ym, store, opts = {}) {
   const retained = report && report.retained_amount != null ? r0(report.retained_amount) : retainedAuto;
   const distributable = profit - marketing - depr - retained;
   const hs = (holders.data || []).filter((h) => h.from_ym <= ym && (!h.to_ym || h.to_ym >= ym));
-  const shares = hs.reduce((s, h) => s + h.shares, 0);
+  const shares = hs.reduce((s, h) => s + Number(h.shares), 0);
   if (shares > 100) warnings.push(`股東股數合計 ${shares}，超過 100`);
   const [y, mo] = ym.split('-').map(Number);
 
@@ -629,7 +629,7 @@ async function build(ym, store, opts = {}) {
       cash_label: mo % 2 === 1 ? `現金分紅（${mo === 1 ? 12 : mo - 1}–${mo} 月）` : null,
       fixed_this: { marketing_fund: fixedThis('marketing_fund'), depreciation: fixedThis('depreciation') },
     },
-    shareholders: hs.map((h) => ({ id: h.id, name: h.name, erpid: h.erpid, shares: h.shares, amount: r0(distributable * h.shares / 100) })),
+    shareholders: hs.map((h) => ({ id: h.id, name: h.name, erpid: h.erpid, shares: Number(h.shares), amount: r0(distributable * Number(h.shares) / 100) })),
     rent: rentInfo,
     card_fee: cardFee, salary: salaryInfo,
     storehouse_issues: (sh.issues || []).filter((i) => i.store === store).map((i) => ({ kind: i.kind, line: i.line })),

@@ -777,18 +777,18 @@ router.post('/shareholders', canEdit, async (req, res) => {
   try {
     const b = req.body || {};
     const store = String(b.store || '');
-    const shares = Math.round(Number(b.shares));
+    const shares = Math.round(Number(b.shares) * 1000) / 1000;   // 可以有小數（1.5%）
     const ro = await require('../services/shareholderRoster').roster(false);
     const person = (ro.list || []).find((x) => x.erpid === String(b.erpid || ''));
     if (!person) return bad(res, '只能選左手的在職人員或「股東」部門的人（名單沒有這位）');
     const name = person.name;
     b.app_number = person.app_number;
     if (!store) return bad(res, '缺門市');
-    if (!(shares >= 1 && shares <= 100)) return bad(res, '持股要是 1～100（%）');
+    if (!(shares > 0 && shares <= 100)) return bad(res, '持股要大於 0、最多 100（%），可以有小數');
     if (!YM.test(String(b.from_ym || '')) || (b.to_ym && !YM.test(String(b.to_ym)))) return bad(res, '起訖月份要是 YYYY-MM');
     const { data: cur } = await supabase.from('store_shareholders').select('shares, from_ym, to_ym').eq('store_erpid', store);
-    const sum = (cur || []).filter((h) => overlap(h.from_ym, h.to_ym, b.from_ym, b.to_ym || null)).reduce((a, h) => a + h.shares, 0);
-    if (sum + shares > 100) return bad(res, `同一期間持股合計會變成 ${sum + shares}%，超過 100%`);
+    const sum = (cur || []).filter((h) => overlap(h.from_ym, h.to_ym, b.from_ym, b.to_ym || null)).reduce((a, h) => a + Number(h.shares), 0);
+    if (Math.round((sum + shares) * 1000) > 100000) return bad(res, `同一期間持股合計會變成 ${sum + shares}%，超過 100%`);
     const { data, error } = await supabase.from('store_shareholders').insert({ store_erpid: store, name, erpid: b.erpid || null, app_number: b.app_number || null,
       shares, from_ym: b.from_ym, to_ym: b.to_ym || null, created_by: who(req) }).select().single();
     if (error) throw error;

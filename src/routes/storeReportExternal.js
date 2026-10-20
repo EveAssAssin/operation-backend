@@ -134,7 +134,7 @@ router.get('/investor/report', async (req, res) => {
   const v = managerView(rep.snapshot, rep);
   delete v.manager_note; delete v.manager_note_at;
   const me = (rep.snapshot.shareholders || []).find((h) => mine.some((x) => x.erpid && String(x.erpid) === String(h.erpid)));
-  res.json({ success: true, data: { closed: true, ...v, my: { shares: mine.reduce((a, h) => a + h.shares, 0), amount: me ? r0(me.amount) : null } } });
+  res.json({ success: true, data: { closed: true, ...v, my: { shares: mine.reduce((a, h) => a + Number(h.shares), 0), amount: me ? r0(me.amount) : null } } });
 });
 
 module.exports = router;
