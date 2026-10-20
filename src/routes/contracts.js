@@ -57,6 +57,31 @@ router.get('/expiring', async (req, res) => {
 });
 
 // GET /api/contracts/:id
+// ── 合約連動應付（2026-10-20 C3）──
+const rsvc = require('../services/recurringExpenseService');
+// GET /api/contracts/:id/payables  掛在這份合約的固定支出＋近 6 期應付／支票
+router.get('/:id/payables', async (req, res) => {
+  try {
+    const supabase = require('../config/supabase');
+    const { data: exps } = await supabase.from('recurring_expenses').select('*').eq('contract_id', req.params.id);
+    const ids = (exps || []).map((e) => e.id);
+    const { data: pays } = ids.length ? await supabase.from('recurring_expense_payments').select('*').in('expense_id', ids).order('year_month', { ascending: false }).limit(ids.length * 6) : { data: [] };
+    ok(res, (exps || []).map((e) => ({ ...e, payments: (pays || []).filter((p) => p.expense_id === e.id) })));
+  } catch (e) { fail(res, e); }
+});
+// POST /api/contracts/:id/link-expense { expense_id, share? }  把現有固定支出掛到合約
+router.post('/:id/link-expense', async (req, res) => {
+  try { ok(res, await rsvc.linkExpenseToContract(req.params.id, (req.body || {}).expense_id, { share: (req.body || {}).share })); } catch (e) { fail(res, e); }
+});
+// POST /api/contracts/unlink-expense { expense_id }
+router.post('/unlink-expense', async (req, res) => {
+  try { await rsvc.unlinkExpense((req.body || {}).expense_id); ok(res, true); } catch (e) { fail(res, e); }
+});
+// POST /api/contracts/:id/payees { payee_name, amount（每月實拿）, payment_method, cycle_day, bank_code, bank_branch, bank_account, share? }
+router.post('/:id/payees', async (req, res) => {
+  try { ok(res, await rsvc.createContractPayee(req.params.id, req.body || {}, req.user && req.user.member_id)); } catch (e) { fail(res, e); }
+});
+
 router.get('/:id', async (req, res) => {
   try {
     const c = await svc.getContract(req.params.id);

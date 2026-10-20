@@ -98,6 +98,15 @@ router.post('/payments/:id/pay', async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
+// PATCH /api/recurring-expenses/payments/:id/check  支票：check_no／check_issue_date／check_due_date／check_cashed_date／check_note（2026-10-20）
+router.patch('/payments/:id/check', async (req, res) => {
+  try { ok(res, await svc.updatePaymentCheck(req.params.id, req.body || {})); } catch (e) { fail(res, e); }
+});
+// GET /api/recurring-expenses/checks/open  開了還沒兌現的支票
+router.get('/checks/open', async (req, res) => {
+  try { ok(res, await svc.listOpenChecks()); } catch (e) { fail(res, e); }
+});
+
 // POST /api/recurring-expenses/payments/:id/unpay
 router.post('/payments/:id/unpay', async (req, res) => {
   try {

@@ -195,6 +195,20 @@ async function ensurePaymentForMonth(expense, yearMonth) {
   if (e1) throw e1;
   if (existing) return existing;
 
+  // 合約連動（2026-10-20 C3）：金額＝合約當月金額（分段租金照天數拆）× contract_share；合約這個月沒有天數（到期／還沒開始）＝不產生應付
+  let amount = expense.amount;
+  if (expense.contract_id && expense.contract_share != null) {
+    const { data: c } = await supabase.from('contracts').select('id, status, start_date, end_date, monthly_amount, type_data').eq('id', expense.contract_id).maybeSingle();
+    if (c) {
+      if (c.status === 'archived') return null;
+      const r = require('./monthlyReport').rentForMonth(c, yearMonth);
+      if (!r.days) return null;
+      amount = Math.round(r.amount * Number(expense.contract_share));
+      // 固定支出上的金額跟著合約更新（月報「實付」參考、匯款檔都讀它）；只在整月才更新，避免被頭尾月的天數拆分蓋掉
+      if (r.days === r.dim && amount !== Number(expense.amount)) await supabase.from('recurring_expenses').update({ amount }).eq('id', expense.id);
+    }
+  }
+
   // 計算日期
   const { original, adjusted } = await computeDueDates(expense, yearMonth);
 
@@ -203,7 +217,8 @@ async function ensurePaymentForMonth(expense, yearMonth) {
     year_month:        yearMonth,
     original_due_date: original,
     due_date:          adjusted,
-    amount:            expense.amount,
+    amount,
+    pay_method:        expense.payment_method || null,
     bill_target_type:  expense.bill_target_type,
     bill_target_id:    expense.bill_target_id,
     bill_target_name:  expense.bill_target_name,
@@ -550,7 +565,66 @@ async function recomputeAllPendingDueDates() {
   return { scanned: (payments || []).length, updated };
 }
 
+
+// ── 合約連動（2026-10-20 C3）──────────────────────────────
+// 把固定支出掛到合約：share＝這筆實拿金額 ÷ 合約「現在」月租（已扣代扣稅就是淨額比例）
+async function linkExpenseToContract(contractId, expenseId, { share } = {}) {
+  const { data: c } = await supabase.from('contracts').select('*').eq('id', contractId).maybeSingle();
+  if (!c) throw new Error('找不到合約');
+  const { data: e } = await supabase.from('recurring_expenses').select('*').eq('id', expenseId).maybeSingle();
+  if (!e) throw new Error('找不到固定支出');
+  const ym = todayStr().slice(0, 7);
+  const cur = require('./monthlyReport').rentForMonth(c, ym);
+  const base = cur.days ? Math.round(cur.amount * cur.dim / cur.days) : Number(c.monthly_amount) || 0;
+  const sh = share != null ? Number(share) : (base ? Number(e.amount) / base : null);
+  if (!(sh > 0 && sh <= 1)) throw new Error(`算不出比例（合約月租 ${base}、這筆 ${e.amount}），請手動填比例`);
+  const up = { contract_id: contractId, contract_share: Math.round(sh * 1e6) / 1e6, store_erpid: e.store_erpid || c.store_erpid || null,
+    ledger_code: e.ledger_code || (c.type === 'rent' ? 'rent' : null), end_year_month: c.end_date ? c.end_date.slice(0, 7) : e.end_year_month };
+  const { data, error } = await supabase.from('recurring_expenses').update(up).eq('id', expenseId).select().single();
+  if (error) throw error;
+  return data;
+}
+async function unlinkExpense(expenseId) {
+  const { error } = await supabase.from('recurring_expenses').update({ contract_id: null, contract_share: null }).eq('id', expenseId);
+  if (error) throw error;
+}
+// 新增一位收款人（房東）＝新固定支出，直接掛合約；amount＝這位每月實拿金額（扣完代扣稅）
+async function createContractPayee(contractId, input, createdBy) {
+  const { data: c } = await supabase.from('contracts').select('*').eq('id', contractId).maybeSingle();
+  if (!c) throw new Error('找不到合約');
+  const ym = todayStr().slice(0, 7);
+  const exp = await createExpense({
+    name: input.name || `${c.name}｜${input.payee_name || ''}`, amount: input.amount, cycle_day: input.cycle_day, cycle_day_text: input.cycle_day_text,
+    payment_method: input.payment_method, payee_name: input.payee_name, bank_code: input.bank_code, bank_branch: input.bank_branch, bank_account: input.bank_account,
+    start_year_month: input.start_year_month || ym, end_year_month: c.end_date ? c.end_date.slice(0, 7) : null,
+    note: input.note || `合約連動：${c.name}`, needs_billing: false,
+  }, createdBy);
+  await supabase.from('recurring_expenses').update({ store_erpid: c.store_erpid || null, ledger_code: c.type === 'rent' ? 'rent' : null }).eq('id', exp.id);
+  return linkExpenseToContract(contractId, exp.id, { share: input.share });
+}
+// 支票：票號／開票日／票面到期日／兌現日
+async function updatePaymentCheck(paymentId, b) {
+  const d = (v) => (v === '' || v == null ? null : String(v).slice(0, 10));
+  const up = {};
+  if (b.check_no !== undefined) up.check_no = b.check_no ? String(b.check_no).trim() : null;
+  ['check_issue_date', 'check_due_date', 'check_cashed_date'].forEach((k) => { if (b[k] !== undefined) up[k] = d(b[k]); });
+  if (b.check_note !== undefined) up.check_note = b.check_note || null;
+  if (b.pay_method !== undefined) up.pay_method = b.pay_method || null;
+  const { data, error } = await supabase.from('recurring_expense_payments').update(up).eq('id', paymentId).select().single();
+  if (error) throw error;
+  return data;
+}
+// 支票清單：開了還沒兌現的（到期日過了＝要追）
+async function listOpenChecks() {
+  const { data, error } = await supabase.from('recurring_expense_payments')
+    .select('id, year_month, amount, status, check_no, check_issue_date, check_due_date, check_cashed_date, check_note, recurring_expenses(id, name, payee_name, store_erpid, contract_id)')
+    .not('check_no', 'is', null).is('check_cashed_date', null).order('check_due_date');
+  if (error) throw error;
+  return data || [];
+}
+
 module.exports = {
+  linkExpenseToContract, unlinkExpense, createContractPayee, updatePaymentCheck, listOpenChecks,
   // CRUD
   listExpenses, getExpense, createExpense, updateExpense, deleteExpense,
   // Payment 補建 / 查詢 / 狀態

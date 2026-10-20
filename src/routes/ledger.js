@@ -316,7 +316,7 @@ router.get('/store-profile', async (req, res) => {
       supabase.from('entity_fact_fields').select('category_id, field_key, field_label, sort_order').order('sort_order'),
       supabase.from('entity_facts').select('id, category_id, data, note, updated_at').eq('store_erpid', store),
       supabase.from('contracts').select('id, type, name, purpose, status, start_date, end_date, monthly_amount, type_data, party_name, renewed_from, payment, note').eq('store_erpid', store).order('start_date', { ascending: false }),
-      supabase.from('recurring_expenses').select('id, name, amount, payment_method, payee_name, cycle_day, ledger_code, period_text, is_active').eq('store_erpid', store),
+      supabase.from('recurring_expenses').select('id, name, amount, payment_method, payee_name, cycle_day, ledger_code, period_text, is_active, contract_id, contract_share').eq('store_erpid', store),
       supabase.from('store_fixed_items').select('*').eq('store_erpid', store).order('from_ym'),
       supabase.from('store_shareholders').select('*').eq('store_erpid', store),
     ]);
@@ -328,7 +328,7 @@ router.get('/store-profile', async (req, res) => {
       return { id: f.id, category: catName[f.category_id] || '其他', rows, updated_at: f.updated_at };
     });
     const ids = (recs || []).map((r) => r.id);
-    const { data: pays } = ids.length ? await supabase.from('recurring_expense_payments').select('expense_id, year_month, amount, status, due_date, paid_at')
+    const { data: pays } = ids.length ? await supabase.from('recurring_expense_payments').select('id, expense_id, year_month, amount, status, due_date, paid_at, pay_method, check_no, check_issue_date, check_due_date, check_cashed_date, check_note')
       .in('expense_id', ids).gte('year_month', (() => { const [y, m] = ym.split('-').map(Number); const d = new Date(Date.UTC(y, m - 6, 1)); return d.toISOString().slice(0, 7); })())
       .lte('year_month', ym).order('year_month') : { data: [] };
     const today = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10);
