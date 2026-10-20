@@ -126,6 +126,9 @@ app.use('/api/external/appointed-units', require('./routes/appointedUnitsExterna
 // 對外 API — market 端外部工務師請款事件收件（x-api-key 認證）
 app.use('/api/external/repair-payments', require('./routes/externalPayments'));
 
+// 對外 API — 門市月報給店長看（x-report-key，金鑰 sha256 在 report_settings.ext_report_keys；市場部店長評核呼叫）
+app.use('/api/external/store-report', require('./routes/storeReportExternal'));
+
 // 對外 API — 路奇天格鏡片請款事件收件（獨立 CHI_LENS_API_KEY）
 app.use('/api/external/chi-finance-lens', require('./routes/chiFinanceLensPayments'));
 
