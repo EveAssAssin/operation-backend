@@ -1,5 +1,7 @@
-// services/shareholderRoster.js —— 股東名單＝左手「股東」部門的人（2026-10-20 營運定案）
-// 左手會新增一個「股東」部門，把股東放進去；門市基礎設定選股東只能從這份名單挑（姓名／客編由左手決定，不由請求帶進來）。
+// services/shareholderRoster.js —— 股東名單（2026-10-20 營運定案）
+// 左手會新增一個「股東」部門放外部股東；但一般在職人員也可能是股東 → 門市基礎設定可挑的人＝
+// 左手全部在職人員（getallemployees）＋股東部門的人（排在前面）。姓名／客編由左手決定，不由請求帶進來。
+// App「樂活人員 → 投資管理」按鈕＝股東部門的人 ∪ 門市基礎設定裡現在或之後有持股的人。
 // 行政部門不在 getstoredatas 裡 → 部門編號存 report_settings.shareholder_group_erpid（門市基礎設定頁可設）；
 // 沒設時：①營運部 departments 名稱含「股東」②到左手試行政部門常見編號（1～40、120～140，2026-10-20 實查現有：
 // 1 工程部、2 企劃部、3 暗部、4 營運部、5 商城倉管部、123 市場部），groupname 含「股東」就記下來（部門裡要至少有一個人才看得到名稱）。
@@ -28,18 +30,22 @@ async function probe() {
   return null;
 }
 
-/** { group, list:[{erpid,name,app_number}], error? }；10 分鐘快取，force＝重抓 */
+/** { group, list:[{erpid,name,app_number,in_dept}], dept_count, error? }；10 分鐘快取，force＝重抓 */
 async function roster(force) {
   if (!force && cache.data && Date.now() - cache.at < 10 * 60e3) return cache.data;
   const group = await groupErpid();
-  if (!group) return { group: null, list: [], error: '左手還找不到「股東」部門（部門建好、放進至少一位股東後會自動找到；也可以直接填部門編號）' };
   try {
-    const [emps, all] = await Promise.all([LH.getEmployeesByGroup(group), LH.getAllEmployees()]);
+    const [emps, all] = await Promise.all([group ? LH.getEmployeesByGroup(group) : Promise.resolve([]), LH.getAllEmployees()]);
     const apps = new Map((all || []).map((x) => [String(x.employeeerpid), x.employeeappnumber ? String(x.employeeappnumber) : null]));
-    const list = (emps || []).filter(LH.isValidEmployee).map((e) => ({ erpid: String(e.erpid), name: e.name, app_number: apps.get(String(e.erpid)) || null }));
-    cache = { at: Date.now(), data: { group, list } };
-    syncPortal(list).catch((e) => console.warn('[shareholderRoster] portal 同步失敗', e.message));
-    return cache.data;
+    const dept = (emps || []).filter(LH.isValidEmployee).map((e) => ({ erpid: String(e.erpid), name: e.name, app_number: apps.get(String(e.erpid)) || null, in_dept: true }));
+    const seen = new Set(dept.map((x) => x.erpid));
+    const rest = (all || []).filter((x) => x.employeeerpid && !seen.has(String(x.employeeerpid)) && !String(x.employeeerpid).startsWith('9999'))
+      .map((x) => ({ erpid: String(x.employeeerpid), name: x.employeename, app_number: x.employeeappnumber ? String(x.employeeappnumber) : null, in_dept: false }))
+      .sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh-Hant'));
+    const data = { group, dept_count: dept.length, list: dept.concat(rest), error: group ? null : '左手還找不到「股東」部門（建好、放進至少一位股東後會自動找到；也可以直接填部門編號）；在職人員照樣可以選' };
+    cache = { at: Date.now(), data };
+    syncPortal(dept).catch((e) => console.warn('[shareholderRoster] portal 同步失敗', e.message));
+    return data;
   } catch (e) {
     return { group, list: [], error: `左手查詢失敗：${e.message}` };
   }
@@ -56,8 +62,12 @@ async function setGroup(erpid) {
 const PORTAL_RPC = 'https://dsvmwkbdjeabiizxusrn.supabase.co/rest/v1/rpc/investment_sync_members';
 const PORTAL_PUB = 'sb_publishable_kFqPpN0CTCcanGUQL1HNkQ_XubQw_6d';   // portal 的公開金鑰（publishable，本來就給前端用）
 let lastSent = '';
-async function syncPortal(list) {
-  const apps = [...new Set(list.map((x) => x.app_number).filter(Boolean))].sort();
+/** dept＝股東部門的人；再加上門市基礎設定裡現在或之後有持股的人（一般在職人員也可能是股東） */
+async function syncPortal(dept) {
+  const ym = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 7);
+  const { data: hs } = await supabase.from('store_shareholders').select('app_number, to_ym');
+  const holders = (hs || []).filter((h) => h.app_number && (!h.to_ym || h.to_ym >= ym)).map((h) => String(h.app_number));
+  const apps = [...new Set((dept || []).map((x) => x.app_number).filter(Boolean).concat(holders))].sort();
   const sig = apps.join(',');
   if (sig === lastSent) return null;
   const { data } = await supabase.from('report_settings').select('value').eq('key', 'portal_invest_key').maybeSingle();
@@ -69,10 +79,18 @@ async function syncPortal(list) {
   console.log('[shareholderRoster] portal 投資管理', JSON.stringify(j));
   return j;
 }
+/** 股東有新增／結束／刪除時呼叫（不等左手：用快取的股東部門名單） */
+async function resync() {
+  const ro = cache.data || await roster(false);
+  if (!ro.list || !ro.list.length) return null;   // 左手查不到時不送（不要把股東部門的人清掉）
+  const dept = ro.list.filter((x) => x.in_dept);
+  lastSent = '';
+  return syncPortal(dept);
+}
 /** 開機後 1 分鐘、之後每 6 小時：重抓名單（順便同步 portal） */
 function startInvestSync() {
   const run = () => roster(true).catch((e) => console.warn('[shareholderRoster]', e.message));
   setTimeout(run, 60e3);
   setInterval(run, 6 * 3600e3);
 }
-module.exports = { roster, setGroup, startInvestSync };
+module.exports = { roster, setGroup, startInvestSync, resync };

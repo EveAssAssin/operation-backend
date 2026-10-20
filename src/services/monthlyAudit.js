@@ -185,7 +185,9 @@ async function audit(ym, opts = {}) {
       title: `房租合約 ${fmt(dueC)}，基本資料寫 ${fmt(bref)}`, detail: `差很多：可能還有一份合約沒建（例如本店＋驗光所分開租），或基本資料沒更新。基本資料月報應列金額 ${fmt(rt.basic.report_amount)}。`, amount: dueC - bref });
     const due = rt.contracts.reduce((a, c) => a + (c.amount || 0), 0);
     if (due && rt.paid != null && (rt.paid > due * 1.001 || rt.paid < due * 0.85)) add({ store: id, store_name: s.name, sev: 'mid', key: 'rent:paid', code: 'rent',
-      title: `房租實付 ${fmt(rt.paid)}，合約 ${fmt(due)}`, detail: '扣繳（10%＋二代健保）後通常是合約的 88～95%；差太多要看是不是金額改了沒更新。', amount: rt.paid - due });
+      title: `房租實付 ${fmt(rt.paid)}，合約 ${fmt(due)}`, detail: `扣繳（10%＋二代健保）後通常是合約的 88～95%；差太多要看是不是金額改了沒更新${rt.paid_checks ? `（其中支票 ${fmt(rt.paid_checks)}：支票是照票面到期日算，兩個月開一張或一次開多張的店會跳這則，屬正常）` : ''}。`, amount: rt.paid - due });
+    for (const b of rt.bounced || []) add({ store: id, store_name: s.name, sev: 'high', key: `rent:bounced:${b.check_no}`, code: 'rent',
+      title: `房租支票退票 ${b.check_no || ''}`, detail: `票面到期 ${b.due_date}，金額 ${fmt(b.amount)}；到「支票紀錄」處理並確認房東有沒有收到。`, amount: b.amount });
     const negs = (s.lines || []).filter((l) => l.amount < 0);
     const negBy = {};
     negs.forEach((l) => { negBy[l.code] = (negBy[l.code] || 0) + l.amount; });

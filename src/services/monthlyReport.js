@@ -182,6 +182,36 @@ async function rentContracts() {
     .eq('type', 'rent').not('store_erpid', 'is', null).neq('status', 'archived');
   return data || [];
 }
+// ── 房租支票（既有「支票紀錄」系統，2026-10-20）：check_subjects.store_erpid（「房租／中清」→ 中清店）或 check_batches.contract_id
+// 當月票面到期的支票＝這個月實付（作廢不算、退票另列）；10 分鐘快取
+const checkCache = new Map();
+async function rentChecks(ym) {
+  const hit = checkCache.get(ym);
+  if (hit && Date.now() - hit.at < 10 * 60e3) return hit.data;
+  const [y, m] = ym.split('-').map(Number);
+  const end = `${ym}-${String(new Date(Date.UTC(y, m, 0)).getUTCDate()).padStart(2, '0')}`;
+  const { data, error } = await supabase.from('checks')
+    .select('id, check_no, amount, due_date, status, paid_at, batch_id, check_batches!inner(id, batch_no, drawer_name, contract_id, subject_id, check_subjects!inner(name, store_erpid, parent_id))')
+    .gte('due_date', `${ym}-01`).lte('due_date', end).neq('status', 'voided');
+  const byStore = {};
+  if (error) { const r = { byStore, error: `支票紀錄讀取失敗：${error.message}` }; return r; }
+  let cmap = null;
+  for (const c of data || []) {
+    const b = c.check_batches || {}, sj = b.check_subjects || {};
+    let store = sj.store_erpid || null;
+    if (!store && b.contract_id) {
+      if (!cmap) { const { data: cs } = await supabase.from('contracts').select('id, store_erpid'); cmap = new Map((cs || []).map((x) => [x.id, x.store_erpid])); }
+      store = cmap.get(b.contract_id) || null;
+    }
+    if (!store) continue;
+    (byStore[store] = byStore[store] || []).push({ id: c.id, check_no: c.check_no, amount: Number(c.amount) || 0, due_date: c.due_date, status: c.status,
+      subject: sj.name, drawer: b.drawer_name, batch_no: b.batch_no, contract_id: b.contract_id || null });
+  }
+  const out = { byStore };
+  checkCache.set(ym, { at: Date.now(), data: out });
+  return out;
+}
+
 function rentForMonth(c, ym) {
   const [y, m] = ym.split('-').map(Number);
   const dim = new Date(Date.UTC(y, m, 0)).getUTCDate();
@@ -243,7 +273,7 @@ async function build(ym, store, opts = {}) {
   if (!YM.test(ym)) throw new Error('ym 要是 YYYY-MM');
   store = String(store || '');
   if (!store) throw new Error('缺門市');
-  const [accs, st, linesR, mkt, aimin, rep, fixed, holders, dept, plan, sh, rcs, rbs, smo] = await Promise.all([
+  const [accs, st, linesR, mkt, aimin, rep, fixed, holders, dept, plan, sh, rcs, rbs, smo, chk] = await Promise.all([
     accounts(),
     settings(),
     supabase.rpc('ledger_lines', { p_ym: ym }).eq('store_erpid', store),
@@ -258,6 +288,7 @@ async function build(ym, store, opts = {}) {
     opts.contracts || rentContracts(),
     rentBasics(),
     opts.sales || salesMonth(ym),
+    opts.checks || rentChecks(ym),
   ]);
   if (linesR.error) throw linesR.error;
   const lines = linesR.data || [];
@@ -324,6 +355,22 @@ async function build(ym, store, opts = {}) {
     byCode.rent = (byCode.rent || []).filter((l) => l.source !== 'recurring').concat([{ store_erpid: store, ledger_code: 'rent', amount: amt, fee_ym: ym, source: 'basic',
       ref_id: `basic-rent-${store}`, ref_title: `基本資料｜${rb.contract_rent ? '合約租金' : '實付租金'}（還沒有房租合約，暫用基本資料）` }]);
     rentInfo.from_basic = amt;
+  }
+  // 房租支票（既有支票紀錄）：算進實付；退票另列。既沒合約、沒基本資料、固定支出也沒有房租時，才拿支票當房租金額
+  if (chk && chk.error) warnings.push(chk.error);
+  const myChecks = ((chk && chk.byStore) || {})[store] || [];
+  rentInfo.checks = myChecks;
+  if (myChecks.length) {
+    const ok = myChecks.filter((c) => c.status !== 'bounced');
+    const sumC = Math.round(ok.reduce((a, c) => a + c.amount, 0));
+    rentInfo.paid = (rentInfo.paid || 0) + sumC;
+    rentInfo.paid_checks = sumC;
+    rentInfo.bounced = myChecks.filter((c) => c.status === 'bounced').map((c) => ({ check_no: c.check_no, amount: c.amount, due_date: c.due_date }));
+    if (!useRc.length && !rentInfo.from_basic && !(byCode.rent || []).length && sumC) {
+      byCode.rent = ok.map((c) => ({ store_erpid: store, ledger_code: 'rent', amount: c.amount, fee_ym: ym, source: 'check', ref_id: `chk-${c.id}`,
+        ref_title: `支票 ${c.check_no || ''}｜房租／${c.subject}｜到期 ${c.due_date}（沒有合約，暫用支票金額）` }));
+      rentInfo.from_checks = sumC;
+    }
   }
   // 倉庫開帳（常備品撥補＋產品出貨）→ 科目照 storehouse_ledger；那一格有手填值就以手填為準
   if (sh.error) warnings.push(sh.error);
@@ -557,4 +604,5 @@ async function overview(ym) {
   return { ym, stores: out, others: Object.values(other).sort((a, b) => b.total - a.total), market_error: mkt.error || null, aimin_error: aimin.error || null };
 }
 
-module.exports = { salesMonth, rentBasics, rentContracts, rentForMonth, storehouseMonth, planningMonth, aiminMonth, build, overview, accounts, settings, marketMonth, YM, GROUP_NAME, SOURCE_NAME };
+module.exports = {
+  rentChecks, salesMonth, rentBasics, rentContracts, rentForMonth, storehouseMonth, planningMonth, aiminMonth, build, overview, accounts, settings, marketMonth, YM, GROUP_NAME, SOURCE_NAME };

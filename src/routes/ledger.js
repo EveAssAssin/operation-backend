@@ -335,14 +335,59 @@ router.get('/store-profile', async (req, res) => {
     const today = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10);
     const contracts = (cons || []).map((c) => ({ ...c, this_month: c.type === 'rent' ? MR.rentForMonth(c, ym) : null,
       days_left: c.end_date ? Math.round((Date.parse(c.end_date) - Date.parse(today)) / 864e5) : null }));
+    // 支票（既有支票紀錄系統）：這家店的科目＋連到這家店合約的批次；前 6 個月到後 6 個月
+    const conIds = (cons || []).map((c) => c.id);
+    const [{ data: subs }, { data: cbs }] = await Promise.all([
+      supabase.from('check_subjects').select('id, name, parent_id, store_erpid, is_active'),
+      conIds.length ? supabase.from('check_batches').select('id').in('contract_id', conIds) : Promise.resolve({ data: [] }),
+    ]);
+    const mySubs = (subs || []).filter((x) => x.store_erpid === store).map((x) => x.id);
+    const subName = Object.fromEntries((subs || []).map((x) => [x.id, x.name]));
+    const rentParent = (subs || []).find((x) => !x.parent_id && x.name === '房租');
+    let batches = [];
+    const bIds = new Set((cbs || []).map((x) => x.id));
+    const q = supabase.from('check_batches').select('id, batch_no, subject_id, drawer_name, bank_name, status, notes, contract_id');
+    const { data: bs } = mySubs.length || bIds.size
+      ? await (mySubs.length && bIds.size ? q.or(`subject_id.in.(${mySubs.join(',')}),id.in.(${[...bIds].join(',')})`) : mySubs.length ? q.in('subject_id', mySubs) : q.in('id', [...bIds]))
+      : { data: [] };
+    if ((bs || []).length) {
+      const [y, m] = ym.split('-').map(Number);
+      const from = new Date(Date.UTC(y, m - 7, 1)).toISOString().slice(0, 10), to = new Date(Date.UTC(y, m + 6, 0)).toISOString().slice(0, 10);
+      const { data: cks } = await supabase.from('checks').select('id, batch_id, check_no, amount, due_date, status, paid_at')
+        .in('batch_id', bs.map((b) => b.id)).gte('due_date', from).lte('due_date', to).order('due_date');
+      const { data: pend } = await supabase.from('checks').select('batch_id, due_date').in('batch_id', bs.map((b) => b.id)).eq('status', 'pending');
+      batches = bs.map((b) => {
+        const pd = (pend || []).filter((x) => x.batch_id === b.id).map((x) => x.due_date).sort();
+        return { ...b, subject: subName[b.subject_id] || '', checks: (cks || []).filter((c) => c.batch_id === b.id), pending: pd.length, last_due: pd[pd.length - 1] || null };
+      }).filter((b) => b.checks.length || b.pending).sort((a, b) => String(b.last_due || '').localeCompare(String(a.last_due || '')));
+    }
+    const unmappedRent = (subs || []).filter((x) => rentParent && x.parent_id === rentParent.id && !x.store_erpid && x.is_active).map((x) => ({ id: x.id, name: x.name }));
     res.json({ success: true, data: {
       store, store_name: dept ? dept.store_name : store, ym, basics, contracts,
+      checks: { batches, subjects: (subs || []).filter((x) => x.store_erpid === store).map((x) => ({ id: x.id, name: x.name })), unmapped_rent: unmappedRent },
       recurring: (recs || []).map((r) => ({ ...r, payments: (pays || []).filter((p) => p.expense_id === r.id) })),
       fixed: fixed || [], shareholders: holders || [],
     } });
   } catch (e) { fail(res, e); }
 });
 
+// 支票科目綁門市／支票批次綁合約（既有支票紀錄系統，2026-10-20）
+router.patch('/check-subjects/:id', canEdit, async (req, res) => {
+  try {
+    const v = (req.body || {}).store_erpid; const store = v ? String(v) : null;
+    if (store) { const { data: d } = await supabase.from('departments').select('store_erpid').eq('store_erpid', store).maybeSingle(); if (!d) return bad(res, '沒有這家門市'); }
+    const { error } = await supabase.from('check_subjects').update({ store_erpid: store }).eq('id', req.params.id);
+    if (error) throw error; res.json({ success: true });
+  } catch (e) { fail(res, e); }
+});
+router.patch('/check-batches/:id', canEdit, async (req, res) => {
+  try {
+    const v = (req.body || {}).contract_id; const cid = v ? String(v) : null;
+    if (cid) { const { data: c } = await supabase.from('contracts').select('id').eq('id', cid).maybeSingle(); if (!c) return bad(res, '沒有這份合約'); }
+    const { error } = await supabase.from('check_batches').update({ contract_id: cid }).eq('id', req.params.id);
+    if (error) throw error; res.json({ success: true });
+  } catch (e) { fail(res, e); }
+});
 
 // ── 股東（2026-10-20）：在「門市基礎設定」設定；月報可分配盈餘依持股比例分（同一期間持股合計不能超過 100%）──
 const overlap = (a1, a2, b1, b2) => a1 <= (b2 || '9999-12') && b1 <= (a2 || '9999-12');
@@ -366,7 +411,7 @@ router.post('/shareholders', canEdit, async (req, res) => {
     const shares = Math.round(Number(b.shares));
     const ro = await require('../services/shareholderRoster').roster(false);
     const person = (ro.list || []).find((x) => x.erpid === String(b.erpid || ''));
-    if (!person) return bad(res, ro.error || '只能選左手「股東」部門裡的人（名單沒有這位，請先在左手加進股東部門）');
+    if (!person) return bad(res, '只能選左手的在職人員或「股東」部門的人（名單沒有這位）');
     const name = person.name;
     b.app_number = person.app_number;
     if (!store) return bad(res, '缺門市');
@@ -377,7 +422,9 @@ router.post('/shareholders', canEdit, async (req, res) => {
     if (sum + shares > 100) return bad(res, `同一期間持股合計會變成 ${sum + shares}%，超過 100%`);
     const { data, error } = await supabase.from('store_shareholders').insert({ store_erpid: store, name, erpid: b.erpid || null, app_number: b.app_number || null,
       shares, from_ym: b.from_ym, to_ym: b.to_ym || null, created_by: who(req) }).select().single();
-    if (error) throw error; res.json({ success: true, data });
+    if (error) throw error;
+    require('../services/shareholderRoster').resync().catch((e) => console.warn('[shareholders] portal 同步', e.message));
+    res.json({ success: true, data });
   } catch (e) { fail(res, e); }
 });
 router.patch('/shareholders/:id', canEdit, async (req, res) => {
@@ -386,11 +433,17 @@ router.patch('/shareholders/:id', canEdit, async (req, res) => {
     if (b.to_ym !== undefined) { if (b.to_ym && !YM.test(String(b.to_ym))) return bad(res, '月份要是 YYYY-MM'); up.to_ym = b.to_ym || null; }
     if (!Object.keys(up).length) return bad(res, '沒有要改的（持股比例要改請設結束月份、再新增一筆）');
     const { error } = await supabase.from('store_shareholders').update(up).eq('id', req.params.id);
-    if (error) throw error; res.json({ success: true });
+    if (error) throw error;
+    require('../services/shareholderRoster').resync().catch((e) => console.warn('[shareholders] portal 同步', e.message));
+    res.json({ success: true });
   } catch (e) { fail(res, e); }
 });
 router.delete('/shareholders/:id', canEdit, async (req, res) => {
-  try { const { error } = await supabase.from('store_shareholders').delete().eq('id', req.params.id); if (error) throw error; res.json({ success: true }); } catch (e) { fail(res, e); }
+  try {
+    const { error } = await supabase.from('store_shareholders').delete().eq('id', req.params.id); if (error) throw error;
+    require('../services/shareholderRoster').resync().catch((e) => console.warn('[shareholders] portal 同步', e.message));
+    res.json({ success: true });
+  } catch (e) { fail(res, e); }
 });
 
 module.exports = router;
