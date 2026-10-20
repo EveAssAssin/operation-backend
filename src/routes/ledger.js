@@ -27,6 +27,7 @@ const supabase = require('../config/supabase');
 const { authenticate, authorizeModule } = require('../middleware/auth');
 const MR = require('../services/monthlyReport');
 const MA = require('../services/monthlyAudit');
+const LV = require('../services/ledgerVouchers');
 
 router.use(authenticate, authorizeModule('billing', 'view'));
 const canEdit = authorizeModule('billing', 'edit');
@@ -69,10 +70,13 @@ router.get('/report', async (req, res) => {
     // 已關帳＝看關帳當下的快照（數字凍結）；?live=1 才重算
     if (req.query.live !== '1') {
       const { data: rep } = await supabase.from('store_month_reports').select('*').eq('store_erpid', store).eq('ym', ym).maybeSingle();
-      if (rep && rep.status === 'closed' && rep.snapshot) return res.json({ success: true, data: { ...rep.snapshot, report: { ...rep, snapshot: undefined }, status: 'closed', frozen: true } });
+      if (rep && rep.status === 'closed' && rep.snapshot) {
+        const snap = JSON.parse(JSON.stringify(rep.snapshot));
+        return res.json({ success: true, data: await LV.decorateReport({ ...snap, report: { ...rep, snapshot: undefined }, status: 'closed', frozen: true }, req.user) });
+      }
     }
     const data = await MR.build(ym, store, { withLines: true, allRows: req.query.all === '1' });
-    res.json({ success: true, data });
+    res.json({ success: true, data: await LV.decorateReport(data, req.user) });
   } catch (e) { fail(res, e); }
 });
 
@@ -786,6 +790,29 @@ router.delete('/shareholders/:id', canEdit, async (req, res) => {
     require('../services/shareholderRoster').resync().catch((e) => console.warn('[shareholders] portal 同步', e.message));
     res.json({ success: true });
   } catch (e) { fail(res, e); }
+});
+
+
+// ── 原始憑證（2026-10-21）：只有營運部（operation_*）與超級管理員 ──
+//   GET    /api/ledger/vouchers?ref_type=bill&ref_id=…   列出（簽名網址 1 小時）
+//   POST   /api/ledger/vouchers  multipart files[]＋ref_type＋ref_id[＋note]   上傳（照片／PDF，每檔 20MB）
+//   DELETE /api/ledger/vouchers/:id                       作廢（留紀錄，檔案不刪）
+const voucherGuard = (req, res, next) => (LV.canSee(req.user) ? next() : bad(res, '原始憑證只有營運部與超級管理員看得到', 403));
+const voucherUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024, files: 10 } });
+router.get('/vouchers', voucherGuard, async (req, res) => {
+  try { res.json({ success: true, data: await LV.list(String(req.query.ref_type || ''), String(req.query.ref_id || '')) }); } catch (e) { bad(res, e.message); }
+});
+router.post('/vouchers', voucherGuard, canEdit, voucherUpload.array('files', 10), async (req, res) => {
+  try {
+    const t = String((req.body || {}).ref_type || ''), id = String((req.body || {}).ref_id || '');
+    if (!(req.files || []).length) return bad(res, '沒有檔案');
+    const out = [];
+    for (const f of req.files) out.push(await LV.upload(t, id, f, who(req), (req.body || {}).note));
+    res.json({ success: true, data: { uploaded: out.length, files: await LV.list(t, id) } });
+  } catch (e) { bad(res, e.message); }
+});
+router.delete('/vouchers/:id', voucherGuard, canEdit, async (req, res) => {
+  try { res.json({ success: true, data: await LV.voidOne(req.params.id, who(req)) }); } catch (e) { bad(res, e.message); }
 });
 
 module.exports = router;
