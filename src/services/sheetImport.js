@@ -8,7 +8,6 @@ const MR = require('./monthlyReport');
 
 const LEFT_GROUPS = ['opex', 'planning', 'ads'];
 const RIGHT_GROUPS = ['misc', 'frame', 'lens', 'contact'];
-const DIVIDEND_CODES = ['marketing_fund', 'depreciation'];
 const RATIO_TARGET = { 人事: 23, 包裝: 10, 鏡片: 15, 鏡框: 12, 營運費用: 30, 藥拋: 90, 淨利: 30 };
 const r0 = (n) => Math.round(Number(n || 0) * 100) / 100;
 const n = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
@@ -53,7 +52,8 @@ async function buildSnapshot(store, ym, sheet, meta, accs) {
       vendors: Object.entries(vendors).map(([vendor, amount]) => ({ vendor, amount: r0(amount) })), lines: ls };
   };
   const section = (groups) => groups.map((g) => {
-    const rows = accs.filter((a) => a.group_code === g && a.kind === 'expense' && !DIVIDEND_CODES.includes(a.code)).map(rowOf).filter((r) => r.has_data);
+    // 試算表有些店把折舊、行銷基金記在營運支出裡（算進總支出）→ 匯入時照試算表放在支出列，不放分紅區
+    const rows = accs.filter((a) => a.group_code === g && a.kind === 'expense').map(rowOf).filter((r) => r.has_data);
     return { group: g, name: MR.GROUP_NAME[g], rows, total: r0(rows.reduce((s, r) => s + r.amount, 0)) };
   });
   const left = section(LEFT_GROUPS), right = section(RIGHT_GROUPS);
