@@ -71,7 +71,7 @@ router.post('/', authorize('operation_accounting', 'operation_lead', 'super_admi
     if (error) throw new Error(/code_key/.test(error.message) ? '識別碼已被使用' : error.message);
     sourceId = s.id;
     if (username) {
-      const { error: e2 } = await supabase.from('vendor_accounts').insert({ source_id: s.id, username, password_hash: await bcrypt.hash(String(b.password), 10), is_active: true, notes: null, created_at: now(), updated_at: now() });
+      const { error: e2 } = await supabase.from('vendor_accounts').insert({ source_id: s.id, username, password_hash: await bcrypt.hash(String(b.password), 10), is_active: true, created_at: now(), updated_at: now() });
       if (e2) throw new Error('建立帳號失敗：' + e2.message);
     }
     if (bank) {
