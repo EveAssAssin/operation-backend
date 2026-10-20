@@ -34,14 +34,14 @@ async function storeList() {
 
 /** 一個月全部門市的快照：codes（科目→金額）、lines、業績、實收、盈餘… */
 async function systemMonth(ym, stores) {
-  const [market, aimin] = await Promise.all([MR.marketMonth(ym, stores.map((s) => s.store_erpid)), MR.aiminMonth(ym)]);
+  const [market, aimin, planning] = await Promise.all([MR.marketMonth(ym, stores.map((s) => s.store_erpid)), MR.aiminMonth(ym), MR.planningMonth(ym)]);
   const out = {};
   let i = 0;
   const worker = async () => {
     while (i < stores.length) {
       const s = stores[i++];
       try {
-        const r = await MR.build(ym, s.store_erpid, { market, aimin, withLines: true });
+        const r = await MR.build(ym, s.store_erpid, { market, aimin, planning, withLines: true });
         const codes = {}, names = {}, lines = [];
         for (const g of [...r.left, ...r.right]) for (const row of g.rows) {
           if (row.amount) codes[row.code] = row.amount;
@@ -58,7 +58,7 @@ async function systemMonth(ym, stores) {
     }
   };
   await Promise.all([worker(), worker(), worker(), worker()]);
-  return { stores: out, market_error: market.error || null, aimin_error: aimin.error || null };
+  return { stores: out, market_error: market.error || null, aimin_error: aimin.error || null, planning };
 }
 
 /** 舊試算表匯入的月份（ledger_history） */
@@ -202,6 +202,21 @@ async function audit(ym, opts = {}) {
         detail: `上個月${b.src === 'sheet' ? '（試算表）' : ''} ${fmt(b.sales)} → 這個月 ${fmt(s.sales)}。月份還沒結束、系統沒資料（例：十甲 9/10 起 ERP 沒單），還是真的掉了？`, amount: s.sales - b.sales });
     }
   }
+  // ⑪ 企劃部開帳本身的問題（開帳時選門市那張表）
+  const pl = cur.planning || {};
+  if (pl.error) add({ store: '*', store_name: '全公司', sev: 'mid', key: 'src:planning', title: '拿不到企劃部開帳', detail: pl.error });
+  for (const i of pl.issues || []) {
+    if (i.kind === 'zero') add({ store: i.store, store_name: nameOf(i.store), sev: 'mid', key: `plan:zero:${i.line.billing_id}`, code: 'planning_goods',
+      title: `企劃部開帳：${i.line.item} 有數量 ${i.line.qty} 但金額 0`, detail: `單號 ${i.line.serial || i.line.expense_id}，開給${i.line.target_name}。是漏填成本分攤，還是本來就送的？`, amount: 0 });
+    if (i.kind === 'cost_sum') add({ store: '*', store_name: '全公司', sev: 'mid', key: `plan:cost:${i.expense_id}`, code: 'planning_goods',
+      title: `企劃部開帳：${i.e.item} 各店分攤成本加起來 ${fmt(i.e.cost)}，總成本是 ${fmt(i.e.cost_total)}`, detail: `單號 ${i.e.serial || i.expense_id}；${i.e.lines.map((l) => `${l.target_name} ${fmt(l.cost_share)}`).join('、')}`, amount: i.e.cost - i.e.cost_total });
+    if (i.kind === 'qty_sum') add({ store: '*', store_name: '全公司', sev: 'low', key: `plan:qty:${i.expense_id}`, code: 'planning_goods',
+      title: `企劃部開帳：${i.e.item} 各店數量加起來 ${i.e.qty}，總數量是 ${i.e.qty_total}`, detail: `單號 ${i.e.serial || i.expense_id}；${i.e.lines.map((l) => `${l.target_name} ${l.qty}`).join('、')}`, amount: null });
+    if (i.kind === 'unmapped') add({ store: '*', store_name: '全公司', sev: 'mid', key: `plan:unmapped:${i.line.target_id}`, code: 'planning_goods',
+      title: `企劃部開帳對象「${i.line.target_name}」對不到門市`, detail: '營運部 report_settings.planning_target_map 要補這個對象。', amount: Number(i.line.sell_amount) || 0 });
+  }
+  if (pl.unbilled) add({ store: '*', store_name: '全公司', sev: 'low', key: 'plan:unbilled', title: `企劃部這個月還有 ${pl.unbilled} 筆沒開帳`, detail: '沒開帳的不會進門市月報（舊的文字開帳、二次開帳都在這裡）。', amount: null });
+
   if (cur.market_error) add({ store: '*', store_name: '全公司', sev: 'mid', key: 'src:market', title: '拿不到 ERP 業績／門市費用單', detail: cur.market_error });
   if (cur.aimin_error) add({ store: '*', store_name: '全公司', sev: 'mid', key: 'src:aimin', title: '拿不到愛民系統資料', detail: cur.aimin_error });
 

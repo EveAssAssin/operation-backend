@@ -18,7 +18,7 @@ const RATIO_TARGET = { 人事: 23, 包裝: 10, 鏡片: 15, 鏡框: 12, 營運費
 const DIVIDEND_CODES = ['marketing_fund', 'depreciation'];
 const SOURCE_NAME = {
   bill: '開帳單', billing_order: '部門開帳', opex: '營運費用', recurring: '固定支出', fixed: '固定金額',
-  manual_value: '手填', manual_adjust: '調帳', erp_cost: 'ERP 費用單', aimin_expense: '愛民支出',
+  manual_value: '手填', manual_adjust: '調帳', erp_cost: 'ERP 費用單', aimin_expense: '愛民支出', planning_bill: '企劃部開帳',
 };
 
 const MARKET_BASE = process.env.MARKET_BACKEND_URL || 'https://market-backend-0544.onrender.com';
@@ -66,6 +66,49 @@ async function aiminMonth(ym) {
   return v;
 }
 
+// ── 企劃部開帳（業績系統 Supabase gyhmfbclljkgmqeqbbxh，2026-10-20）──
+// 企劃部開帳時就選好門市（planning_expense_billing，每筆 → 對象＋成本分攤＋加成後開帳金額）；業績系統開了只讀函式
+// report_planning_month(p_key, p_year, p_month)。金鑰 report_settings.planning_report_key（對方只存 sha256），
+// 對象 → 門市 report_settings.planning_target_map（planning_bill_target.id → ERP 門市編號；部門不在表裡＝不進門市月報）。
+// 只收「開帳時有選門市」的；舊的文字開帳（bill_target_text）與「二次開帳」（倉庫出貨時才開）不在這裡。
+const PLAN_URL = process.env.PLANNING_SUPABASE_URL || 'https://gyhmfbclljkgmqeqbbxh.supabase.co';
+const PLAN_PUB = process.env.PLANNING_PUBLISHABLE_KEY || 'sb_publishable_8suC8kak9B60yiyhdiAu2A_gtWx-gpA'; // 公開金鑰，權限靠 p_key
+const planCache = new Map();
+async function planningMonth(ym) {
+  const hit = planCache.get(ym);
+  if (hit && Date.now() - hit.at < 5 * 60e3) return hit.v;
+  const { data: rows } = await supabase.from('report_settings').select('key, value').in('key', ['planning_report_key', 'planning_target_map']);
+  const o = Object.fromEntries((rows || []).map((r) => [r.key, r.value]));
+  if (!o.planning_report_key) return { error: '營運部沒設企劃部開帳金鑰（report_settings.planning_report_key）', byStore: {}, issues: [] };
+  const [y, m] = ym.split('-').map(Number);
+  let v;
+  try {
+    const { data } = await axios.post(`${PLAN_URL}/rest/v1/rpc/report_planning_month`, { p_key: o.planning_report_key, p_year: y, p_month: m },
+      { headers: { apikey: PLAN_PUB, 'Content-Type': 'application/json' }, timeout: 30000 });
+    const map = o.planning_target_map || {};
+    const byStore = {}, issues = [], perExp = {};
+    for (const l of (data && data.lines) || []) {
+      const erp = map[String(l.target_id)];
+      const e = (perExp[l.expense_id] = perExp[l.expense_id] || { item: l.item, serial: l.serial, cost_total: Number(l.cost_total) || 0, qty_total: Number(l.qty_total) || 0, cost: 0, qty: 0, lines: [] });
+      e.cost += Number(l.cost_share) || 0; e.qty += Number(l.qty) || 0; e.lines.push(l);
+      if (l.status !== '已開帳') continue;
+      if (!erp) { if (l.category !== 'dept' && l.category !== 'planning') issues.push({ kind: 'unmapped', line: l }); continue; }
+      (byStore[erp] = byStore[erp] || []).push(l);
+      if (Number(l.qty) > 0 && !Number(l.sell_amount)) issues.push({ kind: 'zero', store: erp, line: l });
+    }
+    for (const [id, e] of Object.entries(perExp)) {
+      if (e.cost_total && Math.abs(e.cost - e.cost_total) > 1) issues.push({ kind: 'cost_sum', expense_id: id, e });
+      if (e.qty_total && e.qty && Math.abs(e.qty - e.qty_total) > 0.001) issues.push({ kind: 'qty_sum', expense_id: id, e });
+    }
+    v = { byStore, issues, unbilled: data ? data.unbilled : null };
+  } catch (e) {
+    const msg = e.response ? `${e.response.status} ${JSON.stringify(e.response.data).slice(0, 120)}` : e.message;
+    return { error: `企劃部開帳：${msg}`, byStore: {}, issues: [] };
+  }
+  planCache.set(ym, { at: Date.now(), v });
+  return v;
+}
+
 const splitTitle = (t) => { const s = String(t || ''); const i = s.indexOf('｜'); return i < 0 ? [s, ''] : [s.slice(0, i), s.slice(i + 1)]; };
 const r0 = (n) => Math.round(Number(n) || 0);
 const monthsBetween = (a, b) => { const [y1, m1] = a.split('-').map(Number); const [y2, m2] = b.split('-').map(Number); return (y2 - y1) * 12 + (m2 - m1) + 1; };
@@ -91,7 +134,7 @@ async function build(ym, store, opts = {}) {
   if (!YM.test(ym)) throw new Error('ym 要是 YYYY-MM');
   store = String(store || '');
   if (!store) throw new Error('缺門市');
-  const [accs, st, linesR, mkt, aimin, rep, fixed, holders, dept] = await Promise.all([
+  const [accs, st, linesR, mkt, aimin, rep, fixed, holders, dept, plan] = await Promise.all([
     accounts(),
     settings(),
     supabase.rpc('ledger_lines', { p_ym: ym }).eq('store_erpid', store),
@@ -101,6 +144,7 @@ async function build(ym, store, opts = {}) {
     supabase.from('store_fixed_items').select('*').eq('store_erpid', store),
     supabase.from('store_shareholders').select('*').eq('store_erpid', store),
     supabase.from('departments').select('store_erpid, store_name').eq('store_erpid', store).maybeSingle(),
+    opts.planning || planningMonth(ym),
   ]);
   if (linesR.error) throw linesR.error;
   const lines = linesR.data || [];
@@ -128,6 +172,18 @@ async function build(ym, store, opts = {}) {
     })));
   }
 
+  // 企劃部開帳（開帳時選好門市的）→ 企劃品；有手填值就以手填為準
+  if (plan.error) warnings.push(plan.error);
+  const pl = (plan.byStore || {})[store] || [];
+  if (pl.length && !(byCode.planning_goods || []).some((l) => l.source === 'manual_value')) {
+    byCode.planning_goods = (byCode.planning_goods || []).concat(pl.map((l) => ({
+      store_erpid: store, ledger_code: 'planning_goods', amount: Number(l.sell_amount) || 0, fee_ym: ym, source: 'planning_bill',
+      ref_id: `pe-${l.expense_id}-${l.billing_id}`,
+      ref_title: `${l.vendor || '企劃部'}｜${l.serial || ''} ${l.item || ''}（數量 ${l.qty ?? '—'}、成本 ${r0(l.cost_share)} × ${l.markup_rate}）${l.is_settled ? '' : '［企劃部還沒月結］'}`,
+    })));
+  }
+  const planIssues = (plan.issues || []).filter((i) => i.store === store || (i.e && i.e.lines.some((l) => ((plan.byStore || {})[store] || []).some((x) => x.expense_id === l.expense_id))));
+
   const rowOf = (a) => {
     const ls = byCode[a.code] || [];
     const amount = ls.reduce((s, l) => s + Number(l.amount || 0), 0);
@@ -136,6 +192,7 @@ async function build(ym, store, opts = {}) {
     for (const l of ls) {
       let [v] = splitTitle(l.ref_title);
       if (['opex', 'recurring', 'erp_cost', 'aimin_expense', 'billing_order'].includes(l.source)) v = '';
+      if (l.source === 'planning_bill') v = '企劃部';
       vendors[v] = (vendors[v] || 0) + Number(l.amount || 0);
     }
     const crossMonth = ls.filter((l) => l.fee_ym && l.fee_ym !== ym).map((l) => l.fee_ym);
@@ -271,6 +328,7 @@ async function build(ym, store, opts = {}) {
       fixed_this: { marketing_fund: fixedThis('marketing_fund'), depreciation: fixedThis('depreciation') },
     },
     shareholders: hs.map((h) => ({ id: h.id, name: h.name, erpid: h.erpid, shares: h.shares, amount: r0(distributable * h.shares / 100) })),
+    planning_issues: planIssues.map((i) => ({ kind: i.kind, expense_id: i.expense_id || (i.line && i.line.expense_id), item: (i.e && i.e.item) || (i.line && i.line.item), detail: i })),
     aimin: am ? { name: am.name, sales: r0(am.sales), orders: am.order_count, paid: r0(am.paid), paid_by_method: am.paid_by_method, closings: am.closings } : null,
     warnings, settings: st, market_end: mkt.end || null, year: y,
   };
@@ -283,14 +341,14 @@ async function overview(ym) {
   const { data: units } = await supabase.from('departments').select('store_erpid, store_name, is_active, report_kind').eq('is_active', true).order('store_name');
   const isStore = (u) => u.report_kind === 'store' || (u.report_kind == null && /店$/.test(String(u.store_name || '')));
   const list = (units || []).filter((s) => s.store_erpid && isStore(s));
-  const [mkt, aimin] = await Promise.all([marketMonth(ym, list.map((s) => s.store_erpid)), aiminMonth(ym)]);
+  const [mkt, aimin, planning] = await Promise.all([marketMonth(ym, list.map((s) => s.store_erpid)), aiminMonth(ym), planningMonth(ym)]);
   const out = [];
   let i = 0;
   const worker = async () => {
     while (i < list.length) {
       const s = list[i++];
       try {
-        const r = await build(ym, s.store_erpid, { market: mkt, aimin });
+        const r = await build(ym, s.store_erpid, { market: mkt, aimin, planning });
         out.push({ store: s.store_erpid, store_name: s.store_name, status: r.status, total_in: r.totals.total_in, total_out: r.totals.total_out, profit: r.totals.profit,
           sales_total: r.totals.sales_total, receipt_total: r.totals.receipt_filled ? r.totals.receipt_total : null, gap_pct: r.gap.total.pct, gap_alert: r.gap.total.alert,
           erp_total: r.revenue.glasses_receipt.erp == null ? null : r.revenue.glasses_receipt.erp + (r.revenue.contact_receipt.erp || 0),
@@ -327,4 +385,4 @@ async function overview(ym) {
   return { ym, stores: out, others: Object.values(other).sort((a, b) => b.total - a.total), market_error: mkt.error || null, aimin_error: aimin.error || null };
 }
 
-module.exports = { aiminMonth, build, overview, accounts, settings, marketMonth, YM, GROUP_NAME, SOURCE_NAME };
+module.exports = { planningMonth, aiminMonth, build, overview, accounts, settings, marketMonth, YM, GROUP_NAME, SOURCE_NAME };
