@@ -120,6 +120,36 @@ const SH_URL = process.env.STOREHOUSE_SUPABASE_URL || 'https://icomlbtatqujabxgy
 const SH_PUB = process.env.STOREHOUSE_PUBLISHABLE_KEY || 'sb_publishable_zqzDJEb3hpTvSkAqMnniew_BG99Sw6S'; // 公開金鑰，權限靠 p_key
 const shCache = new Map();
 const shNorm = (t) => String(t || '').replace(/^愛民眼鏡/, '').replace(/店$/, '').replace(/\s/g, '');
+// 2026-10-20：會計可以依「撥補區塊」（店用商品／護理產品／配件組合…）或「出貨倉別」各自選月報格子：
+// storehouse_ledger = { replen: 預設, ship: 預設, sections: { '<撥補區塊>': code }, warehouses: { '<出貨倉別>': code } }
+// 一筆出貨裡不同區塊要進不同格子時照品項（數量×單價）拆開；拆完差額（四捨五入等）留在預設那格。
+const SH_DEFAULT = 'planning_goods';
+function shSplit(r, ledger) {
+  const def = ledger[r.src] || SH_DEFAULT;
+  const pick = r.src === 'ship' ? (ledger.warehouses || {}) : (ledger.sections || {});
+  const keyOf = (i) => (r.src === 'ship' ? i.warehouse : i.section) || '';
+  const items = r.items || [];
+  const groups = {};
+  for (const i of items) {
+    const code = pick[keyOf(i)] || def;
+    const g = (groups[code] = groups[code] || { amount: 0, items: [], keys: new Set() });
+    g.amount += (Number(i.qty) || 0) * (Number(i.price) || 0);
+    g.items.push(i); if (keyOf(i)) g.keys.add(keyOf(i));
+  }
+  const codes = Object.keys(groups);
+  if (codes.length <= 1) return [{ ...r, ledger_code: codes[0] || def, part: codes.length ? [...groups[codes[0]].keys].join('、') : '' }];
+  const total = Number(r.amount) || 0;
+  let rest = total;
+  const out = [];
+  for (const c of codes.filter((x) => x !== def)) {
+    const amt = Math.round(groups[c].amount);
+    rest -= amt;
+    out.push({ ...r, id: `${r.id}:${c}`, ledger_code: c, amount: amt, items: groups[c].items, part: [...groups[c].keys].join('、') });
+  }
+  out.push({ ...r, id: `${r.id}:${def}`, ledger_code: def, amount: rest, items: (groups[def] || { items: [] }).items, part: groups[def] ? [...groups[def].keys].join('、') : '' });
+  return out.filter((l) => Number(l.amount) || (l.items || []).length);
+}
+function clearStorehouseCache() { shCache.clear(); }
 async function storehouseMonth(ym) {
   const hit = shCache.get(ym);
   if (hit && Date.now() - hit.at < 5 * 60e3) return hit.v;
@@ -132,7 +162,7 @@ async function storehouseMonth(ym) {
   const byName = {};
   for (const u of units || []) if (u.store_erpid) byName[shNorm(u.store_name)] = String(u.store_erpid);
   const map = { ...byName, ...(o.storehouse_store_map || {}) };
-  const ledger = { replen: 'planning_goods', ship: 'planning_goods', ...(o.storehouse_ledger || {}) };
+  const ledger = { replen: SH_DEFAULT, ship: SH_DEFAULT, sections: {}, warehouses: {}, ...(o.storehouse_ledger || {}) };
   let v;
   try {
     const { data } = await axios.post(`${SH_URL}/rest/v1/rpc/report_storehouse_month`, { p_key: o.storehouse_report_key, p_ym: ym },
@@ -140,10 +170,10 @@ async function storehouseMonth(ym) {
     const byStore = {}, issues = [];
     for (const r of (data && data.rows) || []) {
       const erp = map[r.store] || map[shNorm(r.store)];
-      const line = { ...r, ledger_code: ledger[r.src] || 'planning_goods' };
-      if (!erp) { issues.push({ kind: 'unmapped', line }); continue; }
-      (byStore[erp] = byStore[erp] || []).push(line);
-      if (Number(r.qty) > 0 && !Number(r.amount)) issues.push({ kind: 'zero', store: erp, line });
+      const lines = shSplit(r, ledger);
+      if (!erp) { for (const line of lines) issues.push({ kind: 'unmapped', line }); continue; }
+      (byStore[erp] = byStore[erp] || []).push(...lines);
+      if (Number(r.qty) > 0 && !Number(r.amount)) issues.push({ kind: 'zero', store: erp, line: lines[0] });
     }
     v = { byStore, issues, from: data && data.from, to: data && data.to };
   } catch (e) {
@@ -384,7 +414,7 @@ async function build(ym, store, opts = {}) {
   for (const l of (sh.byStore || {})[store] || []) {
     const code = l.ledger_code;
     if ((byCode[code] || []).some((x) => x.source === 'manual_value')) continue;
-    const what = l.src === 'ship' ? `產品出貨 ${l.no || ''}` : '常備品撥補';
+    const what = (l.src === 'ship' ? `產品出貨 ${l.no || ''}` : '常備品撥補') + (l.part ? `（${l.part}）` : '');
     const items = (l.items || []).slice(0, 4).map((i) => `${i.name}×${i.qty}`).join('、') + ((l.items || []).length > 4 ? '…' : '');
     (byCode[code] = byCode[code] || []).push({
       store_erpid: store, ledger_code: code, amount: Number(l.amount) || 0, fee_ym: ym, source: 'storehouse',
@@ -647,4 +677,4 @@ async function overview(ym) {
 }
 
 module.exports = {
-  rentChecks, salesMonth, rentBasics, rentContracts, rentForMonth, storehouseMonth, planningMonth, aiminMonth, build, overview, accounts, settings, marketMonth, YM, GROUP_NAME, SOURCE_NAME };
+  rentChecks, salesMonth, rentBasics, rentContracts, rentForMonth, storehouseMonth, clearStorehouseCache, SH_DEFAULT, planningMonth, aiminMonth, build, overview, accounts, settings, marketMonth, YM, GROUP_NAME, SOURCE_NAME };

@@ -269,6 +269,42 @@ router.patch('/mapping/category/:id', canEdit, async (req, res) => {
     if (error) throw error; res.json({ success: true });
   } catch (e) { fail(res, e); }
 });
+// 倉庫開帳 → 月報哪一格（2026-10-20）：預設（撥補／出貨）＋各撥補區塊、各出貨倉別；區塊名稱從近 3 個月倉庫資料抓
+router.get('/storehouse-map', async (req, res) => {
+  try {
+    const { data: row } = await supabase.from('report_settings').select('value').eq('key', 'storehouse_ledger').maybeSingle();
+    const ledger = { replen: MR.SH_DEFAULT, ship: MR.SH_DEFAULT, sections: {}, warehouses: {}, ...((row && row.value) || {}) };
+    const now = new Date(Date.now() + 8 * 3600e3);
+    const yms = [0, 1, 2].map((k) => new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - k, 1)).toISOString().slice(0, 7));
+    const months = await Promise.all(yms.map((ym) => MR.storehouseMonth(ym)));
+    const sec = {}, wh = {}, err = months.map((m) => m.error).filter(Boolean)[0] || null;
+    for (const m of months) {
+      const lines = [...Object.values(m.byStore || {}).flat(), ...(m.issues || []).filter((i) => i.kind === 'unmapped').map((i) => i.line)];
+      for (const l of lines) for (const i of l.items || []) {
+        const k = (l.src === 'ship' ? i.warehouse : i.section) || '（未分區）';
+        const t = l.src === 'ship' ? wh : sec;
+        t[k] = (t[k] || 0) + (Number(i.qty) || 0) * (Number(i.price) || 0);
+      }
+    }
+    for (const k of Object.keys(ledger.sections || {})) if (!(k in sec)) sec[k] = 0;
+    for (const k of Object.keys(ledger.warehouses || {})) if (!(k in wh)) wh[k] = 0;
+    const list = (o) => Object.entries(o).sort((a, b) => b[1] - a[1]).map(([name, amount]) => ({ name, amount: Math.round(amount) }));
+    res.json({ success: true, data: { ledger, sections: list(sec), warehouses: list(wh), months: yms, error: err } });
+  } catch (e) { fail(res, e); }
+});
+router.put('/storehouse-map', canEdit, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const clean = async (o) => { const r = {}; for (const [k, v] of Object.entries(o || {})) { if (!v) continue; if (!(await okCode(v))) throw Object.assign(new Error(`沒有這個科目：${v}`), { status: 400 }); r[String(k).slice(0, 40)] = v; } return r; };
+    const replen = b.replen || MR.SH_DEFAULT, ship = b.ship || MR.SH_DEFAULT;
+    if (!(await okCode(replen)) || !(await okCode(ship))) return bad(res, '沒有這個科目');
+    const value = { replen, ship, sections: await clean(b.sections), warehouses: await clean(b.warehouses) };
+    const { error } = await supabase.from('report_settings').upsert({ key: 'storehouse_ledger', value, updated_at: new Date().toISOString() }, { onConflict: 'key' });
+    if (error) throw error;
+    MR.clearStorehouseCache();
+    res.json({ success: true, data: value });
+  } catch (e) { if (e.status === 400) return bad(res, e.message); fail(res, e); }
+});
 router.post('/accounts', canEdit, async (req, res) => {
   try {
     const b = req.body || {};
