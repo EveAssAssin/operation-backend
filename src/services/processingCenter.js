@@ -75,13 +75,15 @@ async function compute(ym, { fresh } = {}) {
   }
   const opened = Object.fromEntries((openedQ.data || []).map((m) => [m.store_erpid, m]));
   const stores = {};
+  const items = new Map();
   const S = (id) => (stores[id] = stores[id] || { store_erpid: id, store_name: names[id] || id, orders: [], extras: [],
     counted: 0, zero: 0, canceled: 0, other_month: 0, unsynced: 0, order_amount: 0, extra_amount: 0, total: 0, opened: opened[id] || null });
   for (const o of orders) {
     const s = S(String(o.store_id));
     const lines = (o.bind_ids || []).map((b) => {
       const p = prices.of(b, ym); const pr = products[b] || {};
-      return { bind_id: String(b), name: pr.name || (p && p.name) || '', brand: pr.brand || '', catena: pr.catena || '', price: p ? Number(p.amount) : null };
+      return { bind_id: String(b), name: pr.name || (p && p.name) || '', brand: pr.brand || '', catena: pr.catena || '',
+        materiel: pr.materiel || '', model: pr.model || '', price: p ? Number(p.amount) : null };
     });
     const amount = r2(lines.reduce((t, l) => t + (l.price || 0), 0));
     const b = billed.get(o.order_number);
@@ -93,7 +95,16 @@ async function compute(ym, { fresh } = {}) {
     s.orders.push(row);
     if (state === 'canceled') s.canceled++;
     else if (state === 'other_month') s.other_month++;
-    else { s.counted++; if (!amount) s.zero++; s.order_amount = r2(s.order_amount + amount); if (!o.bind_synced) s.unsynced++; }
+    else {
+      s.counted++; if (!amount) s.zero++; s.order_amount = r2(s.order_amount + amount); if (!o.bind_synced) s.unsynced++;
+      // 這個月實際收到的品項（給主管直接填金額，不用自己搜尋主檔）
+      for (const l of lines) {
+        let it = items.get(l.bind_id);
+        if (!it) { it = { bind_id: l.bind_id, name: l.name, brand: l.brand, catena: l.catena, materiel: l.materiel, model: l.model, price: l.price, orders: 0, stores: new Set(), sample: [] }; items.set(l.bind_id, it); }
+        it.orders++; it.stores.add(s.store_name);
+        if (it.sample.length < 3) it.sample.push(o.order_number);
+      }
+    }
   }
   for (const e of extrasQ.data || []) {
     const s = S(String(e.store_erpid));
@@ -105,7 +116,9 @@ async function compute(ym, { fresh } = {}) {
     if (s.opened) s.diff = r2(s.total - Number(s.opened.amount));
   }
   for (const [id, m] of Object.entries(opened)) if (!stores[id]) { S(id); stores[id].diff = r2(-Number(m.amount)); }
-  return { ym, stores, feed: { count: orders.length, ms: feed.ms, without_order: (feed.logs_without_order || []).length },
+  const itemList = [...items.values()].map((it) => ({ ...it, stores: [...it.stores].sort(), store_count: it.stores.size }))
+    .sort((a, b) => b.orders - a.orders || (a.name > b.name ? 1 : -1));
+  return { ym, stores, items: itemList, feed: { count: orders.length, ms: feed.ms, without_order: (feed.logs_without_order || []).length },
     priced_items: prices.rows.length };
 }
 
@@ -113,6 +126,7 @@ async function summary(ym, opts) {
   const c = await compute(ym, opts);
   const list = Object.values(c.stores).map(({ orders, extras, ...s }) => s).sort((a, b) => (a.store_name > b.store_name ? 1 : -1));
   return { ym, feed: c.feed, priced_items: c.priced_items, stores: list,
+    unpriced: c.items.filter((i) => i.price == null), priced_here: c.items.filter((i) => i.price != null),
     total: r2(list.reduce((t, s) => t + (s.opened ? Number(s.opened.amount) : s.total), 0)) };
 }
 
@@ -196,4 +210,5 @@ async function reopen(ym, store, actor, reason) {
   return { ok: true };
 }
 
-module.exports = { feedGet, compute, summary, storeDetail, open, reopen, priceTable, YM, addYm, closedReport };
+function clearCache() { cache.clear(); }
+module.exports = { clearCache, feedGet, compute, summary, storeDetail, open, reopen, priceTable, YM, addYm, closedReport };

@@ -92,27 +92,43 @@ router.get('/prices', async (req, res) => {
   if (error) return fail(res, error);
   res.json({ success: true, data });
 });
+// 存一筆主檔金額（同商品同生效月份＝更新）
+async function savePrice(b, actor) {
+  const bind = String(b.bind_id || '').trim();
+  const amount = Number(b.amount);
+  const eff = String(b.effective_from || curYm());
+  if (!/^\d+$/.test(bind)) { const e = new Error('要選商品（bind_id）'); e.status = 400; throw e; }
+  if (b.amount === '' || b.amount == null || !Number.isFinite(amount) || amount < 0) { const e = new Error(`金額不對（${b.name || bind}）`); e.status = 400; throw e; }
+  if (!YM.test(eff)) { const e = new Error('生效月份要 YYYY-MM'); e.status = 400; throw e; }
+  const row = { bind_id: Number(bind), name: b.name || null, brand: b.brand || null, catena: b.catena || null, model: b.model || null, amount, effective_from: eff, note: b.note || null };
+  const { data: ex } = await supabase.from('proc_price_items').select('*').eq('bind_id', Number(bind)).eq('effective_from', eff).eq('is_active', true).maybeSingle();
+  let saved;
+  if (ex) {
+    const { data, error } = await supabase.from('proc_price_items').update({ ...row, updated_by: actor.name, updated_at: new Date().toISOString() }).eq('id', ex.id).select('*').single();
+    if (error) throw error; saved = data;
+  } else {
+    const { data, error } = await supabase.from('proc_price_items').insert({ ...row, created_by: actor.name }).select('*').single();
+    if (error) throw error; saved = data;
+  }
+  await supabase.from('proc_price_log').insert({ price_id: saved.id, bind_id: saved.bind_id, action: ex ? 'update' : 'create', before: ex || null, after: saved, by_name: actor.name });
+  return saved;
+}
 router.post('/prices', async (req, res) => {
+  try { res.json({ success: true, data: await savePrice(req.body || {}, req.actor) }); } catch (e) { fail(res, e); }
+});
+// 一次存多筆：開帳畫面「這個月收到、還沒設金額的品項」填完一起送（生效月份＝那個月）
+router.post('/prices/batch', async (req, res) => {
   try {
-    const b = req.body || {};
-    const bind = String(b.bind_id || '').trim();
-    const amount = Number(b.amount);
-    const eff = String(b.effective_from || curYm());
-    if (!/^\d+$/.test(bind)) return bad(res, '要選商品（bind_id）');
-    if (!Number.isFinite(amount) || amount < 0) return bad(res, '金額不對');
-    if (!YM.test(eff)) return bad(res, '生效月份要 YYYY-MM');
-    const row = { bind_id: Number(bind), name: b.name || null, brand: b.brand || null, catena: b.catena || null, model: b.model || null, amount, effective_from: eff, note: b.note || null };
-    const { data: ex } = await supabase.from('proc_price_items').select('*').eq('bind_id', Number(bind)).eq('effective_from', eff).eq('is_active', true).maybeSingle();
-    let saved;
-    if (ex) {
-      const { data, error } = await supabase.from('proc_price_items').update({ ...row, updated_by: req.actor.name, updated_at: new Date().toISOString() }).eq('id', ex.id).select('*').single();
-      if (error) throw error; saved = data;
-    } else {
-      const { data, error } = await supabase.from('proc_price_items').insert({ ...row, created_by: req.actor.name }).select('*').single();
-      if (error) throw error; saved = data;
+    const list = Array.isArray(req.body && req.body.items) ? req.body.items : [];
+    if (!list.length) return bad(res, '沒有要存的品項');
+    if (list.length > 500) return bad(res, '一次最多 500 筆');
+    for (const b of list) {   // 先全部檢查，避免存一半
+      const a = Number(b.amount);
+      if (!/^\d+$/.test(String(b.bind_id || '')) || b.amount === '' || b.amount == null || !Number.isFinite(a) || a < 0) return bad(res, `金額不對（${b.name || b.bind_id}）`);
     }
-    await supabase.from('proc_price_log').insert({ price_id: saved.id, bind_id: saved.bind_id, action: ex ? 'update' : 'create', before: ex || null, after: saved, by_name: req.actor.name });
-    res.json({ success: true, data: saved });
+    const saved = [];
+    for (const b of list) saved.push(await savePrice(b, req.actor));
+    res.json({ success: true, data: { saved: saved.length } });
   } catch (e) { fail(res, e); }
 });
 router.delete('/prices/:id', async (req, res) => {
