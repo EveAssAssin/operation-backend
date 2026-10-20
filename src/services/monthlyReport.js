@@ -18,7 +18,7 @@ const RATIO_TARGET = { 人事: 23, 包裝: 10, 鏡片: 15, 鏡框: 12, 營運費
 const DIVIDEND_CODES = ['marketing_fund', 'depreciation'];
 const SOURCE_NAME = {
   bill: '開帳單', billing_order: '部門開帳', opex: '營運費用', recurring: '固定支出', fixed: '固定金額',
-  manual_value: '手填', manual_adjust: '調帳', erp_cost: 'ERP 費用單', aimin_expense: '愛民支出', planning_bill: '企劃部開帳', storehouse: '倉庫開帳',
+  manual_value: '手填', manual_adjust: '調帳', erp_cost: 'ERP 費用單', aimin_expense: '愛民支出', planning_bill: '企劃部開帳', storehouse: '倉庫開帳', contract: '合約',
 };
 
 const MARKET_BASE = process.env.MARKET_BACKEND_URL || 'https://market-backend-0544.onrender.com';
@@ -154,6 +154,28 @@ async function storehouseMonth(ym) {
   return v;
 }
 
+// ── 房租從合約來（2026-10-20 營運定案：月報用合約總額＝含扣繳；有「實際」與「報稅」兩份時用實際那份）──
+// contracts.type=rent、store_erpid、status 不是 archived；金額照 type_data.rent_schedule 分段，跨月照天數拆
+async function rentContracts() {
+  const { data } = await supabase.from('contracts').select('id, name, store_erpid, purpose, status, start_date, end_date, monthly_amount, type_data, party_name')
+    .eq('type', 'rent').not('store_erpid', 'is', null).neq('status', 'archived');
+  return data || [];
+}
+function rentForMonth(c, ym) {
+  const [y, m] = ym.split('-').map(Number);
+  const dim = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const sched = (((c.type_data || {}).rent_schedule) || []).filter((x) => x && x.from_date).sort((a, b) => String(a.from_date).localeCompare(String(b.from_date)));
+  let total = 0, days = 0;
+  for (let d = 1; d <= dim; d++) {
+    const ds = `${ym}-${String(d).padStart(2, '0')}`;
+    if ((c.start_date && ds < c.start_date) || (c.end_date && ds > c.end_date)) continue;
+    let amt = Number(c.monthly_amount) || 0;
+    for (const sg of sched) if (sg.from_date <= ds) amt = Number(sg.monthly_amount) || 0;
+    total += amt / dim; days += 1;
+  }
+  return { amount: Math.round(total), days, dim };
+}
+
 const splitTitle = (t) => { const s = String(t || ''); const i = s.indexOf('｜'); return i < 0 ? [s, ''] : [s.slice(0, i), s.slice(i + 1)]; };
 const r0 = (n) => Math.round(Number(n) || 0);
 const monthsBetween = (a, b) => { const [y1, m1] = a.split('-').map(Number); const [y2, m2] = b.split('-').map(Number); return (y2 - y1) * 12 + (m2 - m1) + 1; };
@@ -179,7 +201,7 @@ async function build(ym, store, opts = {}) {
   if (!YM.test(ym)) throw new Error('ym 要是 YYYY-MM');
   store = String(store || '');
   if (!store) throw new Error('缺門市');
-  const [accs, st, linesR, mkt, aimin, rep, fixed, holders, dept, plan, sh] = await Promise.all([
+  const [accs, st, linesR, mkt, aimin, rep, fixed, holders, dept, plan, sh, rcs] = await Promise.all([
     accounts(),
     settings(),
     supabase.rpc('ledger_lines', { p_ym: ym }).eq('store_erpid', store),
@@ -191,6 +213,7 @@ async function build(ym, store, opts = {}) {
     supabase.from('departments').select('store_erpid, store_name').eq('store_erpid', store).maybeSingle(),
     opts.planning || planningMonth(ym),
     opts.storehouse || storehouseMonth(ym),
+    opts.contracts || rentContracts(),
   ]);
   if (linesR.error) throw linesR.error;
   const lines = linesR.data || [];
@@ -228,6 +251,25 @@ async function build(ym, store, opts = {}) {
       ref_title: `${l.vendor || '企劃部'}｜${l.serial || ''} ${l.item || ''}（數量 ${l.qty ?? '—'}、成本 ${r0(l.cost_share)} × ${l.markup_rate}）${l.is_settled ? '' : '［企劃部還沒月結］'}`,
     })));
   }
+  // 房租：有合約就用合約（實際那份優先），固定支出的付款改當「實付」參考；沒有合約照舊用固定支出
+  const myRc = (rcs || []).filter((c) => String(c.store_erpid) === store);
+  const useRc = myRc.some((c) => c.purpose === 'actual') ? myRc.filter((c) => c.purpose === 'actual') : myRc;
+  let rentInfo = { contracts: [], paid: null, only_tax: false };
+  if (useRc.length && !(byCode.rent || []).some((l) => l.source === 'manual_value')) {
+    const paidLines = (byCode.rent || []).filter((l) => l.source === 'recurring');
+    const rest = (byCode.rent || []).filter((l) => l.source !== 'recurring');
+    const cl = [];
+    for (const c of useRc) {
+      const r = rentForMonth(c, ym);
+      rentInfo.contracts.push({ id: c.id, name: c.name, purpose: c.purpose, amount: r.amount, days: r.days, end_date: c.end_date, party: c.party_name });
+      if (!r.days) continue;
+      cl.push({ store_erpid: store, ledger_code: 'rent', amount: r.amount, fee_ym: ym, source: 'contract', ref_id: `ct-${c.id}`,
+        ref_title: `${c.party_name || '房東'}｜合約「${c.name}」${r.days < r.dim ? `（本月 ${r.days}/${r.dim} 天）` : ''}${c.purpose === 'tax' ? '［只有報稅版合約］' : ''}` });
+    }
+    rentInfo.paid = paidLines.length ? Math.round(paidLines.reduce((a, l) => a + Number(l.amount || 0), 0)) : null;
+    rentInfo.only_tax = useRc.every((c) => c.purpose === 'tax');
+    byCode.rent = rest.concat(cl);
+  }
   // 倉庫開帳（常備品撥補＋產品出貨）→ 科目照 storehouse_ledger；那一格有手填值就以手填為準
   if (sh.error) warnings.push(sh.error);
   for (const l of (sh.byStore || {})[store] || []) {
@@ -253,6 +295,7 @@ async function build(ym, store, opts = {}) {
       if (['opex', 'recurring', 'erp_cost', 'aimin_expense', 'billing_order'].includes(l.source)) v = '';
       if (l.source === 'planning_bill') v = '企劃部';
       if (l.source === 'storehouse') v = '倉庫';
+      if (l.source === 'contract') v = splitTitle(l.ref_title)[0];
       vendors[v] = (vendors[v] || 0) + Number(l.amount || 0);
     }
     const crossMonth = ls.filter((l) => l.fee_ym && l.fee_ym !== ym).map((l) => l.fee_ym);
@@ -388,6 +431,7 @@ async function build(ym, store, opts = {}) {
       fixed_this: { marketing_fund: fixedThis('marketing_fund'), depreciation: fixedThis('depreciation') },
     },
     shareholders: hs.map((h) => ({ id: h.id, name: h.name, erpid: h.erpid, shares: h.shares, amount: r0(distributable * h.shares / 100) })),
+    rent: rentInfo,
     storehouse_issues: (sh.issues || []).filter((i) => i.store === store).map((i) => ({ kind: i.kind, line: i.line })),
     planning_issues: planIssues.map((i) => ({ kind: i.kind, expense_id: i.expense_id || (i.line && i.line.expense_id), item: (i.e && i.e.item) || (i.line && i.line.item), detail: i })),
     aimin: am ? { name: am.name, sales: r0(am.sales), orders: am.order_count, paid: r0(am.paid), paid_by_method: am.paid_by_method, closings: am.closings } : null,
@@ -402,14 +446,14 @@ async function overview(ym) {
   const { data: units } = await supabase.from('departments').select('store_erpid, store_name, is_active, report_kind').eq('is_active', true).order('store_name');
   const isStore = (u) => u.report_kind === 'store' || (u.report_kind == null && /店$/.test(String(u.store_name || '')));
   const list = (units || []).filter((s) => s.store_erpid && isStore(s));
-  const [mkt, aimin, planning, storehouse] = await Promise.all([marketMonth(ym, list.map((s) => s.store_erpid)), aiminMonth(ym), planningMonth(ym), storehouseMonth(ym)]);
+  const [mkt, aimin, planning, storehouse, contracts] = await Promise.all([marketMonth(ym, list.map((s) => s.store_erpid)), aiminMonth(ym), planningMonth(ym), storehouseMonth(ym), rentContracts()]);
   const out = [];
   let i = 0;
   const worker = async () => {
     while (i < list.length) {
       const s = list[i++];
       try {
-        const r = await build(ym, s.store_erpid, { market: mkt, aimin, planning, storehouse });
+        const r = await build(ym, s.store_erpid, { market: mkt, aimin, planning, storehouse, contracts });
         out.push({ store: s.store_erpid, store_name: s.store_name, status: r.status, total_in: r.totals.total_in, total_out: r.totals.total_out, profit: r.totals.profit,
           sales_total: r.totals.sales_total, receipt_total: r.totals.receipt_filled ? r.totals.receipt_total : null, gap_pct: r.gap.total.pct, gap_alert: r.gap.total.alert,
           erp_total: r.revenue.glasses_receipt.erp == null ? null : r.revenue.glasses_receipt.erp + (r.revenue.contact_receipt.erp || 0),
@@ -446,4 +490,4 @@ async function overview(ym) {
   return { ym, stores: out, others: Object.values(other).sort((a, b) => b.total - a.total), market_error: mkt.error || null, aimin_error: aimin.error || null };
 }
 
-module.exports = { storehouseMonth, planningMonth, aiminMonth, build, overview, accounts, settings, marketMonth, YM, GROUP_NAME, SOURCE_NAME };
+module.exports = { rentContracts, rentForMonth, storehouseMonth, planningMonth, aiminMonth, build, overview, accounts, settings, marketMonth, YM, GROUP_NAME, SOURCE_NAME };

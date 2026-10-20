@@ -50,9 +50,12 @@ async function updateContract(id, patch) {
     'start_date', 'end_date', 'signed_date',
     'total_amount', 'monthly_amount', 'currency',
     'type_data', 'file_url', 'status', 'note',
+    'store_erpid', 'purpose', 'renewed_from', 'payment',
   ];
   const update = {};
   for (const k of allowed) if (patch[k] !== undefined) update[k] = patch[k];
+  if (update.purpose !== undefined && update.purpose !== 'tax') update.purpose = 'actual';
+  if (update.store_erpid === '') update.store_erpid = null;
   if (Object.keys(update).length === 0) return getContract(id);
   const { data, error } = await supabase
     .from('contracts')
@@ -93,6 +96,10 @@ function sanitize(input, createdBy) {
     file_url:       input.file_url  || null,
     status:         input.status    || 'active',
     note:           input.note      || null,
+    store_erpid:    input.store_erpid || null,               // 2026-10-20：綁門市（月報房租引用）
+    purpose:        input.purpose === 'tax' ? 'tax' : 'actual', // 實際／報稅用；月報用實際
+    renewed_from:   input.renewed_from || null,
+    payment:        input.payment || {},
     created_by:     createdBy || null,
   };
   return row;

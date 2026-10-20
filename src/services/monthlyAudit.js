@@ -34,14 +34,14 @@ async function storeList() {
 
 /** 一個月全部門市的快照：codes（科目→金額）、lines、業績、實收、盈餘… */
 async function systemMonth(ym, stores) {
-  const [market, aimin, planning, storehouse] = await Promise.all([MR.marketMonth(ym, stores.map((s) => s.store_erpid)), MR.aiminMonth(ym), MR.planningMonth(ym), MR.storehouseMonth(ym)]);
+  const [market, aimin, planning, storehouse, contracts] = await Promise.all([MR.marketMonth(ym, stores.map((s) => s.store_erpid)), MR.aiminMonth(ym), MR.planningMonth(ym), MR.storehouseMonth(ym), MR.rentContracts()]);
   const out = {};
   let i = 0;
   const worker = async () => {
     while (i < stores.length) {
       const s = stores[i++];
       try {
-        const r = await MR.build(ym, s.store_erpid, { market, aimin, planning, storehouse, withLines: true });
+        const r = await MR.build(ym, s.store_erpid, { market, aimin, planning, storehouse, contracts, withLines: true });
         const codes = {}, names = {}, lines = [];
         for (const g of [...r.left, ...r.right]) for (const row of g.rows) {
           if (row.amount) codes[row.code] = row.amount;
@@ -52,7 +52,7 @@ async function systemMonth(ym, stores) {
           name: r.store_name || s.store_name, src: 'system', codes, names, lines,
           sales: r.totals.sales_total, receipt: r.totals.receipt_filled ? r.totals.receipt_total : null,
           profit: r.totals.profit, total_out: r.totals.total_out, ratio: r.totals.ratio, target: r.ratio_target, gap: r.gap,
-          receipt_filled: r.totals.receipt_filled,
+          receipt_filled: r.totals.receipt_filled, rent: r.rent,
         };
       } catch (e) { out[s.store_erpid] = { name: s.store_name, error: e.message }; }
     }
@@ -167,6 +167,21 @@ async function audit(ym, opts = {}) {
       title: `${unc.length} 筆帳沒設月報科目，暫時放在「其他」（${fmt(unc.reduce((a, l) => a + l.amount, 0))}）`,
       detail: `${unc.slice(0, 3).map((l) => String(l.title).slice(0, 30)).join('；')}。到「⚙ 科目與廠商」幫這個廠商／會計科目選月報上的格子，之後同一家的帳就會自動歸位。`,
       amount: unc.reduce((a, l) => a + l.amount, 0) });
+    // 房租合約：沒合約、只有報稅版、合約快到期／已過期但還在付、實付比合約總額少超過扣繳範圍
+    const rt = s.rent || { contracts: [] };
+    if (!rt.contracts.length) add({ store: id, store_name: s.name, sev: ((s.codes || {}).rent ? 'low' : 'mid'), key: 'rent:nocontract', code: 'rent',
+      title: (s.codes || {}).rent ? `房租還沒有合約（目前用固定支出 ${fmt((s.codes || {}).rent)}）` : '這家店沒有房租（沒合約也沒固定支出）',
+      detail: '到「合約管理」新增房租合約並選這家門市，月報就會改用合約金額。', amount: (s.codes || {}).rent || null });
+    if (rt.only_tax) add({ store: id, store_name: s.name, sev: 'mid', key: 'rent:onlytax', code: 'rent', title: '房租只有「報稅版」合約',
+      detail: '月報要用實際合約；請把實際那份上傳並選「實際」。', amount: null });
+    for (const c of rt.contracts) {
+      if (c.end_date) { const left = (Date.parse(c.end_date) - Date.parse(`${ym}-01`)) / 864e5;
+        if (left < 0 && rt.paid) add({ store: id, store_name: s.name, sev: 'high', key: `rent:expired:${c.id}`, code: 'rent', title: `房租合約 ${c.end_date} 已到期，但還在付`, detail: `「${c.name}」要續約或停付。`, amount: rt.paid });
+        else if (left >= 0 && left < 90) add({ store: id, store_name: s.name, sev: 'low', key: `rent:expiring:${c.id}`, code: 'rent', title: `房租合約 ${c.end_date} 到期`, detail: `「${c.name}」剩不到 3 個月，記得談續約。`, amount: null }); }
+    }
+    const due = rt.contracts.reduce((a, c) => a + (c.amount || 0), 0);
+    if (due && rt.paid != null && (rt.paid > due * 1.001 || rt.paid < due * 0.85)) add({ store: id, store_name: s.name, sev: 'mid', key: 'rent:paid', code: 'rent',
+      title: `房租實付 ${fmt(rt.paid)}，合約 ${fmt(due)}`, detail: '扣繳（10%＋二代健保）後通常是合約的 88～95%；差太多要看是不是金額改了沒更新。', amount: rt.paid - due });
     const negs = (s.lines || []).filter((l) => l.amount < 0);
     const negBy = {};
     negs.forEach((l) => { negBy[l.code] = (negBy[l.code] || 0) + l.amount; });
