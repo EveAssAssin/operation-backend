@@ -34,14 +34,14 @@ async function storeList() {
 
 /** 一個月全部門市的快照：codes（科目→金額）、lines、業績、實收、盈餘… */
 async function systemMonth(ym, stores) {
-  const [market, aimin, planning] = await Promise.all([MR.marketMonth(ym, stores.map((s) => s.store_erpid)), MR.aiminMonth(ym), MR.planningMonth(ym)]);
+  const [market, aimin, planning, storehouse] = await Promise.all([MR.marketMonth(ym, stores.map((s) => s.store_erpid)), MR.aiminMonth(ym), MR.planningMonth(ym), MR.storehouseMonth(ym)]);
   const out = {};
   let i = 0;
   const worker = async () => {
     while (i < stores.length) {
       const s = stores[i++];
       try {
-        const r = await MR.build(ym, s.store_erpid, { market, aimin, planning, withLines: true });
+        const r = await MR.build(ym, s.store_erpid, { market, aimin, planning, storehouse, withLines: true });
         const codes = {}, names = {}, lines = [];
         for (const g of [...r.left, ...r.right]) for (const row of g.rows) {
           if (row.amount) codes[row.code] = row.amount;
@@ -58,7 +58,7 @@ async function systemMonth(ym, stores) {
     }
   };
   await Promise.all([worker(), worker(), worker(), worker()]);
-  return { stores: out, market_error: market.error || null, aimin_error: aimin.error || null, planning };
+  return { stores: out, market_error: market.error || null, aimin_error: aimin.error || null, planning, storehouse };
 }
 
 /** 舊試算表匯入的月份（ledger_history） */
@@ -215,6 +215,17 @@ async function audit(ym, opts = {}) {
     if (i.kind === 'unmapped') add({ store: '*', store_name: '全公司', sev: 'mid', key: `plan:unmapped:${i.line.target_id}`, code: 'planning_goods',
       title: `企劃部開帳對象「${i.line.target_name}」對不到門市`, detail: '營運部 report_settings.planning_target_map 要補這個對象。', amount: Number(i.line.sell_amount) || 0 });
   }
+  // 倉庫開帳（常備品撥補／產品出貨）
+  const shm = cur.storehouse || {};
+  if (shm.error) add({ store: '*', store_name: '全公司', sev: 'mid', key: 'src:storehouse', title: '拿不到倉庫開帳', detail: shm.error });
+  const shUn = {};
+  for (const i of shm.issues || []) {
+    if (i.kind === 'unmapped') { const k = i.line.store || '（空白）'; (shUn[k] = shUn[k] || { n: 0, amt: 0 }); shUn[k].n += 1; shUn[k].amt += Number(i.line.amount) || 0; }
+    if (i.kind === 'zero') add({ store: i.store, store_name: nameOf(i.store), sev: 'mid', key: `sh:zero:${i.line.id}`, code: i.line.ledger_code,
+      title: `倉庫出貨 ${i.line.date} 有數量沒金額`, detail: `${(i.line.items || []).map((x) => `${x.name}×${x.qty}`).join('、')}：售價是 0，要到倉庫產品資料庫補售價。`, amount: 0 });
+  }
+  for (const [k, v] of Object.entries(shUn)) add({ store: '*', store_name: '全公司', sev: 'mid', key: `sh:unmapped:${k}`,
+    title: `倉庫出貨門市「${k}」對不到門市`, detail: `${v.n} 筆、${Math.round(v.amt).toLocaleString('zh-TW')} 元沒進任何門市月報；營運部 report_settings.storehouse_store_map 要補「${k}」→ ERP 門市編號。`, amount: v.amt });
   if (pl.unbilled) add({ store: '*', store_name: '全公司', sev: 'low', key: 'plan:unbilled', title: `企劃部這個月還有 ${pl.unbilled} 筆沒開帳`, detail: '沒開帳的不會進門市月報（舊的文字開帳、二次開帳都在這裡）。', amount: null });
 
   if (cur.market_error) add({ store: '*', store_name: '全公司', sev: 'mid', key: 'src:market', title: '拿不到 ERP 業績／門市費用單', detail: cur.market_error });
