@@ -197,8 +197,10 @@ async function build(ym, store, opts = {}) {
 /** 全部門市一覽（每店一列：實收、總支出、盈餘） */
 async function overview(ym) {
   if (!YM.test(ym)) throw new Error('ym 要是 YYYY-MM');
-  const { data: stores } = await supabase.from('departments').select('store_erpid, store_name, is_active').eq('is_active', true).order('store_name');
-  const list = (stores || []).filter((s) => s.store_erpid);
+  // 只出「門市」：departments.report_kind＝store（migration 020；NULL＝名稱「…店」當門市）
+  const { data: units } = await supabase.from('departments').select('store_erpid, store_name, is_active, report_kind').eq('is_active', true).order('store_name');
+  const isStore = (u) => u.report_kind === 'store' || (u.report_kind == null && /店$/.test(String(u.store_name || '')));
+  const list = (units || []).filter((s) => s.store_erpid && isStore(s));
   const mkt = await marketMonth(ym, list.map((s) => s.store_erpid));
   const out = [];
   let i = 0;
@@ -215,7 +217,31 @@ async function overview(ym) {
   };
   await Promise.all([worker(), worker(), worker(), worker()]);
   out.sort((a, b) => String(a.store_name).localeCompare(String(b.store_name), 'zh-Hant'));
-  return { ym, stores: out, market_error: mkt.error || null };
+
+  // 不是門市、但這個月帳本上有費用的單位（董事長室、營運部、加工部…）：另列，免得錢「不見」
+  const storeSet = new Set(list.map((s) => String(s.store_erpid)));
+  const { data: lines } = await supabase.rpc('ledger_lines', { p_ym: ym });
+  const other = {};
+  for (const l of lines || []) {
+    const id = String(l.store_erpid || '');
+    if (!id || storeSet.has(id)) continue;
+    const o = (other[id] = other[id] || { store: id, total: 0, lines: 0, codes: {} });
+    o.total += Number(l.amount || 0); o.lines += 1; o.codes[l.ledger_code] = (o.codes[l.ledger_code] || 0) + Number(l.amount || 0);
+  }
+  const ids = Object.keys(other);
+  if (ids.length) {
+    const nameOf = Object.fromEntries((units || []).map((u) => [String(u.store_erpid), u.store_name]));
+    // 名稱就是代碼的佔位單位（000000、00099…）→ 用營運部系統基本資料登記的單位名稱
+    const { data: facts } = await supabase.from('entity_facts').select('store_erpid, store_name').in('store_erpid', ids);
+    const factName = Object.fromEntries((facts || []).filter((f) => f.store_name).map((f) => [String(f.store_erpid), f.store_name]));
+    for (const id of ids) {
+      const n = nameOf[id];
+      other[id].name = n && n !== id ? n : (factName[id] || n || id);
+      other[id].total = r0(other[id].total);
+      other[id].codes = Object.fromEntries(Object.entries(other[id].codes).map(([k, v]) => [k, r0(v)]));
+    }
+  }
+  return { ym, stores: out, others: Object.values(other).sort((a, b) => b.total - a.total), market_error: mkt.error || null };
 }
 
 module.exports = { build, overview, accounts, settings, marketMonth, YM, GROUP_NAME, SOURCE_NAME };
