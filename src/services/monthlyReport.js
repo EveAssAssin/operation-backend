@@ -73,7 +73,8 @@ const monthsBetween = (a, b) => { const [y1, m1] = a.split('-').map(Number); con
 async function settings() {
   const { data } = await supabase.from('report_settings').select('key, value');
   const o = Object.fromEntries((data || []).map((r) => [r.key, r.value]));
-  return { cutoff_day: Number(o.cutoff_day) || 26, retained_rate: o.retained_rate == null ? 0.1 : Number(o.retained_rate) };
+  return { cutoff_day: Number(o.cutoff_day) || 26, retained_rate: o.retained_rate == null ? 0.1 : Number(o.retained_rate),
+    gap_alert_pct: o.gap_alert_pct == null ? 10 : Number(o.gap_alert_pct) };
 }
 
 async function accounts() {
@@ -158,21 +159,54 @@ async function build(ym, store, opts = {}) {
   const aSales = am ? Number(am.sales) || 0 : null;
   const aPaid = am ? Number(am.paid) || 0 : null;
   const plus = (a, b) => (a == null && b == null ? null : r0((a || 0) + (b || 0)));
-  const revenue = {
-    glasses_sales: { name: '眼鏡業績', amount: filled('glasses_sales') ? r0(val('glasses_sales')) : null, erp: plus(erp ? erp.glasses : null, aSales),
-      refs: [erp ? { label: 'ERP 帳上', amount: r0(erp.glasses) } : null, am ? { label: '愛民系統訂單', amount: r0(aSales) } : null].filter(Boolean) },
-    glasses_receipt: { name: '眼鏡實收', amount: filled('glasses_receipt') ? r0(val('glasses_receipt')) : null, erp: plus(erp ? erp.glasses : null, aPaid),
-      refs: [erp ? { label: 'ERP 帳上', amount: r0(erp.glasses) } : null, am ? { label: '愛民系統收款', amount: r0(aPaid) } : null].filter(Boolean) },
-    contact_receipt: { name: '藥拋實收', amount: filled('contact_receipt') ? r0(val('contact_receipt')) : null, erp: erp ? r0(erp.contact) : null,
-      refs: erp ? [{ label: 'ERP 帳上', amount: r0(erp.contact) }] : [] },
-    api_pay: { name: 'API 支付', amount: filled('api_pay') ? r0(val('api_pay')) : null, erp: null },
-    stored_value: { name: '儲值收款（不列業績）', amount: filled('stored_value') ? r0(val('stored_value')) : null, erp: null },
+  // 業績＝系統帶入（ERP＋愛民系統），有手填「改成」就用手填、有「調帳」就加上去；實收＝會計手填
+  const sysOr = (code, sys) => {
+    const ls = byCode[code] || [];
+    if (ls.some((l) => l.source === 'manual_value')) return { amount: r0(val(code)), from: 'manual' };
+    const adj = ls.filter((l) => l.source === 'manual_adjust').reduce((s, l) => s + Number(l.amount || 0), 0);
+    if (sys == null) return { amount: ls.length ? r0(adj) : null, from: ls.length ? 'manual' : 'none' };
+    return { amount: r0(sys + adj), from: adj ? 'system_adjusted' : 'system' };
   };
+  const gSys = plus(erp ? erp.glasses : null, aSales);
+  const cSys = erp ? r0(erp.contact) : null;
+  const gS = sysOr('glasses_sales', gSys);
+  const cS = sysOr('contact_sales', cSys);
+  const revenue = {
+    glasses_sales: { name: '眼鏡業績', kind: 'sales', amount: gS.amount, from: gS.from, erp: gSys,
+      refs: [erp ? { label: 'ERP 帳上', amount: r0(erp.glasses) } : null, am ? { label: '愛民系統訂單', amount: r0(aSales) } : null].filter(Boolean) },
+    contact_sales: { name: '藥拋業績', kind: 'sales', amount: cS.amount, from: cS.from, erp: cSys,
+      refs: erp ? [{ label: 'ERP 帳上', amount: cSys }] : [] },
+    glasses_receipt: { name: '眼鏡實收', kind: 'receipt', amount: filled('glasses_receipt') ? r0(val('glasses_receipt')) : null, from: 'manual', erp: plus(erp ? erp.glasses : null, aPaid),
+      refs: [erp ? { label: 'ERP 帳上', amount: r0(erp.glasses) } : null, am ? { label: '愛民系統收款', amount: r0(aPaid) } : null].filter(Boolean) },
+    contact_receipt: { name: '藥拋實收', kind: 'receipt', amount: filled('contact_receipt') ? r0(val('contact_receipt')) : null, from: 'manual', erp: cSys,
+      refs: erp ? [{ label: 'ERP 帳上', amount: cSys }] : [] },
+    api_pay: { name: 'API 支付', kind: 'other', amount: filled('api_pay') ? r0(val('api_pay')) : null, from: 'manual', erp: null, no_source: true },
+    stored_value: { name: '儲值收款（不列業績）', kind: 'other', amount: filled('stored_value') ? r0(val('stored_value')) : null, from: 'manual', erp: null, no_source: true },
+  };
+  if (gS.amount == null) warnings.push('眼鏡業績系統拿不到（ERP／愛民系統都沒資料）');
   ['glasses_receipt', 'contact_receipt'].forEach((k) => { if (revenue[k].amount == null) warnings.push(`${revenue[k].name}還沒填（參考 ${revenue[k].erp == null ? '—' : revenue[k].erp.toLocaleString()}）`); });
   const glassesIn = revenue.glasses_receipt.amount || 0;
   const contactIn = revenue.contact_receipt.amount || 0;
   const apiIn = revenue.api_pay.amount || 0;
-  const totalIn = glassesIn + contactIn + apiIn;
+  const totalIn = glassesIn + contactIn + apiIn;   // 算獲利用（含 API 支付）
+
+  // 總業績、總實收（眼鏡＋藥拋）與實收差：會計確認收到的錢 vs 帳上業績；差到 gap_alert_pct（預設 10%）要特別關注
+  const salesTotal = gS.amount == null && cS.amount == null ? null : r0((gS.amount || 0) + (cS.amount || 0));
+  const receiptFilled = revenue.glasses_receipt.amount != null && revenue.contact_receipt.amount != null;
+  const receiptTotal = revenue.glasses_receipt.amount == null && revenue.contact_receipt.amount == null ? null : r0(glassesIn + contactIn);
+  const gapOf = (label, sales, receipt) => {
+    if (sales == null || receipt == null) return { label, sales, receipt, diff: null, pct: null, alert: false };
+    const diff = r0(receipt - sales);
+    const pct = sales ? Math.round((diff / sales) * 1000) / 10 : null;
+    return { label, sales, receipt, diff, pct, alert: pct != null && Math.abs(pct) >= st.gap_alert_pct };
+  };
+  const gap = {
+    alert_pct: st.gap_alert_pct,
+    glasses: gapOf('眼鏡', gS.amount, revenue.glasses_receipt.amount),
+    contact: gapOf('藥拋', cS.amount, revenue.contact_receipt.amount),
+    total: gapOf('合計', salesTotal, receiptFilled ? receiptTotal : null),
+  };
+  ['glasses', 'contact', 'total'].forEach((k) => { const g = gap[k]; if (g.alert) warnings.push(`${g.label}實收差 ${g.pct > 0 ? '+' : ''}${g.pct}%（實收 ${g.receipt.toLocaleString()}／業績 ${g.sales.toLocaleString()}），超過 ${st.gap_alert_pct}%`); });
 
   // ── 支出 ──
   const section = (groups) => groups.map((g) => {
@@ -211,6 +245,7 @@ async function build(ym, store, opts = {}) {
     revenue,
     totals: {
       glasses_in: glassesIn, contact_in: contactIn, api_in: apiIn, total_in: totalIn,
+      sales_total: salesTotal, receipt_total: receiptTotal, receipt_filled: receiptFilled,
       left_total: leftTotal, right_total: rightTotal, total_out: totalOut,
       glasses_out: glassesOut, contact_out: contactOut,
       glasses_profit: glassesIn - glassesOut, contact_profit: contactIn + apiIn - contactOut, profit,
@@ -223,6 +258,7 @@ async function build(ym, store, opts = {}) {
         return o;
       })(),
     },
+    gap,
     ratio_target: RATIO_TARGET,
     left, right,
     dividend: {
@@ -256,6 +292,7 @@ async function overview(ym) {
       try {
         const r = await build(ym, s.store_erpid, { market: mkt, aimin });
         out.push({ store: s.store_erpid, store_name: s.store_name, status: r.status, total_in: r.totals.total_in, total_out: r.totals.total_out, profit: r.totals.profit,
+          sales_total: r.totals.sales_total, receipt_total: r.totals.receipt_filled ? r.totals.receipt_total : null, gap_pct: r.gap.total.pct, gap_alert: r.gap.total.alert,
           erp_total: r.revenue.glasses_receipt.erp == null ? null : r.revenue.glasses_receipt.erp + (r.revenue.contact_receipt.erp || 0),
           filled: r.revenue.glasses_receipt.amount != null && r.revenue.contact_receipt.amount != null, warnings: r.warnings.length });
       } catch (e) { out.push({ store: s.store_erpid, store_name: s.store_name, error: e.message }); }
