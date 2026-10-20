@@ -701,7 +701,8 @@ async function overview(ym) {
       try {
         const r = snaps[String(s.store_erpid)] ? { ...snaps[String(s.store_erpid)], status: 'closed' } : await build(ym, s.store_erpid, { market: mkt, aimin, planning, storehouse, contracts, sales });
         out.push({ store: s.store_erpid, store_name: s.store_name, status: r.status, total_in: r.totals.total_in, total_out: r.totals.total_out, profit: r.totals.profit,
-          sales_total: r.totals.sales_total, receipt_total: r.totals.receipt_filled ? r.totals.receipt_total : null, gap_pct: r.gap.total.pct, gap_alert: r.gap.total.alert,
+          sales_total: r.totals.sales_total, receipt_total: r.totals.receipt_filled ? r.totals.receipt_total : null,
+          glasses_receipt: r.revenue.glasses_receipt.amount, contact_receipt: r.revenue.contact_receipt.amount, gap_pct: r.gap.total.pct, gap_alert: r.gap.total.alert,
           erp_total: r.revenue.glasses_receipt.erp == null ? null : r.revenue.glasses_receipt.erp + (r.revenue.contact_receipt.erp || 0),
           filled: r.revenue.glasses_receipt.amount != null && r.revenue.contact_receipt.amount != null, warnings: (r.warnings || []).length, imported: !!r.imported });
       } catch (e) { out.push({ store: s.store_erpid, store_name: s.store_name, error: e.message }); }
