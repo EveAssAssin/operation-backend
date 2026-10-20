@@ -197,6 +197,27 @@ function rentForMonth(c, ym) {
   return { amount: Math.round(total), days, dim };
 }
 
+// ── 帳上業績（業績系統 report_sales_month，2026-10-20 營運定案）──
+// 總業績＝ERP 開單日（台北）實收金額合計（含退貨）；隱眼業績＝物料「隐形眼镜」＋「护理产品」（物料自動帶，比人工選標籤準）；
+// 眼鏡業績＝總業績 − API PAY（ERP 現金流 payway 140，市場部 cashflow.apipay）− 隱眼業績。金鑰同企劃部開帳 planning_report_key。
+const salesCache = new Map();
+async function salesMonth(ym) {
+  const hit = salesCache.get(ym);
+  if (hit && Date.now() - hit.at < 10 * 60e3) return hit.v;
+  const { data: row } = await supabase.from('report_settings').select('value').eq('key', 'planning_report_key').maybeSingle();
+  if (!row || !row.value) return { error: '營運部沒設業績系統金鑰（report_settings.planning_report_key）', stores: {} };
+  try {
+    const { data } = await axios.post(`${PLAN_URL}/rest/v1/rpc/report_sales_month`, { p_key: row.value, p_ym: ym },
+      { headers: { apikey: PLAN_PUB, 'Content-Type': 'application/json' }, timeout: 60000 });
+    const v = { stores: (data && data.stores) || {}, synced_max: data && data.synced_max };
+    salesCache.set(ym, { at: Date.now(), v });
+    return v;
+  } catch (e) {
+    const msg = e.response ? `${e.response.status} ${JSON.stringify(e.response.data).slice(0, 120)}` : e.message;
+    return { error: `帳上業績（業績系統）：${msg}`, stores: {} };
+  }
+}
+
 const splitTitle = (t) => { const s = String(t || ''); const i = s.indexOf('｜'); return i < 0 ? [s, ''] : [s.slice(0, i), s.slice(i + 1)]; };
 const r0 = (n) => Math.round(Number(n) || 0);
 const monthsBetween = (a, b) => { const [y1, m1] = a.split('-').map(Number); const [y2, m2] = b.split('-').map(Number); return (y2 - y1) * 12 + (m2 - m1) + 1; };
@@ -222,7 +243,7 @@ async function build(ym, store, opts = {}) {
   if (!YM.test(ym)) throw new Error('ym 要是 YYYY-MM');
   store = String(store || '');
   if (!store) throw new Error('缺門市');
-  const [accs, st, linesR, mkt, aimin, rep, fixed, holders, dept, plan, sh, rcs, rbs] = await Promise.all([
+  const [accs, st, linesR, mkt, aimin, rep, fixed, holders, dept, plan, sh, rcs, rbs, smo] = await Promise.all([
     accounts(),
     settings(),
     supabase.rpc('ledger_lines', { p_ym: ym }).eq('store_erpid', store),
@@ -236,6 +257,7 @@ async function build(ym, store, opts = {}) {
     opts.storehouse || storehouseMonth(ym),
     opts.contracts || rentContracts(),
     rentBasics(),
+    opts.sales || salesMonth(ym),
   ]);
   if (linesR.error) throw linesR.error;
   const lines = linesR.data || [];
@@ -360,20 +382,32 @@ async function build(ym, store, opts = {}) {
     if (sys == null) return { amount: ls.length ? r0(adj) : null, from: ls.length ? 'manual' : 'none' };
     return { amount: r0(sys + adj), from: adj ? 'system_adjusted' : 'system' };
   };
-  const gSys = plus(erp ? erp.glasses : null, aSales);
-  const cSys = erp ? r0(erp.contact) : null;
+  // 新口徑（營運 10-20）：業績系統拿不到才退回舊的標籤口徑
+  const so = (smo && smo.stores || {})[store] || null;
+  const cf = m.cashflow || null;
+  const apiSys = cf ? r0(cf.apipay) : null;
+  let erpGlasses = erp ? erp.glasses : null, cSys = erp ? r0(erp.contact) : null, salesBasis = 'label';
+  if (so) {
+    cSys = r0((Number(so.contact_lens) || 0) + (Number(so.care) || 0));
+    erpGlasses = r0((Number(so.total) || 0) - (apiSys || 0) - cSys);
+    salesBasis = 'material';
+    if (apiSys == null) warnings.push('拿不到 ERP 現金流的 API PAY，眼鏡業績（帳上）先沒扣 API PAY');
+  } else if (smo && smo.error) warnings.push(`${smo.error}；業績暫用舊口徑（訂單標籤）`);
+  const gSys = plus(erpGlasses, aSales);
   const gS = sysOr('glasses_sales', gSys);
   const cS = sysOr('contact_sales', cSys);
   const revenue = {
-    glasses_sales: { name: '眼鏡業績（帳上）', kind: 'sales', amount: gS.amount, from: gS.from, erp: gSys,
-      refs: [erp ? { label: 'ERP 帳上', amount: r0(erp.glasses) } : null, am ? { label: '愛民系統訂單', amount: r0(aSales) } : null].filter(Boolean) },
-    contact_sales: { name: '隱眼業績（帳上，晶碩＋藥拋標籤）', kind: 'sales', amount: cS.amount, from: cS.from, erp: cSys,
-      refs: erp ? [{ label: 'ERP 帳上', amount: cSys }] : [] },
+    glasses_sales: { name: '眼鏡業績（帳上）', kind: 'sales', amount: gS.amount, from: gS.from, erp: gSys, basis: salesBasis,
+      refs: [so ? { label: `ERP 總業績 ${r0(so.total).toLocaleString()} − API PAY ${apiSys == null ? '?' : apiSys.toLocaleString()} − 隱眼 ${cSys.toLocaleString()}`, amount: r0(erpGlasses) } : (erp ? { label: 'ERP 帳上（標籤）', amount: r0(erp.glasses) } : null),
+        am ? { label: '愛民系統訂單', amount: r0(aSales) } : null].filter(Boolean) },
+    contact_sales: { name: '隱眼業績（帳上）', kind: 'sales', amount: cS.amount, from: cS.from, erp: cSys, basis: salesBasis,
+      refs: so ? [{ label: '隱形眼鏡物料', amount: r0(so.contact_lens) }, { label: '護理產品物料', amount: r0(so.care) }] : (erp ? [{ label: 'ERP 帳上（標籤）', amount: cSys }] : []) },
     glasses_receipt: { name: '眼鏡真實實收', kind: 'receipt', amount: filled('glasses_receipt') ? r0(val('glasses_receipt')) : null, from: 'manual', erp: plus(erp ? erp.glasses : null, aPaid),
       refs: [erp ? { label: 'ERP 帳上', amount: r0(erp.glasses) } : null, am ? { label: '愛民系統收款', amount: r0(aPaid) } : null].filter(Boolean) },
     contact_receipt: { name: '隱眼真實實收', kind: 'receipt', amount: filled('contact_receipt') ? r0(val('contact_receipt')) : null, from: 'manual', erp: cSys,
       refs: erp ? [{ label: 'ERP 帳上', amount: cSys }] : [] },
-    api_pay: { name: 'API 支付', kind: 'other', amount: filled('api_pay') ? r0(val('api_pay')) : null, from: 'manual', erp: null, no_source: true },
+    api_pay: { name: 'API 支付（儲值金消費）', kind: 'other', amount: filled('api_pay') ? r0(val('api_pay')) : apiSys, from: filled('api_pay') ? 'manual' : (apiSys == null ? 'none' : 'system'), erp: apiSys,
+      refs: cf ? [{ label: 'ERP 現金流 apiPay', amount: apiSys }, { label: 'ERP 現金流合計（帳上實收）', amount: r0(cf.total) }] : [] },
     stored_value: { name: '儲值收款（不列業績）', kind: 'other', amount: filled('stored_value') ? r0(val('stored_value')) : null, from: 'manual', erp: null, no_source: true },
   };
   if (gS.amount == null) warnings.push('眼鏡業績系統拿不到（ERP／愛民系統都沒資料）');
@@ -479,14 +513,14 @@ async function overview(ym) {
   const { data: units } = await supabase.from('departments').select('store_erpid, store_name, is_active, report_kind').eq('is_active', true).order('store_name');
   const isStore = (u) => u.report_kind === 'store' || (u.report_kind == null && /店$/.test(String(u.store_name || '')));
   const list = (units || []).filter((s) => s.store_erpid && isStore(s));
-  const [mkt, aimin, planning, storehouse, contracts] = await Promise.all([marketMonth(ym, list.map((s) => s.store_erpid)), aiminMonth(ym), planningMonth(ym), storehouseMonth(ym), rentContracts()]);
+  const [mkt, aimin, planning, storehouse, contracts, sales] = await Promise.all([marketMonth(ym, list.map((s) => s.store_erpid)), aiminMonth(ym), planningMonth(ym), storehouseMonth(ym), rentContracts(), salesMonth(ym)]);
   const out = [];
   let i = 0;
   const worker = async () => {
     while (i < list.length) {
       const s = list[i++];
       try {
-        const r = await build(ym, s.store_erpid, { market: mkt, aimin, planning, storehouse, contracts });
+        const r = await build(ym, s.store_erpid, { market: mkt, aimin, planning, storehouse, contracts, sales });
         out.push({ store: s.store_erpid, store_name: s.store_name, status: r.status, total_in: r.totals.total_in, total_out: r.totals.total_out, profit: r.totals.profit,
           sales_total: r.totals.sales_total, receipt_total: r.totals.receipt_filled ? r.totals.receipt_total : null, gap_pct: r.gap.total.pct, gap_alert: r.gap.total.alert,
           erp_total: r.revenue.glasses_receipt.erp == null ? null : r.revenue.glasses_receipt.erp + (r.revenue.contact_receipt.erp || 0),
@@ -523,4 +557,4 @@ async function overview(ym) {
   return { ym, stores: out, others: Object.values(other).sort((a, b) => b.total - a.total), market_error: mkt.error || null, aimin_error: aimin.error || null };
 }
 
-module.exports = { rentBasics, rentContracts, rentForMonth, storehouseMonth, planningMonth, aiminMonth, build, overview, accounts, settings, marketMonth, YM, GROUP_NAME, SOURCE_NAME };
+module.exports = { salesMonth, rentBasics, rentContracts, rentForMonth, storehouseMonth, planningMonth, aiminMonth, build, overview, accounts, settings, marketMonth, YM, GROUP_NAME, SOURCE_NAME };

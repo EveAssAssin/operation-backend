@@ -2,6 +2,7 @@
 // 規劃：app/pet-feature/PLAN_門市月報與開帳_20261020.md
 //   GET  /api/ledger/accounts                         科目表
 //   POST /api/ledger/accounts、PATCH /accounts/:code   新增／改科目（新科目自動排進月報那一區）
+//   POST /api/ledger/shareholders、PATCH|DELETE /shareholders/:id   股東（門市基礎設定裡設）
 //   GET  /api/ledger/store-profile?store=&ym=          門市基礎設定（基本資料＋合約＋固定支出付款＋行銷基金折舊＋股東）
 //   GET  /api/ledger/mapping、PATCH /mapping/source/:id、/mapping/category/:id   廠商／會計科目 → 月報科目
 //   GET  /api/ledger/lines?ym=2026-09[&store=120085]  帳本每一列
@@ -339,6 +340,38 @@ router.get('/store-profile', async (req, res) => {
       fixed: fixed || [], shareholders: holders || [],
     } });
   } catch (e) { fail(res, e); }
+});
+
+
+// ── 股東（2026-10-20）：在「門市基礎設定」設定；月報可分配盈餘依持股比例分（同一期間持股合計不能超過 100%）──
+const overlap = (a1, a2, b1, b2) => a1 <= (b2 || '9999-12') && b1 <= (a2 || '9999-12');
+router.post('/shareholders', canEdit, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const store = String(b.store || ''), name = String(b.name || '').trim();
+    const shares = Math.round(Number(b.shares));
+    if (!store || !name) return bad(res, '缺門市或姓名');
+    if (!(shares >= 1 && shares <= 100)) return bad(res, '持股要是 1～100（%）');
+    if (!YM.test(String(b.from_ym || '')) || (b.to_ym && !YM.test(String(b.to_ym)))) return bad(res, '起訖月份要是 YYYY-MM');
+    const { data: cur } = await supabase.from('store_shareholders').select('shares, from_ym, to_ym').eq('store_erpid', store);
+    const sum = (cur || []).filter((h) => overlap(h.from_ym, h.to_ym, b.from_ym, b.to_ym || null)).reduce((a, h) => a + h.shares, 0);
+    if (sum + shares > 100) return bad(res, `同一期間持股合計會變成 ${sum + shares}%，超過 100%`);
+    const { data, error } = await supabase.from('store_shareholders').insert({ store_erpid: store, name, erpid: b.erpid || null, app_number: b.app_number || null,
+      shares, from_ym: b.from_ym, to_ym: b.to_ym || null, created_by: who(req) }).select().single();
+    if (error) throw error; res.json({ success: true, data });
+  } catch (e) { fail(res, e); }
+});
+router.patch('/shareholders/:id', canEdit, async (req, res) => {
+  try {
+    const b = req.body || {}, up = {};
+    if (b.to_ym !== undefined) { if (b.to_ym && !YM.test(String(b.to_ym))) return bad(res, '月份要是 YYYY-MM'); up.to_ym = b.to_ym || null; }
+    if (!Object.keys(up).length) return bad(res, '沒有要改的（持股比例要改請設結束月份、再新增一筆）');
+    const { error } = await supabase.from('store_shareholders').update(up).eq('id', req.params.id);
+    if (error) throw error; res.json({ success: true });
+  } catch (e) { fail(res, e); }
+});
+router.delete('/shareholders/:id', canEdit, async (req, res) => {
+  try { const { error } = await supabase.from('store_shareholders').delete().eq('id', req.params.id); if (error) throw error; res.json({ success: true }); } catch (e) { fail(res, e); }
 });
 
 module.exports = router;
