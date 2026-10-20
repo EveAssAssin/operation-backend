@@ -92,6 +92,7 @@ app.use('/api/dashboard', require('./routes/dashboard'));
 // 人力招募模組（公開跨系統端點先掛，內部端點需登入）
 app.use('/api/recruitment/external', require('./routes/recruitmentExternal'));
 app.use('/api/recruitment', authenticate, require('./routes/recruitment'));
+app.use('/api/hr-tool', authenticate, require('./routes/hrTool'));   // 人事工具：離職後續（2026-10-20）
 
 // 業績系統活動模組（需登入）
 app.use('/api/sales-events', authenticate, require('./routes/salesEvents'));
@@ -236,6 +237,7 @@ app.use((err, req, res, next) => {
   startBillingScheduledSync();
   startHubPoller();                  // 每 5 分鐘自動掃 Hub 收件匣
   startCheckNotifyJob();             // 每天 10:00 支票到期通知
+  require('./services/resignClient').startBlockedSync();   // 離職停權名單（每 5 分鐘）
   startVendorPayoutNotifyJob();      // 每天 10:00 廠商出款提醒
   startRecurringExpenseNotifyJob();  // 每天 09:00 常態費用到期通知
   startOpexAnomalyJob();             // 每天 09:00 營運費用異常掃描 + LINE 推播

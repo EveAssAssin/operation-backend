@@ -43,6 +43,11 @@ const authenticate = async (req, res, next) => {
       return res.status(403).json({ success: false, message: '無此系統帳號或帳號已停用' });
     }
 
+    // 離職後關閉登入（2026-10-20；市場部離職流程的停權名單，每 5 分鐘同步）
+    if (require('../services/resignClient').isBlocked(user.member_id)) {
+      return res.status(403).json({ success: false, code: 'resigned', message: '你的帳號已辦理離職，系統已關閉登入。有問題請聯絡人事。' });
+    }
+
     // 更新最後登入時間
     await supabase
       .from('system_users')
