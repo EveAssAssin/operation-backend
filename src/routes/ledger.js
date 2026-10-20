@@ -2,7 +2,8 @@
 // 規劃：app/pet-feature/PLAN_門市月報與開帳_20261020.md
 //   GET  /api/ledger/accounts                         科目表
 //   POST /api/ledger/accounts、PATCH /accounts/:code   新增／改科目（新科目自動排進月報那一區）
-//   POST /api/ledger/shareholders、PATCH|DELETE /shareholders/:id   股東（門市基礎設定裡設）
+//   POST /api/ledger/shareholders、PATCH|DELETE /shareholders/:id   股東（門市基礎設定裡設；只能挑左手「股東」部門的人）
+//   GET /api/ledger/shareholder-roster、PUT /shareholder-roster/group   左手股東部門名單／部門編號
 //   GET  /api/ledger/store-profile?store=&ym=          門市基礎設定（基本資料＋合約＋固定支出付款＋行銷基金折舊＋股東）
 //   GET  /api/ledger/mapping、PATCH /mapping/source/:id、/mapping/category/:id   廠商／會計科目 → 月報科目
 //   GET  /api/ledger/lines?ym=2026-09[&store=120085]  帳本每一列
@@ -345,12 +346,30 @@ router.get('/store-profile', async (req, res) => {
 
 // ── 股東（2026-10-20）：在「門市基礎設定」設定；月報可分配盈餘依持股比例分（同一期間持股合計不能超過 100%）──
 const overlap = (a1, a2, b1, b2) => a1 <= (b2 || '9999-12') && b1 <= (a2 || '9999-12');
+// 股東名單＝左手「股東」部門（2026-10-20）；選股東只能從這份名單挑，姓名／客編以左手為準
+router.get('/shareholder-roster', async (req, res) => {
+  try { res.json({ success: true, data: await require('../services/shareholderRoster').roster(req.query.force === '1') }); } catch (e) { fail(res, e); }
+});
+router.put('/shareholder-roster/group', canEdit, async (req, res) => {
+  try {
+    const erpid = String((req.body || {}).erpid || '').trim();
+    if (!/^[0-9A-Za-z]{2,20}$/.test(erpid)) return bad(res, '左手部門編號格式不對');
+    const R = require('../services/shareholderRoster');
+    await R.setGroup(erpid);
+    res.json({ success: true, data: await R.roster(true) });
+  } catch (e) { fail(res, e); }
+});
 router.post('/shareholders', canEdit, async (req, res) => {
   try {
     const b = req.body || {};
-    const store = String(b.store || ''), name = String(b.name || '').trim();
+    const store = String(b.store || '');
     const shares = Math.round(Number(b.shares));
-    if (!store || !name) return bad(res, '缺門市或姓名');
+    const ro = await require('../services/shareholderRoster').roster(false);
+    const person = (ro.list || []).find((x) => x.erpid === String(b.erpid || ''));
+    if (!person) return bad(res, ro.error || '只能選左手「股東」部門裡的人（名單沒有這位，請先在左手加進股東部門）');
+    const name = person.name;
+    b.app_number = person.app_number;
+    if (!store) return bad(res, '缺門市');
     if (!(shares >= 1 && shares <= 100)) return bad(res, '持股要是 1～100（%）');
     if (!YM.test(String(b.from_ym || '')) || (b.to_ym && !YM.test(String(b.to_ym)))) return bad(res, '起訖月份要是 YYYY-MM');
     const { data: cur } = await supabase.from('store_shareholders').select('shares, from_ym, to_ym').eq('store_erpid', store);

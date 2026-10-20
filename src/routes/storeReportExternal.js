@@ -5,6 +5,9 @@
 //   GET  /api/external/store-report/months?store=120085     這家店已關帳的月份
 //   GET  /api/external/store-report?store=120085&ym=2026-09 一個月（沒關帳＝只回狀態）
 //   POST /api/external/store-report/note {store, ym, note, by}  店長心得（只有已關帳才能寫）
+//   GET  /api/external/store-report/investor?app=…              股東（投資管理，2026-10-20）：有股份的門市＋已關帳月份
+//   GET  /api/external/store-report/investor/report?app=&store=&ym=  股東看一份已關帳月報（金額＋自己的分配）
+//   股東身分＝門市基礎設定的 store_shareholders（只能挑左手「股東」部門的人）；app 由呼叫端（市場部）驗過憑證後帶
 const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
@@ -77,6 +80,61 @@ router.post('/note', async (req, res) => {
     .eq('store_erpid', store).eq('ym', ym);
   if (error) return bad(res, error.message, 500);
   res.json({ success: true });
+});
+
+// ── 股東（投資管理）──────────────────────────────────────
+async function erpidsOfApp(app) {
+  const set = new Set();
+  const { data } = await supabase.from('store_shareholders').select('erpid').eq('app_number', app);
+  (data || []).forEach((x) => x.erpid && set.add(String(x.erpid)));
+  try {
+    const ro = await require('../services/shareholderRoster').roster(false);
+    (ro.list || []).filter((x) => x.app_number === app).forEach((x) => set.add(x.erpid));
+  } catch (e) { /* 左手查不到就只用已存的客編 */ }
+  return [...set];
+}
+async function holdingsOf(app) {
+  const erpids = await erpidsOfApp(app);
+  if (!erpids.length) return { erpids, rows: [] };
+  const { data } = await supabase.from('store_shareholders').select('store_erpid, shares, from_ym, to_ym, erpid, name').in('erpid', erpids);
+  return { erpids, rows: data || [] };
+}
+router.get('/investor', async (req, res) => {
+  const app = String(req.query.app || '');
+  if (!/^\d{4,20}$/.test(app)) return bad(res, '缺客編');
+  const { rows } = await holdingsOf(app);
+  const stores = [...new Set(rows.map((r) => r.store_erpid))];
+  if (!stores.length) return res.json({ success: true, data: { name: null, stores: [] } });
+  const [{ data: deps }, { data: reps }] = await Promise.all([
+    supabase.from('departments').select('store_erpid, store_name').in('store_erpid', stores),
+    supabase.from('store_month_reports').select('store_erpid, ym, closed_at, snapshot').in('store_erpid', stores).eq('status', 'closed').order('ym', { ascending: false }).limit(400),
+  ]);
+  const nm = new Map((deps || []).map((d) => [d.store_erpid, d.store_name]));
+  const out = stores.map((st) => {
+    const mine = rows.filter((r) => r.store_erpid === st);
+    const months = (reps || []).filter((r) => r.store_erpid === st && mine.some((h) => h.from_ym <= r.ym && (!h.to_ym || h.to_ym >= r.ym)))
+      .slice(0, 24).map((r) => {
+        const t = (r.snapshot && r.snapshot.totals) || {};
+        const me = ((r.snapshot && r.snapshot.shareholders) || []).find((h) => mine.some((x) => x.erpid && String(x.erpid) === String(h.erpid)));
+        return { ym: r.ym, closed_at: r.closed_at, profit: t.profit == null ? null : r0(t.profit), my_amount: me ? r0(me.amount) : null };
+      });
+    return { store: st, store_name: nm.get(st) || st, holdings: mine.map((h) => ({ shares: h.shares, from_ym: h.from_ym, to_ym: h.to_ym })), months };
+  });
+  res.json({ success: true, data: { name: rows[0].name, stores: out } });
+});
+router.get('/investor/report', async (req, res) => {
+  const app = String(req.query.app || ''), store = String(req.query.store || ''), ym = String(req.query.ym || '');
+  if (!/^\d{4,20}$/.test(app) || !store || !YM.test(ym)) return bad(res, '缺客編／門市／月份');
+  const { rows } = await holdingsOf(app);
+  const mine = rows.filter((r) => r.store_erpid === store && r.from_ym <= ym && (!r.to_ym || r.to_ym >= ym));
+  if (!mine.length) return bad(res, '你在這家店這個月沒有股份', 403);
+  const { data: rep, error } = await supabase.from('store_month_reports').select('*').eq('store_erpid', store).eq('ym', ym).maybeSingle();
+  if (error) return bad(res, error.message, 500);
+  if (!rep || rep.status !== 'closed' || !rep.snapshot) return res.json({ success: true, data: { closed: false, status: rep ? rep.status : 'draft' } });
+  const v = managerView(rep.snapshot, rep);
+  delete v.manager_note; delete v.manager_note_at;
+  const me = (rep.snapshot.shareholders || []).find((h) => mine.some((x) => x.erpid && String(x.erpid) === String(h.erpid)));
+  res.json({ success: true, data: { closed: true, ...v, my: { shares: mine.reduce((a, h) => a + h.shares, 0), amount: me ? r0(me.amount) : null } } });
 });
 
 module.exports = router;

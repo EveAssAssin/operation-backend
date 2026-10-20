@@ -300,6 +300,9 @@ async function syncAllEmployees(extraGroupErpIds = []) {
 
 module.exports = {
   syncAllEmployees,
+  getEmployeesByGroup,
+  getAllEmployees,
+  isValidEmployee,
   getEmployeeByErpId,
   aesEncrypt,
 };
