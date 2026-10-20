@@ -93,6 +93,7 @@ app.use('/api/dashboard', require('./routes/dashboard'));
 app.use('/api/recruitment/external', require('./routes/recruitmentExternal'));
 app.use('/api/recruitment', authenticate, require('./routes/recruitment'));
 app.use('/api/hr-tool', authenticate, require('./routes/hrTool'));
+app.use('/api/processing', require('./routes/processing'));   // 加工中心開帳（獨立帳密＋營運部帳號，2026-10-20）
 app.use('/api/vendor-manage', authenticate, require('./routes/vendorManage'));   // 營運管理 → 廠商管理（2026-10-20）   // 人事工具：離職後續（2026-10-20）
 
 // 業績系統活動模組（需登入）
