@@ -141,7 +141,8 @@ app.use('/api/appointed-units', require('./routes/appointedUnits'));
 
 // 各類流程模組
 //   公開端點（QR 掃描後填寫，不需登入，由 line_uid 驗證）
-app.use('/api/processes/public', require('./routes/processes/public'));
+// 舊門市交接公開填寫端點停用（2026-10-20：不用登入就能送出；改用市場部那套，0 筆資料）
+app.use('/api/processes/public', (req, res) => res.status(410).json({ success: false, message: '這個交接表已停用，請改用 App「樂活人員 → 營運工具 → 門市交接」' }));
 //   管理端（需登入）
 app.use('/api/processes', authenticate, require('./routes/processes/admin'));
 
