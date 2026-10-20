@@ -517,6 +517,11 @@ async function build(ym, store, opts = {}) {
   } else if (sal && !sal.error && !salaryInfo && !(byCode.salary || []).length) {
     warnings.push('左手這個月還沒有這家店的薪資（還沒算薪，或門市名稱對不上）');
   }
+  // 帳面實收（2026-10-21）：ERP 現金流（本月建立的單到現在收到的錢，不含 API PAY）分眼鏡／隱眼＋愛民系統收款；帳面呆帳＝總業績 − 帳面實收
+  const bk = cf && cf.book ? cf.book : null;
+  const bookG = plus(bk ? bk.glasses : null, aPaid);
+  const bookC = bk && bk.split ? r0(bk.contact) : null;
+  const bookTotal = bookG == null && bookC == null ? null : r0((bookG || 0) + (bookC || 0));
   const gSys = plus(erpGlasses, aSales);
   const gS = sysOr('glasses_sales', gSys);
   const cS = sysOr('contact_sales', cSys);
@@ -526,10 +531,10 @@ async function build(ym, store, opts = {}) {
         am ? { label: '愛民系統訂單', amount: r0(aSales) } : null].filter(Boolean) },
     contact_sales: { name: '隱眼業績（帳上）', kind: 'sales', amount: cS.amount, from: cS.from, erp: cSys, basis: salesBasis,
       refs: so ? [{ label: '隱形眼鏡物料', amount: r0(so.contact_lens) }, { label: '護理產品物料', amount: r0(so.care) }] : (erp ? [{ label: 'ERP 帳上（標籤）', amount: cSys }] : []) },
-    glasses_receipt: { name: '眼鏡真實實收', kind: 'receipt', amount: filled('glasses_receipt') ? r0(val('glasses_receipt')) : null, from: 'manual', erp: plus(erp ? erp.glasses : null, aPaid),
-      refs: [erp ? { label: 'ERP 帳上', amount: r0(erp.glasses) } : null, am ? { label: '愛民系統收款', amount: r0(aPaid) } : null].filter(Boolean) },
-    contact_receipt: { name: '隱眼真實實收', kind: 'receipt', amount: filled('contact_receipt') ? r0(val('contact_receipt')) : null, from: 'manual', erp: cSys,
-      refs: erp ? [{ label: 'ERP 帳上', amount: cSys }] : [] },
+    glasses_receipt: { name: '眼鏡真實實收', kind: 'receipt', amount: filled('glasses_receipt') ? r0(val('glasses_receipt')) : null, from: 'manual', erp: bookG,
+      refs: [bk ? { label: 'ERP 帳面實收（不含 API PAY）', amount: r0(bk.glasses) } : null, am ? { label: '愛民系統收款', amount: r0(aPaid) } : null].filter(Boolean) },
+    contact_receipt: { name: '隱眼真實實收', kind: 'receipt', amount: filled('contact_receipt') ? r0(val('contact_receipt')) : null, from: 'manual', erp: bookC,
+      refs: bk && bk.split ? [{ label: 'ERP 帳面實收（不含 API PAY）', amount: r0(bk.contact) }] : [] },
     api_pay: { name: 'API 支付（儲值金消費）', kind: 'other', amount: filled('api_pay') ? r0(val('api_pay')) : apiSys, from: filled('api_pay') ? 'manual' : (apiSys == null ? 'none' : 'system'), erp: apiSys,
       refs: cf ? [{ label: 'ERP 現金流 apiPay', amount: apiSys }, { label: 'ERP 現金流合計（帳上實收）', amount: r0(cf.total) }] : [] },
     stored_value: { name: '儲值收款（不列業績）', kind: 'other', amount: filled('stored_value') ? r0(val('stored_value')) : null, from: 'manual', erp: null, no_source: true },
@@ -605,6 +610,9 @@ async function build(ym, store, opts = {}) {
     totals: {
       glasses_in: glassesIn, contact_in: contactIn, api_in: apiIn, extra_in: extraIn, total_in: totalIn,
       sales_total: salesTotal, receipt_total: receiptTotal, receipt_filled: receiptFilled,
+      glasses_sales: gS.amount, contact_sales: cS.amount,
+      book_glasses_receipt: bookG, book_contact_receipt: bookC, book_receipt_total: bookTotal,
+      bad_debt: salesTotal == null || bookTotal == null ? null : r0(salesTotal - bookTotal),
       left_total: leftTotal, right_total: rightTotal, total_out: totalOut,
       glasses_out: glassesOut, contact_out: contactOut,
       glasses_profit: glassesIn - glassesOut, contact_profit: contactIn + apiIn - contactOut, profit,
@@ -702,6 +710,9 @@ async function overview(ym) {
         const r = snaps[String(s.store_erpid)] ? { ...snaps[String(s.store_erpid)], status: 'closed' } : await build(ym, s.store_erpid, { market: mkt, aimin, planning, storehouse, contracts, sales });
         out.push({ store: s.store_erpid, store_name: s.store_name, status: r.status, total_in: r.totals.total_in, total_out: r.totals.total_out, profit: r.totals.profit,
           sales_total: r.totals.sales_total, receipt_total: r.totals.receipt_filled ? r.totals.receipt_total : null,
+          glasses_sales: r.totals.glasses_sales != null ? r.totals.glasses_sales : (r.revenue.glasses_sales ? r.revenue.glasses_sales.amount : null),
+          contact_sales: r.totals.contact_sales != null ? r.totals.contact_sales : (r.revenue.contact_sales ? r.revenue.contact_sales.amount : null),
+          book_receipt_total: r.totals.book_receipt_total != null ? r.totals.book_receipt_total : null, bad_debt: r.totals.bad_debt != null ? r.totals.bad_debt : null,
           glasses_receipt: r.revenue.glasses_receipt.amount, contact_receipt: r.revenue.contact_receipt.amount, gap_pct: r.gap.total.pct, gap_alert: r.gap.total.alert,
           erp_total: r.revenue.glasses_receipt.erp == null ? null : r.revenue.glasses_receipt.erp + (r.revenue.contact_receipt.erp || 0),
           filled: r.revenue.glasses_receipt.amount != null && r.revenue.contact_receipt.amount != null, warnings: (r.warnings || []).length, imported: !!r.imported });
