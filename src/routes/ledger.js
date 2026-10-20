@@ -9,12 +9,17 @@
 //   DELETE /api/ledger/manual/:id                     作廢手填／調帳（留紀錄）
 //   POST /api/ledger/report/retained                  保留盈餘金額（null＝照預設比例）
 //   GET/POST/DELETE /api/ledger/fixed                 每店固定金額（行銷基金、折舊）
+//   GET  /api/ledger/audit?ym=2026-09[&fresh=1]       查帳提醒（全部門市；services/monthlyAudit.js）
+//   POST /api/ledger/audit/ack                        會計標記：確認沒問題／已處理／要追（{store, ym, rule_key, status, note}）
+//   DELETE /api/ledger/audit/ack/:id                  取消標記
+//   POST /api/ledger/audit/explain                    AI 說明一家店（要 ANTHROPIC_API_KEY）
 // 權限：billing 模組「查看」；寫入要「編輯」；已關帳的月份不能改
 const express = require('express');
 const router = express.Router();
 const supabase = require('../config/supabase');
 const { authenticate, authorizeModule } = require('../middleware/auth');
 const MR = require('../services/monthlyReport');
+const MA = require('../services/monthlyAudit');
 
 router.use(authenticate, authorizeModule('billing', 'view'));
 const canEdit = authorizeModule('billing', 'edit');
@@ -132,6 +137,38 @@ router.post('/fixed', canEdit, async (req, res) => {
 });
 router.delete('/fixed/:id', canEdit, async (req, res) => {
   try { const { error } = await supabase.from('store_fixed_items').delete().eq('id', req.params.id); if (error) throw error; res.json({ success: true }); } catch (e) { fail(res, e); }
+});
+
+
+// ── 查帳提醒 ──
+router.get('/audit', async (req, res) => {
+  try { res.json({ success: true, data: await MA.audit(String(req.query.ym || ''), { fresh: req.query.fresh === '1' }) }); } catch (e) { fail(res, e); }
+});
+router.post('/audit/ack', canEdit, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const store = String(b.store || ''), ym = String(b.ym || ''), key = String(b.rule_key || '');
+    if (!store || !YM.test(ym) || !key) return bad(res, '缺門市／月份／規則');
+    const status = ['ok', 'fixed', 'follow'].includes(b.status) ? b.status : 'ok';
+    const row = { store_erpid: store, ym, rule_key: key, status, note: b.note ? String(b.note).slice(0, 500) : null, created_by: who(req) };
+    const { data, error } = await supabase.from('ledger_audit_acks').upsert(row, { onConflict: 'store_erpid,ym,rule_key' }).select().single();
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (e) { fail(res, e); }
+});
+router.delete('/audit/ack/:id', canEdit, async (req, res) => {
+  try {
+    const { error } = await supabase.from('ledger_audit_acks').delete().eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (e) { fail(res, e); }
+});
+router.post('/audit/explain', async (req, res) => {
+  try {
+    const b = req.body || {};
+    if (!YM.test(String(b.ym || '')) || !b.store) return bad(res, '缺門市／月份');
+    res.json({ success: true, data: await MA.explain(String(b.ym), String(b.store)) });
+  } catch (e) { fail(res, e.response ? new Error(`AI：${e.response.status}`) : e); }
 });
 
 module.exports = router;
