@@ -305,9 +305,14 @@ async function build(ym, store, opts = {}) {
 
   // ERP 門市費用單 → 分店支出雜項（有手填值就以手填為準）
   if (!(byCode.store_misc || []).some((l) => l.source === 'manual_value') && m.costs) {
-    byCode.store_misc = (byCode.store_misc || []).concat(m.costs.items.map((x) => ({
+    // 結帳資料（2026-10-21）：門市有寄出過本月結帳資料 → 只算會計核對通過的費用單；還沒走新流程的月份照舊全算
+    const useVerified = ['submitted', 'reviewing', 'approved', 'returned'].includes(m.costs.closing_status);
+    const src = useVerified ? m.costs.items.filter((x) => x.receipt_status === 'approved') : m.costs.items;
+    if (useVerified && m.costs.pending_count > 0) warnings.push(`分店支出雜項：${m.costs.pending_count} 筆費用單憑證還沒核對通過，先不算進來（結帳資料頁核對）`);
+    byCode.store_misc = (byCode.store_misc || []).concat(src.map((x) => ({
       store_erpid: store, ledger_code: 'store_misc', amount: x.amount, fee_ym: ym, source: 'erp_cost',
       ref_id: String(x.pay_id), ref_title: `ERP 費用單｜${x.date ? String(x.date).slice(0, 10) : ''} ${x.remark || ''}`.trim(),
+      receipt_photos: x.receipt_photos || [], receipt_status: x.receipt_status || 'none', receipt_reviewed_by: x.receipt_reviewed_by || null,
     })));
   } else if (!m.costs && !am) warnings.push('分店支出雜項：這次拿不到 ERP 門市費用單');
   // 愛民門市的門市支出記在 IMING expenses（後甲 8 月 1,797＝試算表）

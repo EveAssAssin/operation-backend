@@ -108,6 +108,8 @@ app.use('/api/operational-expenses', require('./routes/operationalExpenses'));
 
 // 門市月報帳本（科目表／帳本列／每店加總，需 billing 查看）
 app.use('/api/ledger', require('./routes/ledger'));
+// 結帳資料（門市每月繳交清點；代理市場部 internal API，2026-10-21）
+app.use('/api/closing', authenticate, require('./routes/marketClosing'));
 
 // 系統更新模組（從 GitHub 抓 commits 展示開發績效，需登入）
 app.use('/api/system-updates', authenticate, require('./routes/systemUpdates'));
