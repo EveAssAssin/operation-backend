@@ -92,7 +92,8 @@ app.use('/api/dashboard', require('./routes/dashboard'));
 // 人力招募模組（公開跨系統端點先掛，內部端點需登入）
 app.use('/api/recruitment/external', require('./routes/recruitmentExternal'));
 app.use('/api/recruitment', authenticate, require('./routes/recruitment'));
-app.use('/api/hr-tool', authenticate, require('./routes/hrTool'));   // 人事工具：離職後續（2026-10-20）
+app.use('/api/hr-tool', authenticate, require('./routes/hrTool'));
+app.use('/api/vendor-manage', authenticate, require('./routes/vendorManage'));   // 營運管理 → 廠商管理（2026-10-20）   // 人事工具：離職後續（2026-10-20）
 
 // 業績系統活動模組（需登入）
 app.use('/api/sales-events', authenticate, require('./routes/salesEvents'));
