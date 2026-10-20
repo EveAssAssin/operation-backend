@@ -84,7 +84,7 @@ router.get('/products', async (req, res) => {
     if (!q) return res.json({ success: true, data: [] });
     const [f, pt] = await Promise.all([PC.feedGet('billingFeed/products', { q, limit: 60 }), PC.priceTable()]);
     const ym = curYm();
-    res.json({ success: true, data: (f.items || []).map((p) => ({ ...p, price: pt.of(p.bind_id, ym) })) });
+    res.json({ success: true, data: (f.items || []).filter((p) => !PC.isFrame(p)).map((p) => ({ ...p, price: pt.of(p.bind_id, ym) })) });
   } catch (e) { fail(res, e); }
 });
 router.get('/prices', async (req, res) => {

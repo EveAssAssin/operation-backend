@@ -10,6 +10,9 @@ const YM = /^\d{4}-(0[1-9]|1[0-2])$/;
 const FEED_URL = () => (process.env.PROC_FEED_URL || 'https://lohastracking.realtime.tw').replace(/\/+$/, '');
 const LEDGER_CODE = 'lens_lab';
 const addYm = (ym, k) => { const [y, m] = ym.split('-').map(Number); return new Date(Date.UTC(y, m - 1 + k, 1)).toISOString().slice(0, 7); };
+// 鏡框（ERP 物料 镜架／太阳镜）不是加工中心的費用：不列入待設金額、不計價（營運 10-20）
+const FRAME_MATERIEL = /^(镜架|鏡架|太阳镜|太陽鏡|太陽眼鏡)$/;
+const isFrame = (pr) => FRAME_MATERIEL.test(String((pr && pr.materiel) || '').trim());
 const r2 = (n) => Math.round(Number(n || 0) * 100) / 100;
 const tpe = (ts) => new Date(ts * 1000 + 8 * 3600e3).toISOString().slice(0, 16).replace('T', ' ');
 
@@ -80,7 +83,7 @@ async function compute(ym, { fresh } = {}) {
     counted: 0, zero: 0, canceled: 0, other_month: 0, unsynced: 0, order_amount: 0, extra_amount: 0, total: 0, opened: opened[id] || null });
   for (const o of orders) {
     const s = S(String(o.store_id));
-    const lines = (o.bind_ids || []).map((b) => {
+    const lines = (o.bind_ids || []).filter((b) => !isFrame(products[b])).map((b) => {
       const p = prices.of(b, ym); const pr = products[b] || {};
       return { bind_id: String(b), name: pr.name || (p && p.name) || '', brand: pr.brand || '', catena: pr.catena || '',
         materiel: pr.materiel || '', model: pr.model || '', price: p ? Number(p.amount) : null };
@@ -211,4 +214,4 @@ async function reopen(ym, store, actor, reason) {
 }
 
 function clearCache() { cache.clear(); }
-module.exports = { clearCache, feedGet, compute, summary, storeDetail, open, reopen, priceTable, YM, addYm, closedReport };
+module.exports = { isFrame, clearCache, feedGet, compute, summary, storeDetail, open, reopen, priceTable, YM, addYm, closedReport };
