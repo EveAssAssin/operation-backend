@@ -56,18 +56,20 @@ async function setGroup(erpid) {
   cache = { at: 0, data: null };
   lastProbe = 0;
 }
-// ── App「樂活人員」的「投資管理」按鈕：portal 角色「投資管理」＝這份名單（有客編的人）──
+// ── App「樂活人員」的「投資管理」按鈕：portal 角色「投資管理」＝現在或之後還有效的持股人（有客編的）──
 // portal（Supabase dsvmwkbdjeabiizxusrn）rpc investment_sync_members；金鑰明碼 report_settings.portal_invest_key，
 // portal 只存 sha256（private.sync_keys name=investment）。名單沒變就不重送；部門找不到時不送（不要把人清光）。
 const PORTAL_RPC = 'https://dsvmwkbdjeabiizxusrn.supabase.co/rest/v1/rpc/investment_sync_members';
 const PORTAL_PUB = 'sb_publishable_kFqPpN0CTCcanGUQL1HNkQ_XubQw_6d';   // portal 的公開金鑰（publishable，本來就給前端用）
 let lastSent = '';
-/** dept＝股東部門的人；再加上門市基礎設定裡現在或之後有持股的人（一般在職人員也可能是股東） */
-async function syncPortal(dept) {
+/** 2026-10-21 營運：「投資管理」只給門市基礎設定裡「現在或之後還有效」的持股人（結束月份空的或還沒到）；
+    左手「股東群」部門不再自動有入口（部門名單只用在挑股東的下拉選單）。參數 dept 保留不用 */
+async function syncPortal(dept) {   // eslint-disable-line no-unused-vars
   const ym = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 7);
-  const { data: hs } = await supabase.from('store_shareholders').select('app_number, to_ym');
+  const { data: hs, error } = await supabase.from('store_shareholders').select('app_number, to_ym');
+  if (error) throw error;   // 查不到就不送（不要把人清光）
   const holders = (hs || []).filter((h) => h.app_number && (!h.to_ym || h.to_ym >= ym)).map((h) => String(h.app_number));
-  const apps = [...new Set((dept || []).map((x) => x.app_number).filter(Boolean).concat(holders))].sort();
+  const apps = [...new Set(holders)].sort();
   const sig = apps.join(',');
   if (sig === lastSent) return null;
   const { data } = await supabase.from('report_settings').select('value').eq('key', 'portal_invest_key').maybeSingle();
@@ -81,11 +83,8 @@ async function syncPortal(dept) {
 }
 /** 股東有新增／結束／刪除時呼叫（不等左手：用快取的股東部門名單） */
 async function resync() {
-  const ro = cache.data || await roster(false);
-  if (!ro.list || !ro.list.length) return null;   // 左手查不到時不送（不要把股東部門的人清掉）
-  const dept = ro.list.filter((x) => x.in_dept);
   lastSent = '';
-  return syncPortal(dept);
+  return syncPortal();   // 只看持股，不必等左手
 }
 /** 開機後 1 分鐘、之後每 6 小時：重抓名單（順便同步 portal） */
 function startInvestSync() {
