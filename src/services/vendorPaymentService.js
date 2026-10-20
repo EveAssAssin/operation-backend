@@ -7,6 +7,7 @@
 //   - 公司付款方資料（單例）
 
 const supabase = require('../config/supabase');
+const LP = require('./ledgerPost');
 const { notifyMarketStatus } = require('./marketWebhook');
 const { notifyChiLensStatus } = require('./chiLensWebhook');
 
@@ -414,12 +415,53 @@ function fireWebhookIfExternal(row, opStatus, note) {
   }
 }
 
-async function approveRequest(id, actorSystemId) {
+// 入帳設定（2026-10-20 營運：會計按「通過」時就能改入帳月份）：report_ym 入帳月份、ledger_code 月報格子、amort_months 分攤月數
+// 沒填＝照預設（費用月＋收到日，過了截止日列下個月）；寫進帳單時遇到已關帳的月份自動順延
+async function cleanAcct(acct) {
+  if (!acct || typeof acct !== 'object') return null;
+  const out = {};
+  if (acct.report_ym !== undefined) {
+    if (acct.report_ym && !LP.YM.test(String(acct.report_ym))) throw new Error('入帳月份要是 YYYY-MM');
+    out.report_ym = acct.report_ym || null;
+  }
+  if (acct.ledger_code !== undefined) {
+    if (acct.ledger_code) {
+      const { data } = await supabase.from('ledger_accounts').select('code').eq('code', acct.ledger_code).eq('kind', 'expense').maybeSingle();
+      if (!data) throw new Error('沒有這個月報科目');
+    }
+    out.ledger_code = acct.ledger_code || null;
+  }
+  if (acct.amort_months !== undefined) {
+    const n = acct.amort_months ? Math.floor(Number(acct.amort_months)) : null;
+    if (n !== null && !(n >= 1 && n <= 60)) throw new Error('分攤月數要 1～60');
+    out.amort_months = n && n > 1 ? n : null;
+  }
+  return Object.keys(out).length ? out : null;
+}
+async function setAccounting(id, acct, actor) {
+  const c = await cleanAcct(acct);
+  if (!c) throw new Error('沒有要改的入帳設定');
+  const { data: row } = await supabase.from('vendor_payment_requests').select('status, linked_bill_id').eq('id', id).maybeSingle();
+  if (!row) throw new Error('找不到請款單');
+  if (row.linked_bill_id) throw new Error('這筆已經產生帳單進月報了，請到帳單管理改這張帳單的入帳月份／分攤');
+  const { data, error } = await supabase.from('vendor_payment_requests').update({ ...c, acct_set_by: actor || null, acct_set_at: new Date().toISOString() }).eq('id', id).select().single();
+  if (error) throw new Error(error.message);
+  return data;
+}
+async function postBill(billId, row, receivedAt) {
+  try {
+    return await LP.applyToBill(billId, { report_ym: row.report_ym, ledger_code: row.ledger_code, amort_months: row.amort_months, fee_ym: row.period, received_at: receivedAt, by: row.acct_set_by || null });
+  } catch (e) { console.error('[vendorPayment] 套用入帳設定失敗', billId, e && e.message); return null; }
+}
+
+async function approveRequest(id, actorSystemId, acct, actorName) {
+  const c = await cleanAcct(acct);
   const { data, error } = await supabase.from('vendor_payment_requests')
     .update({
       status: 'approved',
       approved_at: new Date().toISOString(),
       approved_by: actorSystemId,
+      ...(c ? { ...c, acct_set_by: actorName || null, acct_set_at: new Date().toISOString() } : {}),
     }).eq('id', id).eq('status', 'submitted').select().single();
   if (error) throw new Error(error.message);
   if (!data) throw new Error('只有送審中的請款可通過');
@@ -427,7 +469,7 @@ async function approveRequest(id, actorSystemId) {
   // 若外部來源 + 有 ticket_details：自動建 bill + allocations（進門市月報）
   try {
     const billId = await maybeCreateLinkedBill(data);
-    if (billId) data.linked_bill_id = billId;
+    if (billId) { data.linked_bill_id = billId; data.posting = await postBill(billId, data, new Date().toISOString()); }
   } catch (e) { console.warn("[vendorPayment] maybeCreateLinkedBill:", e?.message); }
 
     fireWebhookIfMarket(data, 'operation_approved');
@@ -461,7 +503,7 @@ async function markPaid(id, actorSystemId) {
   // 廠商入口的請款：付款完成才進門市月報（營運 2026-10-20）→ 照分配門市產生帳單＋分攤
   try {
     const billId = await billFromAllocations(data);
-    if (billId) data.linked_bill_id = billId;
+    if (billId) { data.linked_bill_id = billId; data.posting = await postBill(billId, data, data.paid_at); }
   } catch (e) { console.warn('[vendorPayment] billFromAllocations:', e && e.message); }
     fireWebhookIfMarket(data, 'operation_completed');
   return data;
@@ -726,7 +768,7 @@ module.exports = {
   listBankAccounts, createBankAccount, updateBankAccount, deleteBankAccount,
   // 請款單
   listRequests, getRequest, createRequest, updateRequest, deleteRequest,
-  submitRequest, approveRequest, rejectRequest, markPaid,
+  submitRequest, approveRequest, rejectRequest, markPaid, setAccounting,
   // 附件
   addFile, deleteFile,
   // 發票

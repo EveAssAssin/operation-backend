@@ -91,8 +91,9 @@ router.delete('/requests/:id',
   async (req, res) => { try { ok(res, await svc.deleteRequest(req.params.id, actorSys(req))); } catch (e) { fail(res, e); } });
 
 router.post('/requests/:id/submit',  async (req, res) => { try { ok(res, await svc.submitRequest(req.params.id, actorSys(req))); }                catch (e) { fail(res, e); } });
-router.post('/requests/:id/approve', async (req, res) => { try { ok(res, await svc.approveRequest(req.params.id, req.user?.id)); }              catch (e) { fail(res, e); } });
+router.post('/requests/:id/approve', async (req, res) => { try { ok(res, await svc.approveRequest(req.params.id, req.user?.id, (req.body || {}).accounting, req.user?.name || req.user?.member_id)); }              catch (e) { fail(res, e); } });
 router.post('/requests/:id/reject',  async (req, res) => { try { ok(res, await svc.rejectRequest(req.params.id, req.body?.reason, req.user?.id)); } catch (e) { fail(res, e); } });
+router.patch('/requests/:id/accounting', async (req, res) => { try { ok(res, await svc.setAccounting(req.params.id, req.body || {}, req.user?.name || req.user?.member_id)); } catch (e) { fail(res, e); } });
 router.post('/requests/:id/mark-paid', async (req, res) => { try { ok(res, await svc.markPaid(req.params.id, req.user?.id)); }                  catch (e) { fail(res, e); } });
 
 // 廠商入口 V1（2026-10-20）：分配門市（會計可調整）、附件上傳私有 bucket

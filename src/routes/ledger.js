@@ -160,6 +160,139 @@ router.delete('/amortize/:group', canEdit, async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
+// ── 帳單入帳設定（2026-10-20）：每一筆分配（某店）的列入月份、科目、分攤 ──
+// 已關帳的月份不能寫入也不能移出；有分攤的要先取消分攤才能改月份
+const LP = require('../services/ledgerPost');
+async function allocView(billId) {
+  const { data: bill } = await supabase.from('bills').select('id, bill_no, title, period, status, report_ym, report_ym_manual, received_at, submitted_at, created_at, confirmed_at, ledger_code, source_id, accounting_category_id, source_system').eq('id', billId).maybeSingle();
+  if (!bill) return null;
+  const [{ data: als }, { data: src }, { data: cat }] = await Promise.all([
+    supabase.from('bill_allocations').select('id, store_erpid, store_name, allocated_amount, report_ym, fee_ym, ledger_code').eq('bill_id', billId).order('store_name'),
+    bill.source_id ? supabase.from('billing_sources').select('name, ledger_code').eq('id', bill.source_id).maybeSingle() : { data: null },
+    bill.accounting_category_id ? supabase.from('accounting_categories').select('name, ledger_code').eq('id', bill.accounting_category_id).maybeSingle() : { data: null },
+  ]);
+  const ids = (als || []).map((a) => a.id);
+  const { data: sch } = ids.length ? await supabase.from('bill_alloc_schedule').select('*').in('allocation_id', ids).order('seq') : { data: [] };
+  const cut = await LP.cutoffDay();
+  const autoYm = bill.report_ym_manual && bill.report_ym ? bill.report_ym : (bill.report_ym || LP.reportYmFor(bill.period, LP.tpeDate(bill.received_at || bill.submitted_at || bill.created_at), cut));
+  const stores = (als || []).map((a) => a.store_erpid);
+  const isC = autoYm ? await LP.closedMap(stores.length ? stores : ['-'], LP.addYm(autoYm, -12), 80) : () => false;
+  const defCode = bill.ledger_code || (cat && cat.ledger_code) || (src && src.ledger_code) || null;
+  const rows = [];
+  for (const a of als || []) {
+    const sc = (sch || []).filter((x) => x.allocation_id === a.id);
+    const valid = sc.length && Math.round(sc.reduce((t, x) => t + Number(x.amount), 0) * 100) === Math.round(Number(a.allocated_amount) * 100);
+    const ym = a.report_ym || (autoYm ? await LP.openYm(a.store_erpid, autoYm, isC) : null);
+    rows.push({ ...a, effective_ym: valid ? null : ym, ym_auto: !a.report_ym, closed: valid ? sc.some((x) => isC(a.store_erpid, x.report_ym)) : !!(ym && isC(a.store_erpid, ym)),
+      effective_code: a.ledger_code || defCode || 'other', code_auto: !a.ledger_code,
+      schedule: valid ? sc.map((x) => ({ seq: x.seq, ym: x.report_ym, amount: Number(x.amount), closed: isC(a.store_erpid, x.report_ym), shifted_from: x.shifted_from })) : [] });
+  }
+  return { bill: { ...bill, source_name: src && src.name, category_name: cat && cat.name, default_code: defCode, auto_ym: autoYm, cutoff: cut }, allocations: rows };
+}
+router.get('/bill/:id', async (req, res) => {
+  try { const v = await allocView(req.params.id); if (!v) return bad(res, '找不到帳單', 404); res.json({ success: true, data: v }); } catch (e) { fail(res, e); }
+});
+router.patch('/allocation/:id', canEdit, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const { data: a } = await supabase.from('bill_allocations').select('id, bill_id, store_erpid').eq('id', req.params.id).maybeSingle();
+    if (!a) return bad(res, '找不到這筆分配', 404);
+    const v = await allocView(a.bill_id);
+    const cur = v.allocations.find((x) => x.id === a.id);
+    const up = {};
+    if (b.ledger_code !== undefined) {
+      if (b.ledger_code && !(await okCode(b.ledger_code))) return bad(res, '沒有這個科目');
+      if (cur.closed) return bad(res, '這筆列入的月份已關帳，不能改科目', 409);
+      up.ledger_code = b.ledger_code || null;
+    }
+    if (b.report_ym !== undefined) {
+      if (cur.schedule.length) return bad(res, '這筆有分攤，請先取消分攤再改月份');
+      if (b.report_ym && !YM.test(String(b.report_ym))) return bad(res, '月份要是 YYYY-MM');
+      if (cur.closed) return bad(res, `${cur.effective_ym} 已關帳，不能移出`, 409);
+      if (b.report_ym && await closed(a.store_erpid, b.report_ym)) return bad(res, `${b.report_ym} 已關帳，請選之後的月份`, 409);
+      up.report_ym = b.report_ym || null;
+    }
+    if (!Object.keys(up).length) return bad(res, '沒有要改的');
+    up.updated_at = new Date().toISOString();
+    const { error } = await supabase.from('bill_allocations').update(up).eq('id', a.id);
+    if (error) throw error;
+    MR.clearBookCache();
+    res.json({ success: true, data: await allocView(a.bill_id) });
+  } catch (e) { fail(res, e); }
+});
+// 分攤：months 1（或 0）＝取消分攤；from_ym 沒填＝目前列入的月份
+router.post('/allocation/:id/schedule', canEdit, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const { data: a } = await supabase.from('bill_allocations').select('id, bill_id, store_erpid, allocated_amount').eq('id', req.params.id).maybeSingle();
+    if (!a) return bad(res, '找不到這筆分配', 404);
+    const v = await allocView(a.bill_id);
+    const cur = v.allocations.find((x) => x.id === a.id);
+    if (cur.schedule.some((x) => x.closed)) return bad(res, '分攤裡已經有月份關帳了，不能重排（要改請記調帳）', 409);
+    if (!cur.schedule.length && cur.closed) return bad(res, `${cur.effective_ym} 已關帳，不能改`, 409);
+    const n = Math.floor(Number(b.months) || 0);
+    await supabase.from('bill_alloc_schedule').delete().eq('allocation_id', a.id);
+    if (n > 1) {
+      if (n > 60) return bad(res, '最多分 60 個月');
+      const from = String(b.from_ym || cur.effective_ym || '');
+      if (!YM.test(from)) return bad(res, '起始月份要是 YYYY-MM');
+      const rows = (await LP.plan(a.store_erpid, a.allocated_amount, from, n)).map((r) => ({ ...r, allocation_id: a.id, created_by: who(req) }));
+      const { error } = await supabase.from('bill_alloc_schedule').insert(rows);
+      if (error) throw error;
+    }
+    MR.clearBookCache();
+    res.json({ success: true, data: await allocView(a.bill_id) });
+  } catch (e) { fail(res, e); }
+});
+// 入帳月份預設（給請款審核畫面）：費用月＋今天收到 → 預設列入月份；同時回這些門市在那個月有沒有關帳
+router.get('/posting-preview', async (req, res) => {
+  try {
+    const fee = String(req.query.fee_ym || ''), want = String(req.query.ym || '');
+    const stores = String(req.query.stores || '').split(',').filter(Boolean);
+    const cut = await LP.cutoffDay();
+    const def = YM.test(fee) ? LP.reportYmFor(fee, LP.tpeDate(), cut) : null;
+    const ym = YM.test(want) ? want : def;
+    const isC = ym && stores.length ? await LP.closedMap(stores, ym, 40) : () => false;
+    const shift = [];
+    for (const s of stores) { const o = await LP.openYm(s, ym, isC); if (o !== ym) shift.push({ store: s, to: o }); }
+    res.json({ success: true, data: { default_ym: def, cutoff: cut, ym, shift } });
+  } catch (e) { fail(res, e); }
+});
+// ── 📒 帳本明細（2026-10-20）：from～to（最多 12 個月）全部門市每一筆支出，可依門市／科目／區塊／來源／關鍵字篩 ──
+router.get('/book', async (req, res) => {
+  try {
+    const from = String(req.query.from || ''), to = String(req.query.to || from);
+    if (!YM.test(from) || !YM.test(to) || to < from) return bad(res, '月份要是 YYYY-MM，且起 ≤ 迄');
+    const yms = []; for (let m = from; m <= to && yms.length < 12; m = LP.addYm(m, 1)) yms.push(m);
+    const months = [];
+    for (const ym of yms) months.push(await MR.bookMonth(ym, { fresh: req.query.fresh === '1' && ym === yms[yms.length - 1] }));
+    const f = { store: String(req.query.store || ''), code: String(req.query.code || ''), group: String(req.query.group || ''), source: String(req.query.source || ''), q: String(req.query.q || '').trim() };
+    let lines = months.flatMap((m) => m.lines);
+    if (f.store) lines = lines.filter((l) => l.store === f.store);
+    if (f.code) lines = lines.filter((l) => l.code === f.code);
+    if (f.group) lines = lines.filter((l) => l.group === f.group);
+    if (f.source) lines = lines.filter((l) => l.source_name === f.source || l.source === f.source);
+    if (f.q) lines = lines.filter((l) => `${l.ref_title || ''} ${l.name} ${l.store_name}`.includes(f.q));
+    const byCode = {}, byStore = {}, bySource = {};
+    for (const l of lines) {
+      const c = (byCode[l.code] = byCode[l.code] || { code: l.code, name: l.name, group: l.group, group_name: l.group_name, months: {}, total: 0 });
+      c.months[l.ym] = (c.months[l.ym] || 0) + l.amount; c.total += l.amount;
+      const s = (byStore[l.store] = byStore[l.store] || { store: l.store, store_name: l.store_name, months: {}, total: 0 });
+      s.months[l.ym] = (s.months[l.ym] || 0) + l.amount; s.total += l.amount;
+      bySource[l.source_name] = (bySource[l.source_name] || 0) + l.amount;
+    }
+    const total = lines.reduce((t, l) => t + l.amount, 0);
+    res.json({ success: true, data: {
+      months: yms, total, count: lines.length,
+      by_code: Object.values(byCode).sort((a, b) => b.total - a.total),
+      by_store: Object.values(byStore).sort((a, b) => b.total - a.total),
+      by_source: Object.entries(bySource).map(([k, v]) => ({ source: k, amount: v })).sort((a, b) => b.amount - a.amount),
+      lines: lines.sort((a, b) => b.ym.localeCompare(a.ym) || String(a.store_name).localeCompare(String(b.store_name), 'zh-Hant') || b.amount - a.amount).slice(0, 3000),
+      truncated: lines.length > 3000, errors: months.flatMap((m) => m.errors.map((e) => ({ ...e, ym: m.ym }))),
+    } });
+  } catch (e) { fail(res, e); }
+});
+
 router.delete('/manual/:id', canEdit, async (req, res) => {
   try {
     const { data: m } = await supabase.from('ledger_manual_entries').select('store_erpid, report_ym').eq('id', req.params.id).maybeSingle();

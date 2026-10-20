@@ -625,6 +625,42 @@ async function build(ym, store, opts = {}) {
   };
 }
 
+/** 帳本明細（2026-10-20）：某月全部門市的每一筆支出（已關帳的用關帳快照），給帳單管理「📒 帳本明細」篩選／趨勢用；快取 5 分鐘 */
+const bookCache = new Map();
+async function bookMonth(ym, { fresh } = {}) {
+  if (!YM.test(ym)) throw new Error('ym 要是 YYYY-MM');
+  const hit = bookCache.get(ym);
+  if (!fresh && hit && Date.now() - hit.at < 5 * 60e3) return hit.v;
+  const { data: units } = await supabase.from('departments').select('store_erpid, store_name, is_active, report_kind').eq('is_active', true).order('store_name');
+  const isStore = (u) => u.report_kind === 'store' || (u.report_kind == null && /店$/.test(String(u.store_name || '')));
+  const list = (units || []).filter((s) => s.store_erpid && isStore(s));
+  const { data: reps } = await supabase.from('store_month_reports').select('store_erpid, status, snapshot').eq('ym', ym).eq('status', 'closed');
+  const snaps = Object.fromEntries((reps || []).filter((r) => r.snapshot).map((r) => [String(r.store_erpid), r.snapshot]));
+  const need = list.filter((s) => !snaps[String(s.store_erpid)]);
+  const shared = need.length ? await Promise.all([marketMonth(ym, need.map((s) => s.store_erpid)), aiminMonth(ym), planningMonth(ym), storehouseMonth(ym), rentContracts(), salesMonth(ym)]) : [];
+  const [market, aimin, planning, storehouse, contracts, sales] = shared;
+  const lines = [], errors = [];
+  let i = 0;
+  const worker = async () => {
+    while (i < list.length) {
+      const s = list[i++];
+      const id = String(s.store_erpid);
+      try {
+        const r = snaps[id] || await build(ym, id, { market, aimin, planning, storehouse, contracts, sales, withLines: true });
+        for (const g of [...(r.left || []), ...(r.right || [])]) for (const row of g.rows || []) for (const l of row.lines || []) {
+          lines.push({ ym, store: id, store_name: s.store_name, closed: !!snaps[id], code: row.code, name: row.name, group: g.group, group_name: g.name,
+            amount: Number(l.amount) || 0, source: l.source, source_name: l.source_name || SOURCE_NAME[l.source] || l.source, ref_id: l.ref_id, ref_title: l.ref_title, fee_ym: l.fee_ym || null });
+        }
+      } catch (e) { errors.push({ store: id, store_name: s.store_name, error: e.message }); }
+    }
+  };
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  const v = { ym, lines, errors };
+  bookCache.set(ym, { at: Date.now(), v });
+  return v;
+}
+function clearBookCache() { bookCache.clear(); }
+
 /** 全部門市一覽（每店一列：實收、總支出、盈餘） */
 async function overview(ym) {
   if (!YM.test(ym)) throw new Error('ym 要是 YYYY-MM');
@@ -677,4 +713,4 @@ async function overview(ym) {
 }
 
 module.exports = {
-  rentChecks, salesMonth, rentBasics, rentContracts, rentForMonth, storehouseMonth, clearStorehouseCache, SH_DEFAULT, planningMonth, aiminMonth, build, overview, accounts, settings, marketMonth, YM, GROUP_NAME, SOURCE_NAME };
+  rentChecks, salesMonth, rentBasics, rentContracts, rentForMonth, storehouseMonth, clearStorehouseCache, SH_DEFAULT, bookMonth, clearBookCache, planningMonth, aiminMonth, build, overview, accounts, settings, marketMonth, YM, GROUP_NAME, SOURCE_NAME };
