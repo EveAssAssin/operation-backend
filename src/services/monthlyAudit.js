@@ -161,6 +161,12 @@ async function audit(ym, opts = {}) {
       if (v >= 1000 && v % 1000 === 0 && manual) add({ store: id, store_name: s.name, sev: 'low', key: `estimate:${code}`, code,
         title: `${cn(code)} ${fmt(v)} 是整千`, detail: '看起來是先估的，帳單到了記得改成實際金額。', amount: v });
     }
+    // 帳進來了但沒設月報科目（廠商／會計科目沒對到）→ 落在「其他」
+    const unc = (s.lines || []).filter((l) => l.code === 'other' && !/^manual/.test(l.source));
+    if (unc.length) add({ store: id, store_name: s.name, sev: 'mid', key: 'uncoded', code: 'other',
+      title: `${unc.length} 筆帳沒設月報科目，暫時放在「其他」（${fmt(unc.reduce((a, l) => a + l.amount, 0))}）`,
+      detail: `${unc.slice(0, 3).map((l) => String(l.title).slice(0, 30)).join('；')}。到「⚙ 科目與廠商」幫這個廠商／會計科目選月報上的格子，之後同一家的帳就會自動歸位。`,
+      amount: unc.reduce((a, l) => a + l.amount, 0) });
     const negs = (s.lines || []).filter((l) => l.amount < 0);
     const negBy = {};
     negs.forEach((l) => { negBy[l.code] = (negBy[l.code] || 0) + l.amount; });

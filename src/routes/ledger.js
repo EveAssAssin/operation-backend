@@ -1,6 +1,8 @@
 // routes/ledger.js —— 門市月報帳本（P0 2026-10-20；P1 月報同日）
 // 規劃：app/pet-feature/PLAN_門市月報與開帳_20261020.md
 //   GET  /api/ledger/accounts                         科目表
+//   POST /api/ledger/accounts、PATCH /accounts/:code   新增／改科目（新科目自動排進月報那一區）
+//   GET  /api/ledger/mapping、PATCH /mapping/source/:id、/mapping/category/:id   廠商／會計科目 → 月報科目
 //   GET  /api/ledger/lines?ym=2026-09[&store=120085]  帳本每一列
 //   GET  /api/ledger/summary?ym=2026-09[&store=]      每店×科目加總
 //   GET  /api/ledger/overview?ym=2026-09              全部門市一覽
@@ -226,6 +228,75 @@ router.post('/report/reviewer-note', canEdit, async (req, res) => {
     const { error } = await supabase.from('store_month_reports').upsert({ store_erpid: String(b.store), ym: String(b.ym), reviewer_note: b.note ? String(b.note).slice(0, 2000) : null, updated_at: new Date().toISOString() }, { onConflict: 'store_erpid,ym' });
     if (error) throw error;
     res.json({ success: true });
+  } catch (e) { fail(res, e); }
+});
+
+
+// ── 科目與廠商（2026-10-20）：新科目、廠商／會計科目對應到月報哪一格 ──
+// 帳單歸格順序（ledger_lines）：分攤列 ledger_code → 帳單 → 廠商的會計科目 accounting_categories → 廠商 billing_sources → 「其他」
+const GROUPS = ['opex', 'planning', 'ads', 'misc', 'frame', 'lens', 'contact'];
+router.get('/mapping', async (req, res) => {
+  try {
+    const since = new Date(Date.now() - 120 * 864e5).toISOString();
+    const [{ data: srcs }, { data: cats }, { data: bills }] = await Promise.all([
+      supabase.from('billing_sources').select('id, name, short_name, source_type, ledger_code, is_active').order('source_type').order('name'),
+      supabase.from('accounting_categories').select('id, source_id, name, ledger_code, is_active, sort_order').order('sort_order'),
+      supabase.from('bills').select('source_id, accounting_category_id, total_amount').gte('created_at', since).is('void_at', null),
+    ]);
+    const cnt = {};
+    for (const b of bills || []) { const k = `${b.source_id}|${b.accounting_category_id || ''}`; cnt[k] = (cnt[k] || 0) + 1; cnt[`${b.source_id}|*`] = (cnt[`${b.source_id}|*`] || 0) + 1; }
+    res.json({ success: true, data: (srcs || []).map((s) => ({ ...s, bills_120d: cnt[`${s.id}|*`] || 0,
+      categories: (cats || []).filter((c) => c.source_id === s.id).map((c) => ({ ...c, bills_120d: cnt[`${s.id}|${c.id}`] || 0 })) })) });
+  } catch (e) { fail(res, e); }
+});
+const okCode = async (code) => { if (code === null || code === '') return true; const { data } = await supabase.from('ledger_accounts').select('code').eq('code', code).maybeSingle(); return !!data; };
+router.patch('/mapping/source/:id', canEdit, async (req, res) => {
+  try {
+    const code = (req.body || {}).ledger_code || null;
+    if (!(await okCode(code))) return bad(res, '沒有這個科目');
+    const { error } = await supabase.from('billing_sources').update({ ledger_code: code }).eq('id', req.params.id);
+    if (error) throw error; res.json({ success: true });
+  } catch (e) { fail(res, e); }
+});
+router.patch('/mapping/category/:id', canEdit, async (req, res) => {
+  try {
+    const code = (req.body || {}).ledger_code || null;
+    if (!(await okCode(code))) return bad(res, '沒有這個科目');
+    const { error } = await supabase.from('accounting_categories').update({ ledger_code: code }).eq('id', req.params.id);
+    if (error) throw error; res.json({ success: true });
+  } catch (e) { fail(res, e); }
+});
+router.post('/accounts', canEdit, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const name = String(b.name || '').trim();
+    if (!name) return bad(res, '要填科目名稱');
+    if (!GROUPS.includes(b.group_code)) return bad(res, '要選放在月報哪一區');
+    const { data: same } = await supabase.from('ledger_accounts').select('code').eq('name', name).maybeSingle();
+    if (same) return bad(res, `已經有「${name}」這個科目了`);
+    const { data: last } = await supabase.from('ledger_accounts').select('sort_order').eq('group_code', b.group_code).order('sort_order', { ascending: false }).limit(1).maybeSingle();
+    const code = `x_${Date.now().toString(36)}`;
+    const row = { code, name, group_code: b.group_code, kind: 'expense', ratio_group: b.ratio_group || null,
+      auto_source: b.auto_source === 'manual' ? 'manual' : 'bill', sort_order: ((last && last.sort_order) || 0) + 1, is_active: true,
+      note: `新增於 ${new Date().toISOString().slice(0, 10)}，${who(req)}` };
+    const { data, error } = await supabase.from('ledger_accounts').insert(row).select().single();
+    if (error) throw error; res.json({ success: true, data });
+  } catch (e) { fail(res, e); }
+});
+router.patch('/accounts/:code', canEdit, async (req, res) => {
+  try {
+    const b = req.body || {}, up = {};
+    if (b.name !== undefined) { if (!String(b.name).trim()) return bad(res, '名稱不能空白'); up.name = String(b.name).trim(); }
+    if (b.ratio_group !== undefined) up.ratio_group = b.ratio_group || null;
+    if (b.is_active !== undefined) up.is_active = !!b.is_active;
+    if (b.sort_order !== undefined) up.sort_order = Number(b.sort_order) || 0;
+    if (b.group_code !== undefined) { if (!GROUPS.includes(b.group_code)) return bad(res, '區不對'); up.group_code = b.group_code; }
+    if (up.is_active === false) {
+      const { count } = await supabase.from('bill_allocations').select('id', { count: 'exact', head: true }).eq('ledger_code', req.params.code);
+      if (count) return bad(res, `還有 ${count} 筆帳指定這個科目，先改掉再停用`);
+    }
+    const { error } = await supabase.from('ledger_accounts').update(up).eq('code', req.params.code);
+    if (error) throw error; res.json({ success: true });
   } catch (e) { fail(res, e); }
 });
 
