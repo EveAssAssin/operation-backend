@@ -170,7 +170,7 @@ async function audit(ym, opts = {}) {
     // 房租合約：沒合約、只有報稅版、合約快到期／已過期但還在付、實付比合約總額少超過扣繳範圍
     const rt = s.rent || { contracts: [] };
     if (!rt.contracts.length) add({ store: id, store_name: s.name, sev: ((s.codes || {}).rent ? 'low' : 'mid'), key: 'rent:nocontract', code: 'rent',
-      title: (s.codes || {}).rent ? `房租還沒有合約（目前用固定支出 ${fmt((s.codes || {}).rent)}）` : '這家店沒有房租（沒合約也沒固定支出）',
+      title: (s.codes || {}).rent ? `房租還沒有合約（目前${rt.from_basic ? '暫用基本資料' : '用固定支出'} ${fmt((s.codes || {}).rent)}）` : '這家店沒有房租（沒合約、基本資料也沒填）',
       detail: '到「合約管理」新增房租合約並選這家門市，月報就會改用合約金額。', amount: (s.codes || {}).rent || null });
     if (rt.only_tax) add({ store: id, store_name: s.name, sev: 'mid', key: 'rent:onlytax', code: 'rent', title: '房租只有「報稅版」合約',
       detail: '月報要用實際合約；請把實際那份上傳並選「實際」。', amount: null });
@@ -179,6 +179,10 @@ async function audit(ym, opts = {}) {
         if (left < 0 && rt.paid) add({ store: id, store_name: s.name, sev: 'high', key: `rent:expired:${c.id}`, code: 'rent', title: `房租合約 ${c.end_date} 已到期，但還在付`, detail: `「${c.name}」要續約或停付。`, amount: rt.paid });
         else if (left >= 0 && left < 90) add({ store: id, store_name: s.name, sev: 'low', key: `rent:expiring:${c.id}`, code: 'rent', title: `房租合約 ${c.end_date} 到期`, detail: `「${c.name}」剩不到 3 個月，記得談續約。`, amount: null }); }
     }
+    const bref = rt.basic ? (rt.basic.contract_rent || rt.basic.actual_rent) : null;
+    const dueC = rt.contracts.reduce((a, c) => a + (c.amount || 0), 0);
+    if (dueC && bref && Math.abs(dueC - bref) / bref > 0.15) add({ store: id, store_name: s.name, sev: 'mid', key: 'rent:basicdiff', code: 'rent',
+      title: `房租合約 ${fmt(dueC)}，基本資料寫 ${fmt(bref)}`, detail: `差很多：可能還有一份合約沒建（例如本店＋驗光所分開租），或基本資料沒更新。基本資料月報應列金額 ${fmt(rt.basic.report_amount)}。`, amount: dueC - bref });
     const due = rt.contracts.reduce((a, c) => a + (c.amount || 0), 0);
     if (due && rt.paid != null && (rt.paid > due * 1.001 || rt.paid < due * 0.85)) add({ store: id, store_name: s.name, sev: 'mid', key: 'rent:paid', code: 'rent',
       title: `房租實付 ${fmt(rt.paid)}，合約 ${fmt(due)}`, detail: '扣繳（10%＋二代健保）後通常是合約的 88～95%；差太多要看是不是金額改了沒更新。', amount: rt.paid - due });

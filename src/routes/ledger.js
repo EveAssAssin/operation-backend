@@ -2,6 +2,7 @@
 // 規劃：app/pet-feature/PLAN_門市月報與開帳_20261020.md
 //   GET  /api/ledger/accounts                         科目表
 //   POST /api/ledger/accounts、PATCH /accounts/:code   新增／改科目（新科目自動排進月報那一區）
+//   GET  /api/ledger/store-profile?store=&ym=          門市基礎設定（基本資料＋合約＋固定支出付款＋行銷基金折舊＋股東）
 //   GET  /api/ledger/mapping、PATCH /mapping/source/:id、/mapping/category/:id   廠商／會計科目 → 月報科目
 //   GET  /api/ledger/lines?ym=2026-09[&store=120085]  帳本每一列
 //   GET  /api/ledger/summary?ym=2026-09[&store=]      每店×科目加總
@@ -297,6 +298,46 @@ router.patch('/accounts/:code', canEdit, async (req, res) => {
     }
     const { error } = await supabase.from('ledger_accounts').update(up).eq('code', req.params.code);
     if (error) throw error; res.json({ success: true });
+  } catch (e) { fail(res, e); }
+});
+
+
+// ── 門市基礎設定（2026-10-20，C2）：一家店一頁＝基本資料（房租／電／水／電話網路／金雞）＋房租合約＋固定支出與付款狀態＋行銷基金折舊＋股東 ──
+const HIDE_KEYS = /pass|pwd|密碼/i;   // 網路密碼等不回前端（安全待修 #7：之後改加密存放）
+router.get('/store-profile', async (req, res) => {
+  try {
+    const store = String(req.query.store || '');
+    if (!store) return bad(res, '缺門市');
+    const ym = YM.test(String(req.query.ym || '')) ? String(req.query.ym) : new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 7);
+    const [{ data: dept }, { data: cats }, { data: fields }, { data: facts }, { data: cons }, { data: recs }, { data: fixed }, { data: holders }] = await Promise.all([
+      supabase.from('departments').select('store_erpid, store_name, report_kind').eq('store_erpid', store).maybeSingle(),
+      supabase.from('entity_fact_categories').select('id, name, icon'),
+      supabase.from('entity_fact_fields').select('category_id, field_key, field_label, sort_order').order('sort_order'),
+      supabase.from('entity_facts').select('id, category_id, data, note, updated_at').eq('store_erpid', store),
+      supabase.from('contracts').select('id, type, name, purpose, status, start_date, end_date, monthly_amount, type_data, party_name, renewed_from, payment, note').eq('store_erpid', store).order('start_date', { ascending: false }),
+      supabase.from('recurring_expenses').select('id, name, amount, payment_method, payee_name, cycle_day, ledger_code, period_text, is_active').eq('store_erpid', store),
+      supabase.from('store_fixed_items').select('*').eq('store_erpid', store).order('from_ym'),
+      supabase.from('store_shareholders').select('*').eq('store_erpid', store),
+    ]);
+    const catName = Object.fromEntries((cats || []).map((c) => [c.id, c.name]));
+    const basics = (facts || []).map((f) => {
+      const fl = (fields || []).filter((x) => x.category_id === f.category_id);
+      const rows = fl.filter((x) => f.data && f.data[x.field_key] != null && String(f.data[x.field_key]).trim() !== '')
+        .map((x) => ({ key: x.field_key, label: x.field_label, value: HIDE_KEYS.test(x.field_key) ? '（已存，不顯示）' : f.data[x.field_key] }));
+      return { id: f.id, category: catName[f.category_id] || '其他', rows, updated_at: f.updated_at };
+    });
+    const ids = (recs || []).map((r) => r.id);
+    const { data: pays } = ids.length ? await supabase.from('recurring_expense_payments').select('expense_id, year_month, amount, status, due_date, paid_at')
+      .in('expense_id', ids).gte('year_month', (() => { const [y, m] = ym.split('-').map(Number); const d = new Date(Date.UTC(y, m - 6, 1)); return d.toISOString().slice(0, 7); })())
+      .lte('year_month', ym).order('year_month') : { data: [] };
+    const today = new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10);
+    const contracts = (cons || []).map((c) => ({ ...c, this_month: c.type === 'rent' ? MR.rentForMonth(c, ym) : null,
+      days_left: c.end_date ? Math.round((Date.parse(c.end_date) - Date.parse(today)) / 864e5) : null }));
+    res.json({ success: true, data: {
+      store, store_name: dept ? dept.store_name : store, ym, basics, contracts,
+      recurring: (recs || []).map((r) => ({ ...r, payments: (pays || []).filter((p) => p.expense_id === r.id) })),
+      fixed: fixed || [], shareholders: holders || [],
+    } });
   } catch (e) { fail(res, e); }
 });
 

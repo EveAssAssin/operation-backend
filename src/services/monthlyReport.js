@@ -18,7 +18,7 @@ const RATIO_TARGET = { 人事: 23, 包裝: 10, 鏡片: 15, 鏡框: 12, 營運費
 const DIVIDEND_CODES = ['marketing_fund', 'depreciation'];
 const SOURCE_NAME = {
   bill: '開帳單', billing_order: '部門開帳', opex: '營運費用', recurring: '固定支出', fixed: '固定金額',
-  manual_value: '手填', manual_adjust: '調帳', erp_cost: 'ERP 費用單', aimin_expense: '愛民支出', planning_bill: '企劃部開帳', storehouse: '倉庫開帳', contract: '合約',
+  manual_value: '手填', manual_adjust: '調帳', erp_cost: 'ERP 費用單', aimin_expense: '愛民支出', planning_bill: '企劃部開帳', storehouse: '倉庫開帳', contract: '合約', basic: '基本資料',
 };
 
 const MARKET_BASE = process.env.MARKET_BACKEND_URL || 'https://market-backend-0544.onrender.com';
@@ -156,6 +156,27 @@ async function storehouseMonth(ym) {
 
 // ── 房租從合約來（2026-10-20 營運定案：月報用合約總額＝含扣繳；有「實際」與「報稅」兩份時用實際那份）──
 // contracts.type=rent、store_erpid、status 不是 archived；金額照 type_data.rent_schedule 分段，跨月照天數拆
+
+// 基本資料「房租」（entity_facts，營運部「基本資料」頁維護；26 家都有）：合約租金／實付租金／月報應列金額／租賃稅／二代健保
+// 月報：有房租合約用合約；沒有合約才用這裡的「合約租金」（沒填用「實付租金」）當暫代，查帳提醒會標「還沒有合約」
+let basicsCache = { at: 0, v: null };
+async function rentBasics() {
+  if (basicsCache.v && Date.now() - basicsCache.at < 5 * 60e3) return basicsCache.v;
+  const { data: cats } = await supabase.from('entity_fact_categories').select('id, name').eq('name', '房租');
+  const ids = (cats || []).map((c) => c.id);
+  const { data } = ids.length ? await supabase.from('entity_facts').select('store_erpid, store_name, data, updated_at').in('category_id', ids) : { data: [] };
+  const num = (v) => { const n = Number(String(v == null ? '' : v).replace(/,/g, '')); return Number.isFinite(n) && String(v).trim() !== '' ? n : null; };
+  const v = {};
+  for (const r of data || []) {
+    if (!r.store_erpid) continue;
+    const d = r.data || {};
+    v[String(r.store_erpid)] = { contract_rent: num(d.contract_rent), actual_rent: num(d.actual_rent), report_amount: num(d.report_amount),
+      rent_tax: num(d.rent_tax), health_insurance: num(d.health_insurance), optical_rent: num(d.optical_rent), check_amount: d.check_amount || null, note: d.note || null, updated_at: r.updated_at };
+  }
+  basicsCache = { at: Date.now(), v };
+  return v;
+}
+
 async function rentContracts() {
   const { data } = await supabase.from('contracts').select('id, name, store_erpid, purpose, status, start_date, end_date, monthly_amount, type_data, party_name')
     .eq('type', 'rent').not('store_erpid', 'is', null).neq('status', 'archived');
@@ -201,7 +222,7 @@ async function build(ym, store, opts = {}) {
   if (!YM.test(ym)) throw new Error('ym 要是 YYYY-MM');
   store = String(store || '');
   if (!store) throw new Error('缺門市');
-  const [accs, st, linesR, mkt, aimin, rep, fixed, holders, dept, plan, sh, rcs] = await Promise.all([
+  const [accs, st, linesR, mkt, aimin, rep, fixed, holders, dept, plan, sh, rcs, rbs] = await Promise.all([
     accounts(),
     settings(),
     supabase.rpc('ledger_lines', { p_ym: ym }).eq('store_erpid', store),
@@ -214,6 +235,7 @@ async function build(ym, store, opts = {}) {
     opts.planning || planningMonth(ym),
     opts.storehouse || storehouseMonth(ym),
     opts.contracts || rentContracts(),
+    rentBasics(),
   ]);
   if (linesR.error) throw linesR.error;
   const lines = linesR.data || [];
@@ -269,6 +291,17 @@ async function build(ym, store, opts = {}) {
     rentInfo.paid = paidLines.length ? Math.round(paidLines.reduce((a, l) => a + Number(l.amount || 0), 0)) : null;
     rentInfo.only_tax = useRc.every((c) => c.purpose === 'tax');
     byCode.rent = rest.concat(cl);
+  }
+  // 沒有合約：用基本資料的房租暫代（合約租金→沒填用實付租金），固定支出付款照樣當實付參考
+  const rb = (rbs || {})[store] || null;
+  rentInfo.basic = rb;
+  if (!useRc.length && rb && (rb.contract_rent || rb.actual_rent) && !(byCode.rent || []).some((l) => l.source === 'manual_value')) {
+    const paidLines = (byCode.rent || []).filter((l) => l.source === 'recurring');
+    rentInfo.paid = paidLines.length ? Math.round(paidLines.reduce((a, l) => a + Number(l.amount || 0), 0)) : null;
+    const amt = rb.contract_rent || rb.actual_rent;
+    byCode.rent = (byCode.rent || []).filter((l) => l.source !== 'recurring').concat([{ store_erpid: store, ledger_code: 'rent', amount: amt, fee_ym: ym, source: 'basic',
+      ref_id: `basic-rent-${store}`, ref_title: `基本資料｜${rb.contract_rent ? '合約租金' : '實付租金'}（還沒有房租合約，暫用基本資料）` }]);
+    rentInfo.from_basic = amt;
   }
   // 倉庫開帳（常備品撥補＋產品出貨）→ 科目照 storehouse_ledger；那一格有手填值就以手填為準
   if (sh.error) warnings.push(sh.error);
@@ -332,13 +365,13 @@ async function build(ym, store, opts = {}) {
   const gS = sysOr('glasses_sales', gSys);
   const cS = sysOr('contact_sales', cSys);
   const revenue = {
-    glasses_sales: { name: '眼鏡業績', kind: 'sales', amount: gS.amount, from: gS.from, erp: gSys,
+    glasses_sales: { name: '眼鏡業績（帳上）', kind: 'sales', amount: gS.amount, from: gS.from, erp: gSys,
       refs: [erp ? { label: 'ERP 帳上', amount: r0(erp.glasses) } : null, am ? { label: '愛民系統訂單', amount: r0(aSales) } : null].filter(Boolean) },
-    contact_sales: { name: '藥拋業績', kind: 'sales', amount: cS.amount, from: cS.from, erp: cSys,
+    contact_sales: { name: '隱眼業績（帳上，晶碩＋藥拋標籤）', kind: 'sales', amount: cS.amount, from: cS.from, erp: cSys,
       refs: erp ? [{ label: 'ERP 帳上', amount: cSys }] : [] },
-    glasses_receipt: { name: '眼鏡實收', kind: 'receipt', amount: filled('glasses_receipt') ? r0(val('glasses_receipt')) : null, from: 'manual', erp: plus(erp ? erp.glasses : null, aPaid),
+    glasses_receipt: { name: '眼鏡真實實收', kind: 'receipt', amount: filled('glasses_receipt') ? r0(val('glasses_receipt')) : null, from: 'manual', erp: plus(erp ? erp.glasses : null, aPaid),
       refs: [erp ? { label: 'ERP 帳上', amount: r0(erp.glasses) } : null, am ? { label: '愛民系統收款', amount: r0(aPaid) } : null].filter(Boolean) },
-    contact_receipt: { name: '藥拋實收', kind: 'receipt', amount: filled('contact_receipt') ? r0(val('contact_receipt')) : null, from: 'manual', erp: cSys,
+    contact_receipt: { name: '隱眼真實實收', kind: 'receipt', amount: filled('contact_receipt') ? r0(val('contact_receipt')) : null, from: 'manual', erp: cSys,
       refs: erp ? [{ label: 'ERP 帳上', amount: cSys }] : [] },
     api_pay: { name: 'API 支付', kind: 'other', amount: filled('api_pay') ? r0(val('api_pay')) : null, from: 'manual', erp: null, no_source: true },
     stored_value: { name: '儲值收款（不列業績）', kind: 'other', amount: filled('stored_value') ? r0(val('stored_value')) : null, from: 'manual', erp: null, no_source: true },
@@ -490,4 +523,4 @@ async function overview(ym) {
   return { ym, stores: out, others: Object.values(other).sort((a, b) => b.total - a.total), market_error: mkt.error || null, aimin_error: aimin.error || null };
 }
 
-module.exports = { rentContracts, rentForMonth, storehouseMonth, planningMonth, aiminMonth, build, overview, accounts, settings, marketMonth, YM, GROUP_NAME, SOURCE_NAME };
+module.exports = { rentBasics, rentContracts, rentForMonth, storehouseMonth, planningMonth, aiminMonth, build, overview, accounts, settings, marketMonth, YM, GROUP_NAME, SOURCE_NAME };
