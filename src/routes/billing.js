@@ -243,6 +243,19 @@ router.post('/sync/chi-finance-lens', async (req, res) => {
   }
 });
 
+// 路奇自動同步：GET＝上次結果、POST＝現在跑一次（上月＋本月，1～10 日多補上上月）
+router.get('/sync/chi-finance-lens/auto', async (_req, res) => {
+  const supabase = require('../config/supabase');
+  const { data } = await supabase.from('report_settings').select('value, updated_at').eq('key', 'chi_lens_auto_sync').maybeSingle();
+  res.json({ success: true, data: data?.value || null });
+});
+router.post('/sync/chi-finance-lens/auto', async (_req, res) => {
+  try {
+    const { runChiLensAutoSync } = require('../jobs/syncChiLens');
+    res.json({ success: true, data: await runChiLensAutoSync('manual') });
+  } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
 // 同步狀態查詢（給前端 polling 用，最近一次同步結果）
 const _chiLensStatus = { lastRunAt: null, lastResult: null, lastError: null };
 router.get('/sync/chi-finance-lens/status', (_req, res) => {

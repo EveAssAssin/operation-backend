@@ -199,6 +199,7 @@ app.post('/api/internal/sync-line-uid', async (req, res) => {
 const { startScheduledSync }                  = require('./jobs/syncEmployees');
 const { startLineUidScheduledSync }           = require('./jobs/syncLineUid');
 const { startBillingScheduledSync }           = require('./jobs/syncBilling');
+const { startChiLensSyncJob }                 = require('./jobs/syncChiLens');
 const { startHubPoller }                      = require('./jobs/hubPoller');
 const { startCheckNotifyJob }                 = require('./jobs/checkNotify');
 const { startVendorPayoutNotifyJob }          = require('./jobs/vendorPayoutNotify');
@@ -239,6 +240,7 @@ app.use((err, req, res, next) => {
   startScheduledSync();
   startLineUidScheduledSync();
   startBillingScheduledSync();
+  startChiLensSyncJob();             // 每天 02:30 路奇鏡片帳單（上月＋本月）
   startHubPoller();                  // 每 5 分鐘自動掃 Hub 收件匣
   startCheckNotifyJob();             // 每天 10:00 支票到期通知
   require('./services/resignClient').startBlockedSync();   // 離職停權名單（每 5 分鐘）

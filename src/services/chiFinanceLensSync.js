@@ -30,6 +30,7 @@ const axios    = require('axios');
 const supabase = require('../config/supabase');
 
 const SOURCE_CODE = 'CHI-LENS';
+const ledgerPost = require('./ledgerPost');
 
 // vendor 代號 → 顯示名稱：從 chi_vendors 表動態讀
 // syncChiFinanceLens() 開頭會先 buildVendorMap() 填 currentVendorMap
@@ -322,8 +323,13 @@ async function syncChiFinanceLens(period) {
     }
   }
 
+  // 入帳月份：API 帳單是「晚拉」不是「晚到」→ 列在費用月本身（period）；該店那月已關帳才順延。
+  // 會計在帳單上手動改過的（report_ym 有值）不覆蓋。
+  const isClosedFn = await ledgerPost.closedMap(Object.values(perBucket).map((b) => b.store_erpid), period);
+
   for (const [bucketKey, stat] of Object.entries(perBucket)) {
     const { store_erpid, store_name: branchName, vendor } = stat;
+    const postYm = await ledgerPost.openYm(store_erpid, period, isClosedFn);
     // 排除：chi-finance 內部單位（例如「中部加工中心」，如果有的話）
     if (SKIP_BRANCHES.has(branchName)) {
       skippedBranches.push({ branch_name: branchName, vendor, net: stat.net });
@@ -399,7 +405,7 @@ async function syncChiFinanceLens(period) {
     // 5-3. allocation upsert（這張表 (bill_id, store_erpid) 有 UNIQUE 沒有 partial 條件，用 onConflict OK）
     const { data: oldAlloc } = await supabase
       .from('bill_allocations')
-      .select('id')
+      .select('id, report_ym')
       .eq('bill_id', billId)
       .eq('store_erpid', store_erpid)
       .maybeSingle();
@@ -411,6 +417,7 @@ async function syncChiFinanceLens(period) {
           store_name:       branchName,
           allocated_amount: stat.net,
           confirm_status:   'confirmed',
+          ...(oldAlloc.report_ym ? {} : { report_ym: postYm }),
           updated_at:       now,
         })
         .eq('id', oldAlloc.id);
@@ -424,6 +431,7 @@ async function syncChiFinanceLens(period) {
           store_name:       branchName,
           allocated_amount: stat.net,
           confirm_status:   'confirmed',
+          report_ym:        postYm,
           updated_at:       now,
         }]);
       if (aInsErr) writeErrors.push({ branch: branchName, step: 'insert_alloc', message: aInsErr.message });

@@ -215,17 +215,7 @@ async function incrementalSync() {
       }
     }
 
-    // 增量同步額外加掛：路奇天格鏡片帳單（同步本月與上月，避免漏單）
-    const { syncChiFinanceLens } = require('./chiFinanceLensSync');
-    const now = new Date();
-    const cur  = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    const prev = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-    const prevStr = `${prev.getFullYear()}-${String(prev.getMonth() + 1).padStart(2, '0')}`;
-    for (const m of [prevStr, cur]) {
-      await syncChiFinanceLens(m).catch(err =>
-        console.warn(`[ChiLens] 增量 ${m} 同步失敗（不影響主流程）：${err.message}`)
-      );
-    }
+    // 路奇鏡片帳單改由 jobs/syncChiLens.js 每天 02:30 獨立同步（不再掛在這裡，這支失敗會連帶跳過）
 
     // 企劃部廣告費：已由 /api/billing/ad-sync-v2 統一處理，此處不再重複呼叫
 
