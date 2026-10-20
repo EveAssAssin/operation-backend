@@ -280,6 +280,14 @@ async function salesMonth(ym) {
 
 const splitTitle = (t) => { const s = String(t || ''); const i = s.indexOf('｜'); return i < 0 ? [s, ''] : [s.slice(0, i), s.slice(i + 1)]; };
 const r0 = (n) => Math.round(Number(n) || 0);
+// 同一個來源底下的子廠商（2026-10-20）：路奇 API 的帳單標題是「路奇創意科技-天格 鏡片費用 …」→ 月報格子裡的廠商小計分開列「路奇創意科技-天格」「路奇創意科技-康德」
+const SUB_VENDOR_CODE = { RK01: '天格', RK02: '康德' };
+function subVendor(refTitle) {
+  const [src, title] = splitTitle(refTitle);
+  if (!src || !title || !title.startsWith(src + '-')) return null;
+  const sub = title.slice(src.length + 1).split(/\s/)[0];
+  return sub ? `${src}-${SUB_VENDOR_CODE[sub] || sub}` : null;
+}
 const monthsBetween = (a, b) => { const [y1, m1] = a.split('-').map(Number); const [y2, m2] = b.split('-').map(Number); return (y2 - y1) * 12 + (m2 - m1) + 1; };
 
 async function settings() {
@@ -431,6 +439,7 @@ async function build(ym, store, opts = {}) {
     const vendors = {};
     for (const l of ls) {
       let [v] = splitTitle(l.ref_title);
+      if (l.source === 'bill') v = subVendor(l.ref_title) || v;
       if (['opex', 'recurring', 'erp_cost', 'aimin_expense', 'billing_order'].includes(l.source)) v = '';
       if (l.source === 'planning_bill') v = '企劃部';
       if (l.source === 'storehouse') v = '倉庫';
