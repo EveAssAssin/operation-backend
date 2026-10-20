@@ -18,7 +18,7 @@ const RATIO_TARGET = { 人事: 23, 包裝: 10, 鏡片: 15, 鏡框: 12, 營運費
 const DIVIDEND_CODES = ['marketing_fund', 'depreciation'];
 const SOURCE_NAME = {
   bill: '開帳單', billing_order: '部門開帳', opex: '營運費用', recurring: '固定支出', fixed: '固定金額',
-  manual_value: '手填', manual_adjust: '調帳', erp_cost: 'ERP 費用單', aimin_expense: '愛民支出', planning_bill: '企劃部開帳', storehouse: '倉庫開帳', contract: '合約', basic: '基本資料',
+  manual_value: '手填', manual_adjust: '調帳', erp_cost: 'ERP 費用單', aimin_expense: '愛民支出', planning_bill: '企劃部開帳', storehouse: '倉庫開帳', contract: '合約', basic: '基本資料', check: '支票', card_fee: '刷卡費率', lefthand_salary: '左手薪資',
 };
 
 const MARKET_BASE = process.env.MARKET_BACKEND_URL || 'https://market-backend-0544.onrender.com';
@@ -256,7 +256,8 @@ async function settings() {
   const { data } = await supabase.from('report_settings').select('key, value');
   const o = Object.fromEntries((data || []).map((r) => [r.key, r.value]));
   return { cutoff_day: Number(o.cutoff_day) || 26, retained_rate: o.retained_rate == null ? 0.1 : Number(o.retained_rate),
-    gap_alert_pct: o.gap_alert_pct == null ? 10 : Number(o.gap_alert_pct) };
+    gap_alert_pct: o.gap_alert_pct == null ? 10 : Number(o.gap_alert_pct),
+    card_fee_rates: o.card_fee_rates && typeof o.card_fee_rates === 'object' ? o.card_fee_rates : {} };
 }
 
 async function accounts() {
@@ -273,7 +274,7 @@ async function build(ym, store, opts = {}) {
   if (!YM.test(ym)) throw new Error('ym 要是 YYYY-MM');
   store = String(store || '');
   if (!store) throw new Error('缺門市');
-  const [accs, st, linesR, mkt, aimin, rep, fixed, holders, dept, plan, sh, rcs, rbs, smo, chk] = await Promise.all([
+  const [accs, st, linesR, mkt, aimin, rep, fixed, holders, dept, plan, sh, rcs, rbs, smo, chk, sal] = await Promise.all([
     accounts(),
     settings(),
     supabase.rpc('ledger_lines', { p_ym: ym }).eq('store_erpid', store),
@@ -289,6 +290,7 @@ async function build(ym, store, opts = {}) {
     rentBasics(),
     opts.sales || salesMonth(ym),
     opts.checks || rentChecks(ym),
+    opts.salary || require('./salaryMonth').salaryMonth(ym),
   ]);
   if (linesR.error) throw linesR.error;
   const lines = linesR.data || [];
@@ -440,6 +442,32 @@ async function build(ym, store, opts = {}) {
     salesBasis = 'material';
     if (apiSys == null) warnings.push('拿不到 ERP 現金流的 API PAY，眼鏡業績（帳上）先沒扣 API PAY');
   } else if (smo && smo.error) warnings.push(`${smo.error}；業績暫用舊口徑（訂單標籤）`);
+  // ── 刷卡手續費（2026-10-20）：ERP 現金流依付款方式 × 費率（report_settings.card_fee_rates：{ 付款方式代碼: {name, rate(%), per_txn(每筆元)} }）
+  //    那一格有手填值就以手填為準；有金額但沒設費率的付款方式 → 提醒（設 0 就不再提醒）
+  const cardFee = { lines: [], unset: [] };
+  if (cf && Array.isArray(cf.by) && !(byCode.card_fee || []).some((l) => l.source === 'manual_value')) {
+    const rates = st.card_fee_rates || {};
+    for (const x of cf.by) {
+      if (!x.amount) continue;
+      const r = rates[String(x.code)];
+      if (!r) { cardFee.unset.push({ code: x.code, name: x.name, amount: x.amount }); continue; }
+      const fee = Math.round(((Number(x.amount) || 0) * (Number(r.rate) || 0)) / 100 + (Number(x.n) || 0) * (Number(r.per_txn) || 0));
+      if (!fee) continue;
+      cardFee.lines.push({ store_erpid: store, ledger_code: 'card_fee', amount: fee, fee_ym: ym, source: 'card_fee', ref_id: `cf-${x.code}`,
+        ref_title: `${r.name || x.name}｜${Number(x.amount).toLocaleString()} 元 × ${Number(r.rate) || 0}%${r.per_txn ? `＋${x.n} 筆 × ${r.per_txn}` : ''}` });
+    }
+    byCode.card_fee = (byCode.card_fee || []).filter((l) => l.source !== 'card_fee').concat(cardFee.lines);
+    if (cardFee.unset.length) warnings.push(`刷卡手續費：${cardFee.unset.map((u) => `${u.name}（${Number(u.amount).toLocaleString()}）`).join('、')} 還沒設費率`);
+  }
+  // ── 薪資（2026-10-20）：左手 hrm 薪資明細，依算薪門市加總；手填值優先。勞健保（公司負擔）、二代健保左手沒有 → 手填
+  const salaryInfo = sal && sal.byStore ? sal.byStore[store] || null : null;
+  if (sal && sal.error) warnings.push(sal.error);
+  if (salaryInfo && !(byCode.salary || []).some((l) => l.source === 'manual_value')) {
+    byCode.salary = (byCode.salary || []).filter((l) => l.source !== 'lefthand_salary').concat([{ store_erpid: store, ledger_code: 'salary', amount: salaryInfo.gross, fee_ym: ym,
+      source: 'lefthand_salary', ref_id: `sal-${ym}`, ref_title: `左手薪資｜${salaryInfo.people} 人：實發 ${salaryInfo.net.toLocaleString()}＋員工自付健保 ${salaryInfo.emp_health.toLocaleString()}` }]);
+  } else if (sal && !sal.error && !salaryInfo && !(byCode.salary || []).length) {
+    warnings.push('左手這個月還沒有這家店的薪資（還沒算薪，或門市名稱對不上）');
+  }
   const gSys = plus(erpGlasses, aSales);
   const gS = sysOr('glasses_sales', gSys);
   const cS = sysOr('contact_sales', cSys);
@@ -457,12 +485,20 @@ async function build(ym, store, opts = {}) {
       refs: cf ? [{ label: 'ERP 現金流 apiPay', amount: apiSys }, { label: 'ERP 現金流合計（帳上實收）', amount: r0(cf.total) }] : [] },
     stored_value: { name: '儲值收款（不列業績）', kind: 'other', amount: filled('stored_value') ? r0(val('stored_value')) : null, from: 'manual', erp: null, no_source: true },
   };
+  // 會計自訂的收入科目（2026-10-20）：kind=revenue、不是內建那三個 → 手填，算進獲利用的實收
+  const FIXED_REV = ['glasses_receipt', 'contact_receipt', 'api_pay'];
+  let extraIn = 0;
+  for (const a of accs.filter((x) => x.kind === 'revenue' && !FIXED_REV.includes(x.code))) {
+    const amt = filled(a.code) ? r0(val(a.code)) : null;
+    revenue[a.code] = { name: a.name, kind: 'other', amount: amt, from: 'manual', erp: null, custom: true };
+    extraIn += amt || 0;
+  }
   if (gS.amount == null) warnings.push('眼鏡業績系統拿不到（ERP／愛民系統都沒資料）');
   ['glasses_receipt', 'contact_receipt'].forEach((k) => { if (revenue[k].amount == null) warnings.push(`${revenue[k].name}還沒填（參考 ${revenue[k].erp == null ? '—' : revenue[k].erp.toLocaleString()}）`); });
   const glassesIn = revenue.glasses_receipt.amount || 0;
   const contactIn = revenue.contact_receipt.amount || 0;
   const apiIn = revenue.api_pay.amount || 0;
-  const totalIn = glassesIn + contactIn + apiIn;   // 算獲利用（含 API 支付）
+  const totalIn = glassesIn + contactIn + apiIn + extraIn;   // 算獲利用（含 API 支付、自訂收入）
 
   // 總業績、總實收（眼鏡＋藥拋）與實收差：會計確認收到的錢 vs 帳上業績；差到 gap_alert_pct（預設 10%）要特別關注
   const salesTotal = gS.amount == null && cS.amount == null ? null : r0((gS.amount || 0) + (cS.amount || 0));
@@ -518,7 +554,7 @@ async function build(ym, store, opts = {}) {
     status: report ? report.status : 'draft', report,
     revenue,
     totals: {
-      glasses_in: glassesIn, contact_in: contactIn, api_in: apiIn, total_in: totalIn,
+      glasses_in: glassesIn, contact_in: contactIn, api_in: apiIn, extra_in: extraIn, total_in: totalIn,
       sales_total: salesTotal, receipt_total: receiptTotal, receipt_filled: receiptFilled,
       left_total: leftTotal, right_total: rightTotal, total_out: totalOut,
       glasses_out: glassesOut, contact_out: contactOut,
@@ -546,6 +582,7 @@ async function build(ym, store, opts = {}) {
     },
     shareholders: hs.map((h) => ({ id: h.id, name: h.name, erpid: h.erpid, shares: h.shares, amount: r0(distributable * h.shares / 100) })),
     rent: rentInfo,
+    card_fee: cardFee, salary: salaryInfo,
     storehouse_issues: (sh.issues || []).filter((i) => i.store === store).map((i) => ({ kind: i.kind, line: i.line })),
     planning_issues: planIssues.map((i) => ({ kind: i.kind, expense_id: i.expense_id || (i.line && i.line.expense_id), item: (i.e && i.e.item) || (i.line && i.line.item), detail: i })),
     aimin: am ? { name: am.name, sales: r0(am.sales), orders: am.order_count, paid: r0(am.paid), paid_by_method: am.paid_by_method, closings: am.closings } : null,

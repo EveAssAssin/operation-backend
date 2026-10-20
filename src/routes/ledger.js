@@ -274,13 +274,14 @@ router.post('/accounts', canEdit, async (req, res) => {
     const b = req.body || {};
     const name = String(b.name || '').trim();
     if (!name) return bad(res, '要填科目名稱');
-    if (!GROUPS.includes(b.group_code)) return bad(res, '要選放在月報哪一區');
+    const isRev = b.group_code === 'revenue';   // 2026-10-20：會計也能加收入科目（手填，算進獲利用的實收）
+    if (!isRev && !GROUPS.includes(b.group_code)) return bad(res, '要選放在月報哪一區');
     const { data: same } = await supabase.from('ledger_accounts').select('code').eq('name', name).maybeSingle();
     if (same) return bad(res, `已經有「${name}」這個科目了`);
     const { data: last } = await supabase.from('ledger_accounts').select('sort_order').eq('group_code', b.group_code).order('sort_order', { ascending: false }).limit(1).maybeSingle();
     const code = `x_${Date.now().toString(36)}`;
-    const row = { code, name, group_code: b.group_code, kind: 'expense', ratio_group: b.ratio_group || null,
-      auto_source: b.auto_source === 'manual' ? 'manual' : 'bill', sort_order: ((last && last.sort_order) || 0) + 1, is_active: true,
+    const row = { code, name, group_code: b.group_code, kind: isRev ? 'revenue' : 'expense', ratio_group: isRev ? null : (b.ratio_group || null),
+      auto_source: isRev || b.auto_source === 'manual' ? 'manual' : 'bill', sort_order: ((last && last.sort_order) || 0) + 1, is_active: true,
       note: `新增於 ${new Date().toISOString().slice(0, 10)}，${who(req)}` };
     const { data, error } = await supabase.from('ledger_accounts').insert(row).select().single();
     if (error) throw error; res.json({ success: true, data });
@@ -368,6 +369,122 @@ router.get('/store-profile', async (req, res) => {
       recurring: (recs || []).map((r) => ({ ...r, payments: (pays || []).filter((p) => p.expense_id === r.id) })),
       fixed: fixed || [], shareholders: holders || [],
     } });
+  } catch (e) { fail(res, e); }
+});
+
+// ── Excel 匯入月報手填值（2026-10-20）──
+// 欄位：門市（名稱或 ERP 編號）｜月份 YYYY-MM｜科目（名稱或代碼）｜金額｜方式（手填／調帳，空白＝手填）｜廠商｜備註（調帳必填）
+// 先 ?dry=1 預覽（每列檢查結果），確認後不帶 dry 寫入；手填同格舊值作廢留紀錄；已關帳的月份整列擋
+const multer = require('multer');
+const xlsUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+router.get('/import/template', async (req, res) => {
+  try {
+    const XLSX = require('xlsx');
+    const accs = await MR.accounts();
+    const { data: deps } = await supabase.from('departments').select('store_erpid, store_name').eq('report_kind', 'store').order('store_name');
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['門市', '月份', '科目', '金額', '方式', '廠商', '備註'], ['文化店', '2026-09', '勞健保', 12345, '手填', '', '']]), '匯入');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['科目', '代碼', '類型'], ...accs.filter((a) => a.kind !== 'info').map((a) => [a.name, a.code, a.kind === 'revenue' ? '收入' : '支出'])]), '科目清單');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['門市', 'ERP 編號'], ...(deps || []).map((d) => [d.store_name, d.store_erpid])]), '門市清單');
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', "attachment; filename*=UTF-8''" + encodeURIComponent('月報匯入範本.xlsx'));
+    res.send(buf);
+  } catch (e) { fail(res, e); }
+});
+router.post('/import', canEdit, xlsUpload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return bad(res, '請上傳 Excel');
+    const XLSX = require('xlsx');
+    const wb = XLSX.read(req.file.buffer, { type: 'buffer' });
+    const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: '' });
+    if (rows.length < 2) return bad(res, 'Excel 是空的');
+    const head = rows[0].map((h) => String(h).trim());
+    const col = (names) => head.findIndex((h) => names.includes(h));
+    const C = { store: col(['門市', '門市編號']), ym: col(['月份', '月報月份']), acc: col(['科目', '科目代碼']), amt: col(['金額']), type: col(['方式']), vendor: col(['廠商']), note: col(['備註', '原因']) };
+    if (C.store < 0 || C.ym < 0 || C.acc < 0 || C.amt < 0) return bad(res, '第一列要有：門市、月份、科目、金額（可下載範本）');
+    const accs = await MR.accounts();
+    const accBy = new Map(); accs.filter((a) => a.kind !== 'info').forEach((a) => { accBy.set(a.code, a); accBy.set(a.name, a); });
+    const { data: deps } = await supabase.from('departments').select('store_erpid, store_name');
+    const norm = (x) => String(x || '').replace(/^愛民眼鏡/, '').replace(/\s+/g, '').replace(/店$/, '');
+    const depBy = new Map(); (deps || []).forEach((d) => { depBy.set(String(d.store_erpid), d); depBy.set(norm(d.store_name), d); });
+    const ymOf = (v) => { if (typeof v === 'number') { const d = XLSX.SSF.parse_date_code(v); return d ? `${d.y}-${String(d.m).padStart(2, '0')}` : ''; } const m = String(v).trim().match(/^(\d{4})[-/.年](\d{1,2})/); return m ? `${m[1]}-${String(m[2]).padStart(2, '0')}` : ''; };
+    const closedCache = new Map();
+    const out = [];
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i]; if (!r || r.every((x) => String(x).trim() === '')) continue;
+      const rawStore = String(r[C.store]).trim(), dep = depBy.get(rawStore) || depBy.get(norm(rawStore));
+      const ym = ymOf(r[C.ym]); const a = accBy.get(String(r[C.acc]).trim());
+      const amount = Number(String(r[C.amt]).replace(/[,，\s元]/g, ''));
+      const type = C.type >= 0 && /調/.test(String(r[C.type])) ? 'adjust' : 'value';
+      const vendor = C.vendor >= 0 ? String(r[C.vendor]).trim() || null : null;
+      const note = C.note >= 0 ? String(r[C.note]).trim() : '';
+      const errs = [];
+      if (!dep) errs.push(`門市「${rawStore}」對不到`);
+      if (!YM.test(ym)) errs.push('月份要是 2026-09 這種格式');
+      if (!a) errs.push(`科目「${r[C.acc]}」對不到`);
+      else if (a.kind === 'info') errs.push('業績格不能手填');
+      if (!Number.isFinite(amount) || String(r[C.amt]).trim() === '') errs.push('金額不對');
+      if (type === 'adjust' && !note) errs.push('調帳一定要寫原因（備註欄）');
+      if (dep && YM.test(ym)) {
+        const k = dep.store_erpid + '|' + ym;
+        if (!closedCache.has(k)) closedCache.set(k, await closed(dep.store_erpid, ym));
+        if (closedCache.get(k)) errs.push('這個月已關帳');
+      }
+      out.push({ row: i + 1, store: dep ? dep.store_erpid : rawStore, store_name: dep ? dep.store_name : rawStore, ym, code: a ? a.code : null, account: a ? a.name : String(r[C.acc]), amount, type, vendor, note, errors: errs });
+    }
+    const bad2 = out.filter((x) => x.errors.length);
+    if (req.query.dry === '1' || bad2.length) return res.json({ success: true, data: { dry: true, rows: out, ok: out.length - bad2.length, bad: bad2.length } });
+    let done = 0;
+    for (const x of out) {
+      if (x.type === 'value') {
+        let q = supabase.from('ledger_manual_entries').update({ void_at: new Date().toISOString(), void_by: who(req) })
+          .eq('store_erpid', x.store).eq('report_ym', x.ym).eq('ledger_code', x.code).eq('entry_type', 'value').is('void_at', null);
+        q = x.vendor ? q.eq('vendor', x.vendor) : q.is('vendor', null);
+        const { error: e1 } = await q; if (e1) throw e1;
+      }
+      const { error } = await supabase.from('ledger_manual_entries').insert({ entry_type: x.type, store_erpid: x.store, report_ym: x.ym, ledger_code: x.code, amount: x.amount,
+        vendor: x.vendor, reason: x.note ? `Excel 匯入：${x.note}` : 'Excel 匯入', files: [], created_by: who(req) });
+      if (error) throw error; done += 1;
+    }
+    res.json({ success: true, data: { dry: false, done } });
+  } catch (e) { fail(res, e); }
+});
+
+// ── 刷卡手續費費率（2026-10-20）：ERP 付款方式 × 費率％＋每筆固定 → 月報「刷卡手續費」自動算 ──
+router.get('/card-fee-rates', async (req, res) => {
+  try {
+    const ym = YM.test(String(req.query.ym || '')) ? String(req.query.ym) : null;
+    const st = await MR.settings();
+    const seen = {};
+    if (ym) {
+      const mk = await MR.marketMonth(ym);
+      for (const v of Object.values(mk.stores || {})) for (const x of ((v.cashflow || {}).by || [])) {
+        const k = String(x.code); const t = (seen[k] = seen[k] || { code: k, name: x.name, amount: 0, n: 0, stores: 0 });
+        t.amount += Number(x.amount) || 0; t.n += Number(x.n) || 0; t.stores += 1;
+      }
+    }
+    const rates = st.card_fee_rates || {};
+    const codes = [...new Set([...Object.keys(rates), ...Object.keys(seen)])];
+    res.json({ success: true, data: codes.map((c) => ({ code: c, name: (rates[c] && rates[c].name) || (seen[c] && seen[c].name) || c,
+      rate: rates[c] ? rates[c].rate : null, per_txn: rates[c] ? rates[c].per_txn || 0 : null, set: !!rates[c],
+      amount: seen[c] ? Math.round(seen[c].amount) : null, n: seen[c] ? seen[c].n : null })).sort((a, b) => (b.amount || 0) - (a.amount || 0)) });
+  } catch (e) { fail(res, e); }
+});
+router.put('/card-fee-rates', canEdit, async (req, res) => {
+  try {
+    const list = Array.isArray((req.body || {}).rates) ? req.body.rates : null;
+    if (!list) return bad(res, '缺費率');
+    const out = {};
+    for (const r of list) {
+      const code = String(r.code || '').trim(); if (!code) continue;
+      if (r.rate === '' || r.rate == null) continue;   // 空白＝不設（月報會提醒）
+      const rate = Number(r.rate), per = Number(r.per_txn || 0);
+      if (!(rate >= 0 && rate <= 20) || !(per >= 0 && per <= 1000)) return bad(res, `「${r.name || code}」費率不合理（0～20%、每筆 0～1000 元）`);
+      out[code] = { name: String(r.name || code).slice(0, 40), rate, per_txn: per };
+    }
+    const { error } = await supabase.from('report_settings').upsert({ key: 'card_fee_rates', value: out, updated_by: who(req), updated_at: new Date().toISOString() }, { onConflict: 'key' });
+    if (error) throw error; res.json({ success: true, data: out });
   } catch (e) { fail(res, e); }
 });
 
