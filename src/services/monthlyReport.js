@@ -18,7 +18,7 @@ const RATIO_TARGET = { 人事: 23, 包裝: 10, 鏡片: 15, 鏡框: 12, 營運費
 const DIVIDEND_CODES = ['marketing_fund', 'depreciation'];
 const SOURCE_NAME = {
   bill: '開帳單', billing_order: '部門開帳', opex: '營運費用', recurring: '固定支出', fixed: '固定金額',
-  manual_value: '手填', manual_adjust: '調帳', erp_cost: 'ERP 費用單',
+  manual_value: '手填', manual_adjust: '調帳', erp_cost: 'ERP 費用單', aimin_expense: '愛民支出',
 };
 
 const MARKET_BASE = process.env.MARKET_BACKEND_URL || 'https://market-backend-0544.onrender.com';
@@ -36,6 +36,34 @@ async function marketMonth(ym, stores) {
     const msg = e.response ? `${e.response.status} ${JSON.stringify(e.response.data).slice(0, 120)}` : e.message;
     return { error: `市場部月資料：${msg}`, stores: {} };
   }
+}
+
+// ── 愛民（IMING 系統，Supabase suvsaycdiyvofzaudpkg）：眼鏡業績、收款、結帳、門市支出 ──
+// 愛民門市（後甲、北屯、十甲、高應大…）的眼鏡不走 ERP；IMING 開了只讀函式 report_store_month(p_key, p_ym)
+// 金鑰存在營運部 report_settings.aimin_report_key（IMING 只存 sha256）；門市對照 report_settings.aimin_store_map（IMING 門市 id → ERP 門市編號）
+const AIMIN_URL = process.env.AIMIN_SUPABASE_URL || 'https://suvsaycdiyvofzaudpkg.supabase.co';
+const AIMIN_PUB = process.env.AIMIN_PUBLISHABLE_KEY || 'sb_publishable_s9iUEJn9i5c0TB_ViJBtcg_izwVlnPH'; // 公開金鑰（前端也用），權限靠 p_key
+const aiminCache = new Map();
+async function aiminMonth(ym) {
+  const hit = aiminCache.get(ym);
+  if (hit && Date.now() - hit.at < 5 * 60e3) return hit.v;
+  const { data: rows } = await supabase.from('report_settings').select('key, value').in('key', ['aimin_report_key', 'aimin_store_map']);
+  const o = Object.fromEntries((rows || []).map((r) => [r.key, r.value]));
+  if (!o.aimin_report_key) return { error: '營運部沒設愛民金鑰（report_settings.aimin_report_key）', byStore: {} };
+  let v;
+  try {
+    const { data } = await axios.post(`${AIMIN_URL}/rest/v1/rpc/report_store_month`, { p_key: o.aimin_report_key, p_ym: ym },
+      { headers: { apikey: AIMIN_PUB, 'Content-Type': 'application/json' }, timeout: 30000 });
+    const map = o.aimin_store_map || {};
+    const byStore = {};
+    for (const st of (data && data.stores) || []) { const erp = map[st.id]; if (erp) byStore[String(erp)] = st; }
+    v = { byStore };
+  } catch (e) {
+    const msg = e.response ? `${e.response.status} ${JSON.stringify(e.response.data).slice(0, 120)}` : e.message;
+    return { error: `愛民系統月資料：${msg}`, byStore: {} };
+  }
+  aiminCache.set(ym, { at: Date.now(), v });
+  return v;
 }
 
 const splitTitle = (t) => { const s = String(t || ''); const i = s.indexOf('｜'); return i < 0 ? [s, ''] : [s.slice(0, i), s.slice(i + 1)]; };
@@ -62,11 +90,12 @@ async function build(ym, store, opts = {}) {
   if (!YM.test(ym)) throw new Error('ym 要是 YYYY-MM');
   store = String(store || '');
   if (!store) throw new Error('缺門市');
-  const [accs, st, linesR, mkt, rep, fixed, holders, dept] = await Promise.all([
+  const [accs, st, linesR, mkt, aimin, rep, fixed, holders, dept] = await Promise.all([
     accounts(),
     settings(),
     supabase.rpc('ledger_lines', { p_ym: ym }).eq('store_erpid', store),
     opts.market || marketMonth(ym, [store]),
+    opts.aimin || aiminMonth(ym),
     supabase.from('store_month_reports').select('*').eq('store_erpid', store).eq('ym', ym).maybeSingle(),
     supabase.from('store_fixed_items').select('*').eq('store_erpid', store),
     supabase.from('store_shareholders').select('*').eq('store_erpid', store),
@@ -80,6 +109,8 @@ async function build(ym, store, opts = {}) {
   if (mkt.error) warnings.push(mkt.error);
   (mkt.errors || []).forEach((e) => warnings.push(e));
   const m = (mkt.stores || {})[store] || {};
+  const am = (aimin.byStore || {})[store] || null;   // 愛民門市才有
+  if (aimin.error && am === null && /愛民|後甲|北屯|十甲/.test((dept.data && dept.data.store_name) || '')) warnings.push(aimin.error);
 
   // ERP 門市費用單 → 分店支出雜項（有手填值就以手填為準）
   if (!(byCode.store_misc || []).some((l) => l.source === 'manual_value') && m.costs) {
@@ -87,7 +118,14 @@ async function build(ym, store, opts = {}) {
       store_erpid: store, ledger_code: 'store_misc', amount: x.amount, fee_ym: ym, source: 'erp_cost',
       ref_id: String(x.pay_id), ref_title: `ERP 費用單｜${x.date ? String(x.date).slice(0, 10) : ''} ${x.remark || ''}`.trim(),
     })));
-  } else if (!m.costs) warnings.push('分店支出雜項：這次拿不到 ERP 門市費用單');
+  } else if (!m.costs && !am) warnings.push('分店支出雜項：這次拿不到 ERP 門市費用單');
+  // 愛民門市的門市支出記在 IMING expenses（後甲 8 月 1,797＝試算表）
+  if (am && !(byCode.store_misc || []).some((l) => l.source === 'manual_value')) {
+    byCode.store_misc = (byCode.store_misc || []).concat((am.expenses || []).map((x) => ({
+      store_erpid: store, ledger_code: 'store_misc', amount: Number(x.amount) || 0, fee_ym: ym, source: 'aimin_expense',
+      ref_id: String(x.id), ref_title: `愛民支出｜${x.date ? String(x.date).slice(0, 10) : ''} ${x.category || ''} ${x.note || ''}`.trim(),
+    })));
+  }
 
   const rowOf = (a) => {
     const ls = byCode[a.code] || [];
@@ -96,7 +134,7 @@ async function build(ym, store, opts = {}) {
     const vendors = {};
     for (const l of ls) {
       let [v] = splitTitle(l.ref_title);
-      if (l.source === 'opex' || l.source === 'recurring' || l.source === 'erp_cost' || l.source === 'billing_order') v = '';
+      if (['opex', 'recurring', 'erp_cost', 'aimin_expense', 'billing_order'].includes(l.source)) v = '';
       vendors[v] = (vendors[v] || 0) + Number(l.amount || 0);
     }
     const crossMonth = ls.filter((l) => l.fee_ym && l.fee_ym !== ym).map((l) => l.fee_ym);
@@ -116,14 +154,21 @@ async function build(ym, store, opts = {}) {
 
   // ── 業績／實收 ──
   const erp = m.sales || null;
+  // 參考值：ERP 帳上（業績系統）＋愛民系統（IMING 訂單／收款）；愛民門市的眼鏡主要在 IMING
+  const aSales = am ? Number(am.sales) || 0 : null;
+  const aPaid = am ? Number(am.paid) || 0 : null;
+  const plus = (a, b) => (a == null && b == null ? null : r0((a || 0) + (b || 0)));
   const revenue = {
-    glasses_sales: { name: '眼鏡業績', amount: filled('glasses_sales') ? r0(val('glasses_sales')) : null, erp: erp ? r0(erp.glasses) : null },
-    glasses_receipt: { name: '眼鏡實收', amount: filled('glasses_receipt') ? r0(val('glasses_receipt')) : null, erp: erp ? r0(erp.glasses) : null },
-    contact_receipt: { name: '藥拋實收', amount: filled('contact_receipt') ? r0(val('contact_receipt')) : null, erp: erp ? r0(erp.contact) : null },
+    glasses_sales: { name: '眼鏡業績', amount: filled('glasses_sales') ? r0(val('glasses_sales')) : null, erp: plus(erp ? erp.glasses : null, aSales),
+      refs: [erp ? { label: 'ERP 帳上', amount: r0(erp.glasses) } : null, am ? { label: '愛民系統訂單', amount: r0(aSales) } : null].filter(Boolean) },
+    glasses_receipt: { name: '眼鏡實收', amount: filled('glasses_receipt') ? r0(val('glasses_receipt')) : null, erp: plus(erp ? erp.glasses : null, aPaid),
+      refs: [erp ? { label: 'ERP 帳上', amount: r0(erp.glasses) } : null, am ? { label: '愛民系統收款', amount: r0(aPaid) } : null].filter(Boolean) },
+    contact_receipt: { name: '藥拋實收', amount: filled('contact_receipt') ? r0(val('contact_receipt')) : null, erp: erp ? r0(erp.contact) : null,
+      refs: erp ? [{ label: 'ERP 帳上', amount: r0(erp.contact) }] : [] },
     api_pay: { name: 'API 支付', amount: filled('api_pay') ? r0(val('api_pay')) : null, erp: null },
     stored_value: { name: '儲值收款（不列業績）', amount: filled('stored_value') ? r0(val('stored_value')) : null, erp: null },
   };
-  ['glasses_receipt', 'contact_receipt'].forEach((k) => { if (revenue[k].amount == null) warnings.push(`${revenue[k].name}還沒填（ERP 帳上 ${revenue[k].erp == null ? '—' : revenue[k].erp.toLocaleString()}）`); });
+  ['glasses_receipt', 'contact_receipt'].forEach((k) => { if (revenue[k].amount == null) warnings.push(`${revenue[k].name}還沒填（參考 ${revenue[k].erp == null ? '—' : revenue[k].erp.toLocaleString()}）`); });
   const glassesIn = revenue.glasses_receipt.amount || 0;
   const contactIn = revenue.contact_receipt.amount || 0;
   const apiIn = revenue.api_pay.amount || 0;
@@ -190,6 +235,7 @@ async function build(ym, store, opts = {}) {
       fixed_this: { marketing_fund: fixedThis('marketing_fund'), depreciation: fixedThis('depreciation') },
     },
     shareholders: hs.map((h) => ({ id: h.id, name: h.name, erpid: h.erpid, shares: h.shares, amount: r0(distributable * h.shares / 100) })),
+    aimin: am ? { name: am.name, sales: r0(am.sales), orders: am.order_count, paid: r0(am.paid), paid_by_method: am.paid_by_method, closings: am.closings } : null,
     warnings, settings: st, market_end: mkt.end || null, year: y,
   };
 }
@@ -201,14 +247,14 @@ async function overview(ym) {
   const { data: units } = await supabase.from('departments').select('store_erpid, store_name, is_active, report_kind').eq('is_active', true).order('store_name');
   const isStore = (u) => u.report_kind === 'store' || (u.report_kind == null && /店$/.test(String(u.store_name || '')));
   const list = (units || []).filter((s) => s.store_erpid && isStore(s));
-  const mkt = await marketMonth(ym, list.map((s) => s.store_erpid));
+  const [mkt, aimin] = await Promise.all([marketMonth(ym, list.map((s) => s.store_erpid)), aiminMonth(ym)]);
   const out = [];
   let i = 0;
   const worker = async () => {
     while (i < list.length) {
       const s = list[i++];
       try {
-        const r = await build(ym, s.store_erpid, { market: mkt });
+        const r = await build(ym, s.store_erpid, { market: mkt, aimin });
         out.push({ store: s.store_erpid, store_name: s.store_name, status: r.status, total_in: r.totals.total_in, total_out: r.totals.total_out, profit: r.totals.profit,
           erp_total: r.revenue.glasses_receipt.erp == null ? null : r.revenue.glasses_receipt.erp + (r.revenue.contact_receipt.erp || 0),
           filled: r.revenue.glasses_receipt.amount != null && r.revenue.contact_receipt.amount != null, warnings: r.warnings.length });
@@ -241,7 +287,7 @@ async function overview(ym) {
       other[id].codes = Object.fromEntries(Object.entries(other[id].codes).map(([k, v]) => [k, r0(v)]));
     }
   }
-  return { ym, stores: out, others: Object.values(other).sort((a, b) => b.total - a.total), market_error: mkt.error || null };
+  return { ym, stores: out, others: Object.values(other).sort((a, b) => b.total - a.total), market_error: mkt.error || null, aimin_error: aimin.error || null };
 }
 
-module.exports = { build, overview, accounts, settings, marketMonth, YM, GROUP_NAME, SOURCE_NAME };
+module.exports = { aiminMonth, build, overview, accounts, settings, marketMonth, YM, GROUP_NAME, SOURCE_NAME };
