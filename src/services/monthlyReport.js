@@ -124,10 +124,15 @@ const shNorm = (t) => String(t || '').replace(/^愛民眼鏡/, '').replace(/店$
 // storehouse_ledger = { replen: 預設, ship: 預設, sections: { '<撥補區塊>': code }, warehouses: { '<出貨倉別>': code } }
 // 一筆出貨裡不同區塊要進不同格子時照品項（數量×單價）拆開；拆完差額（四捨五入等）留在預設那格。
 const SH_DEFAULT = 'planning_goods';
+// 2026-10-21 倉庫 RPC 多三種來源：frame（ERP 調撥鏡框，解碼價）、manual_frame（特例開帳／開帳大平台匯入鏡框）、
+// manual_misc（開帳大平台雜費匯入，只有 1～8 月）。預設格子：鏡框→總部出貨（鏡框）frame_hq；雜費→雜費 consumables，
+// 名稱是「工程修繕」的那幾筆→工程修繕 repair（可用 storehouse_ledger.misc_names 改）。
+const SH_SRC_DEFAULT = { replen: SH_DEFAULT, ship: SH_DEFAULT, frame: 'frame_hq', manual_frame: 'frame_hq', manual_misc: 'consumables' };
+const SH_MISC_NAMES = { '工程修繕': 'repair' };
 function shSplit(r, ledger) {
-  const def = ledger[r.src] || SH_DEFAULT;
-  const pick = r.src === 'ship' ? (ledger.warehouses || {}) : (ledger.sections || {});
-  const keyOf = (i) => (r.src === 'ship' ? i.warehouse : i.section) || '';
+  const def = ledger[r.src] || SH_SRC_DEFAULT[r.src] || SH_DEFAULT;
+  const pick = r.src === 'ship' ? (ledger.warehouses || {}) : r.src === 'manual_misc' ? { ...SH_MISC_NAMES, ...(ledger.misc_names || {}) } : (ledger.sections || {});
+  const keyOf = (i) => (r.src === 'ship' ? i.warehouse : r.src === 'manual_misc' ? (String(i.name || '').includes('工程修繕') ? '工程修繕' : '') : i.section) || '';
   const items = r.items || [];
   const groups = {};
   for (const i of items) {
@@ -162,7 +167,7 @@ async function storehouseMonth(ym) {
   const byName = {};
   for (const u of units || []) if (u.store_erpid) byName[shNorm(u.store_name)] = String(u.store_erpid);
   const map = { ...byName, ...(o.storehouse_store_map || {}) };
-  const ledger = { replen: SH_DEFAULT, ship: SH_DEFAULT, sections: {}, warehouses: {}, ...(o.storehouse_ledger || {}) };
+  const ledger = { ...SH_SRC_DEFAULT, sections: {}, warehouses: {}, misc_names: {}, ...(o.storehouse_ledger || {}) };
   let v;
   try {
     const { data } = await axios.post(`${SH_URL}/rest/v1/rpc/report_storehouse_month`, { p_key: o.storehouse_report_key, p_ym: ym },
@@ -422,7 +427,7 @@ async function build(ym, store, opts = {}) {
   for (const l of (sh.byStore || {})[store] || []) {
     const code = l.ledger_code;
     if ((byCode[code] || []).some((x) => x.source === 'manual_value')) continue;
-    const what = (l.src === 'ship' ? `產品出貨 ${l.no || ''}` : '常備品撥補') + (l.part ? `（${l.part}）` : '');
+    const what = (l.src === 'ship' ? `產品出貨 ${l.no || ''}` : l.src === 'frame' ? `鏡框調撥 ${l.no || ''}` : l.src === 'manual_frame' ? `鏡框開帳${l.source === 'sheet_import' ? '（開帳大平台匯入）' : '（特例開帳）'}` : l.src === 'manual_misc' ? '雜費（開帳大平台匯入）' : '常備品撥補') + (l.part ? `（${l.part}）` : '');
     const items = (l.items || []).slice(0, 4).map((i) => `${i.name}×${i.qty}`).join('、') + ((l.items || []).length > 4 ? '…' : '');
     (byCode[code] = byCode[code] || []).push({
       store_erpid: store, ledger_code: code, amount: Number(l.amount) || 0, fee_ym: ym, source: 'storehouse',

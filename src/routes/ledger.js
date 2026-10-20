@@ -485,7 +485,7 @@ router.patch('/mapping/category/:id', canEdit, async (req, res) => {
 router.get('/storehouse-map', async (req, res) => {
   try {
     const { data: row } = await supabase.from('report_settings').select('value').eq('key', 'storehouse_ledger').maybeSingle();
-    const ledger = { replen: MR.SH_DEFAULT, ship: MR.SH_DEFAULT, sections: {}, warehouses: {}, ...((row && row.value) || {}) };
+    const ledger = { replen: MR.SH_DEFAULT, ship: MR.SH_DEFAULT, frame: 'frame_hq', manual_frame: 'frame_hq', manual_misc: 'consumables', sections: {}, warehouses: {}, misc_names: { '工程修繕': 'repair' }, ...((row && row.value) || {}) };
     const now = new Date(Date.now() + 8 * 3600e3);
     const yms = [0, 1, 2].map((k) => new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - k, 1)).toISOString().slice(0, 7));
     const months = await Promise.all(yms.map((ym) => MR.storehouseMonth(ym)));
@@ -493,6 +493,7 @@ router.get('/storehouse-map', async (req, res) => {
     for (const m of months) {
       const lines = [...Object.values(m.byStore || {}).flat(), ...(m.issues || []).filter((i) => i.kind === 'unmapped').map((i) => i.line)];
       for (const l of lines) for (const i of l.items || []) {
+        if (l.src === 'frame' || l.src === 'manual_frame' || l.src === 'manual_misc') continue;   // 鏡框／匯入雜費各自一格，不分區
         const k = (l.src === 'ship' ? i.warehouse : i.section) || '（未分區）';
         const t = l.src === 'ship' ? wh : sec;
         t[k] = (t[k] || 0) + (Number(i.qty) || 0) * (Number(i.price) || 0);
@@ -509,8 +510,9 @@ router.put('/storehouse-map', canEdit, async (req, res) => {
     const b = req.body || {};
     const clean = async (o) => { const r = {}; for (const [k, v] of Object.entries(o || {})) { if (!v) continue; if (!(await okCode(v))) throw Object.assign(new Error(`沒有這個科目：${v}`), { status: 400 }); r[String(k).slice(0, 40)] = v; } return r; };
     const replen = b.replen || MR.SH_DEFAULT, ship = b.ship || MR.SH_DEFAULT;
-    if (!(await okCode(replen)) || !(await okCode(ship))) return bad(res, '沒有這個科目');
-    const value = { replen, ship, sections: await clean(b.sections), warehouses: await clean(b.warehouses) };
+    const frame = b.frame || 'frame_hq', manual_frame = b.manual_frame || 'frame_hq', manual_misc = b.manual_misc || 'consumables';
+    for (const c of [replen, ship, frame, manual_frame, manual_misc]) if (!(await okCode(c))) return bad(res, '沒有這個科目');
+    const value = { replen, ship, frame, manual_frame, manual_misc, sections: await clean(b.sections), warehouses: await clean(b.warehouses), misc_names: await clean(b.misc_names) };
     const { error } = await supabase.from('report_settings').upsert({ key: 'storehouse_ledger', value, updated_at: new Date().toISOString() }, { onConflict: 'key' });
     if (error) throw error;
     MR.clearStorehouseCache();
