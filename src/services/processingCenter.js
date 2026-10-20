@@ -22,6 +22,7 @@ async function feedGet(path, params) {
   try {
     const r = await fetch(`${FEED_URL()}/${path}${qs ? '?' + qs : ''}`, { headers: { 'X-Feed-Key': key }, signal: ctl.signal });
     const txt = await r.text();
+    if (r.status === 404) throw new Error('加工站還沒有這支資料介面（lohastracking 新版還沒部署）');
     let j; try { j = JSON.parse(txt); } catch { throw new Error(`加工站回應不是 JSON（HTTP ${r.status}）：${txt.slice(0, 120)}`); }
     if (!r.ok || !j.ok) throw new Error(`加工站 ${path} 失敗（HTTP ${r.status}）：${j.error || ''}`);
     return j;
