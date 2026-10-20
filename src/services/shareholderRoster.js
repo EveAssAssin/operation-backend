@@ -38,6 +38,7 @@ async function roster(force) {
     const apps = new Map((all || []).map((x) => [String(x.employeeerpid), x.employeeappnumber ? String(x.employeeappnumber) : null]));
     const list = (emps || []).filter(LH.isValidEmployee).map((e) => ({ erpid: String(e.erpid), name: e.name, app_number: apps.get(String(e.erpid)) || null }));
     cache = { at: Date.now(), data: { group, list } };
+    syncPortal(list).catch((e) => console.warn('[shareholderRoster] portal 同步失敗', e.message));
     return cache.data;
   } catch (e) {
     return { group, list: [], error: `左手查詢失敗：${e.message}` };
@@ -49,4 +50,29 @@ async function setGroup(erpid) {
   cache = { at: 0, data: null };
   lastProbe = 0;
 }
-module.exports = { roster, setGroup };
+// ── App「樂活人員」的「投資管理」按鈕：portal 角色「投資管理」＝這份名單（有客編的人）──
+// portal（Supabase dsvmwkbdjeabiizxusrn）rpc investment_sync_members；金鑰明碼 report_settings.portal_invest_key，
+// portal 只存 sha256（private.sync_keys name=investment）。名單沒變就不重送；部門找不到時不送（不要把人清光）。
+const PORTAL_RPC = 'https://dsvmwkbdjeabiizxusrn.supabase.co/rest/v1/rpc/investment_sync_members';
+const PORTAL_PUB = 'sb_publishable_kFqPpN0CTCcanGUQL1HNkQ_XubQw_6d';   // portal 的公開金鑰（publishable，本來就給前端用）
+let lastSent = '';
+async function syncPortal(list) {
+  const apps = [...new Set(list.map((x) => x.app_number).filter(Boolean))].sort();
+  const sig = apps.join(',');
+  if (sig === lastSent) return null;
+  const { data } = await supabase.from('report_settings').select('value').eq('key', 'portal_invest_key').maybeSingle();
+  if (!data || !data.value) return null;
+  const r = await fetch(PORTAL_RPC, { method: 'POST', headers: { apikey: PORTAL_PUB, 'Content-Type': 'application/json' }, body: JSON.stringify({ p_key: data.value, p_apps: apps }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.message || `HTTP ${r.status}`);
+  lastSent = sig;
+  console.log('[shareholderRoster] portal 投資管理', JSON.stringify(j));
+  return j;
+}
+/** 開機後 1 分鐘、之後每 6 小時：重抓名單（順便同步 portal） */
+function startInvestSync() {
+  const run = () => roster(true).catch((e) => console.warn('[shareholderRoster]', e.message));
+  setTimeout(run, 60e3);
+  setInterval(run, 6 * 3600e3);
+}
+module.exports = { roster, setGroup, startInvestSync };

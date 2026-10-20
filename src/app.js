@@ -242,6 +242,7 @@ app.use((err, req, res, next) => {
   startAppointedUnitJobs();          // 特約單位 / 廠商員工 同步
   startScheduledNotifyDispatcher();  // 每分鐘掃自訂排程推播
   initHolidays();                    // 預載台灣假日快取（本年 + 明年）
+  require('./services/shareholderRoster').startInvestSync();  // 左手股東部門 → portal「投資管理」角色（每 6 小時）
 
   // 3. 開始接請求
   app.listen(PORT, () => {
