@@ -409,8 +409,9 @@ router.post('/report/status', canEdit, async (req, res) => {
     if (stores === 'all') stores = (await MR.overview(ym)).stores.map((s) => s.store);
     if (!Array.isArray(stores) || !stores.length) return bad(res, '缺門市');
     const now = new Date().toISOString(), by = who(req);
-    const { data: cur } = await supabase.from('store_month_reports').select('store_erpid, status').eq('ym', ym).in('store_erpid', stores.map(String));
+    const { data: cur } = await supabase.from('store_month_reports').select('store_erpid, status, snapshot->imported').eq('ym', ym).in('store_erpid', stores.map(String));
     const st = Object.fromEntries((cur || []).map((r) => [r.store_erpid, r.status]));
+    const imp = Object.fromEntries((cur || []).map((r) => [r.store_erpid, !!r.imported]));
     const out = [];
     for (const store of stores.map(String)) {
       const s0 = st[store] || 'draft';
@@ -425,6 +426,8 @@ router.post('/report/status', canEdit, async (req, res) => {
           await supabase.from('store_month_reports').upsert({ store_erpid: store, ym, status: 'closed', snapshot: snap, closed_by: by, closed_at: now, updated_at: now }, { onConflict: 'store_erpid,ym' });
         } else {
           if (s0 !== 'closed') { out.push({ store, skip: `目前是 ${s0}` }); continue; }
+          // 試算表匯入的月份不能重開（重開後再關帳會變成系統串聯的數字、試算表的就不見了）；要修正：之後月份記調帳，或重新匯入試算表
+          if (imp[store]) { out.push({ store, skip: '這個月是試算表匯入的，不能重開；要修正請在之後的月份記調帳，或改試算表後重新匯入' }); continue; }
           await supabase.from('store_month_reports').update({ status: 'draft', reopened_by: by, reopened_at: now, reopen_reason: String(b.reason).slice(0, 500), updated_at: now }).eq('store_erpid', store).eq('ym', ym);
         }
         out.push({ store, ok: true });
@@ -880,6 +883,25 @@ router.patch('/bill/:id/subject', canEdit, async (req, res) => {
     MR.clearBookCache && MR.clearBookCache();
     res.json({ success: true, data: { subject_id: s.id, subject_name: s.name, ledger_code: s.ledger_code } });
   } catch (e) { bad(res, e.message); }
+});
+
+
+// ── 舊月報試算表匯入（2026-10-21）：串聯上線前的月份用試算表當正本，匯入即關帳 ──
+//   POST /api/ledger/import-sheet {items:[{store, ym, sheet, meta}], dry, force}（只有最高管理者）
+router.post('/import-sheet', async (req, res) => {
+  try {
+    if (!isBoss(req)) return bad(res, '只有最高管理者可以匯入', 403);
+    const b = req.body || {};
+    const items = Array.isArray(b.items) ? b.items : [];
+    if (!items.length || items.length > 60) return bad(res, '一次 1～60 筆');
+    const SI = require('../services/sheetImport');
+    const out = [];
+    for (const it of items) {
+      try { out.push(await SI.importOne(it, who(req), { dry: !!b.dry, force: !!b.force })); } catch (e) { out.push({ store: it.store, ym: it.ym, error: e.message }); }
+    }
+    if (!b.dry) MR.clearBookCache && MR.clearBookCache();
+    res.json({ success: true, data: out });
+  } catch (e) { fail(res, e); }
 });
 
 module.exports = router;

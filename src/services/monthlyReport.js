@@ -685,17 +685,20 @@ async function overview(ym) {
   const isStore = (u) => u.report_kind === 'store' || (u.report_kind == null && /店$/.test(String(u.store_name || '')));
   const list = (units || []).filter((s) => s.store_erpid && isStore(s));
   const [mkt, aimin, planning, storehouse, contracts, sales] = await Promise.all([marketMonth(ym, list.map((s) => s.store_erpid)), aiminMonth(ym), planningMonth(ym), storehouseMonth(ym), rentContracts(), salesMonth(ym)]);
+  // 已關帳的店用關帳快照（試算表匯入的月份也在這裡），跟單店月報一致
+  const { data: closedRows } = await supabase.from('store_month_reports').select('store_erpid, snapshot').eq('ym', ym).eq('status', 'closed');
+  const snaps = Object.fromEntries((closedRows || []).filter((r) => r.snapshot).map((r) => [String(r.store_erpid), r.snapshot]));
   const out = [];
   let i = 0;
   const worker = async () => {
     while (i < list.length) {
       const s = list[i++];
       try {
-        const r = await build(ym, s.store_erpid, { market: mkt, aimin, planning, storehouse, contracts, sales });
+        const r = snaps[String(s.store_erpid)] ? { ...snaps[String(s.store_erpid)], status: 'closed' } : await build(ym, s.store_erpid, { market: mkt, aimin, planning, storehouse, contracts, sales });
         out.push({ store: s.store_erpid, store_name: s.store_name, status: r.status, total_in: r.totals.total_in, total_out: r.totals.total_out, profit: r.totals.profit,
           sales_total: r.totals.sales_total, receipt_total: r.totals.receipt_filled ? r.totals.receipt_total : null, gap_pct: r.gap.total.pct, gap_alert: r.gap.total.alert,
           erp_total: r.revenue.glasses_receipt.erp == null ? null : r.revenue.glasses_receipt.erp + (r.revenue.contact_receipt.erp || 0),
-          filled: r.revenue.glasses_receipt.amount != null && r.revenue.contact_receipt.amount != null, warnings: r.warnings.length });
+          filled: r.revenue.glasses_receipt.amount != null && r.revenue.contact_receipt.amount != null, warnings: (r.warnings || []).length, imported: !!r.imported });
       } catch (e) { out.push({ store: s.store_erpid, store_name: s.store_name, error: e.message }); }
     }
   };
