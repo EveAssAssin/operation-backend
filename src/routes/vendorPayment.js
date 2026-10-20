@@ -111,6 +111,35 @@ router.post('/requests/:id/upload', upload.single('file'), async (req, res) => {
   } catch (e) { res.status(400).json({ success: false, message: e.message }); }
 });
 
+// 排出款（2026-10-20，migration 028）：出款日期＋出款銀行 → 今日出款 → 元大 Excel → 已出款
+const payout = require('../services/vendorPayoutService');
+const bad = (res, e) => res.status(400).json({ success: false, message: e.message });
+const actorOf = (req) => String(req.user?.name || req.user?.member_id || req.user?.id || '');
+router.get('/payout-banks', async (req, res) => { try { ok(res, await payout.listBanks({ all: req.query.all === '1' })); } catch (e) { fail(res, e); } });
+router.post('/payout-banks', authorize('operation_accounting', 'operation_lead', 'super_admin'), async (req, res) => { try { ok(res, await payout.saveBank(req.body || {})); } catch (e) { bad(res, e); } });
+router.patch('/payout-banks/:id', authorize('operation_accounting', 'operation_lead', 'super_admin'), async (req, res) => { try { ok(res, await payout.saveBank(req.body || {}, req.params.id)); } catch (e) { bad(res, e); } });
+router.put('/requests/:id/payout', async (req, res) => { try { ok(res, await payout.setPayout(req.params.id, req.body || {}, actorOf(req))); } catch (e) { bad(res, e); } });
+router.get('/payouts/day', async (req, res) => { try { ok(res, await payout.day(req.query.date)); } catch (e) { fail(res, e); } });
+router.get('/payouts/upcoming', async (req, res) => { try { ok(res, await payout.upcoming(Math.min(60, Number(req.query.days) || 14))); } catch (e) { fail(res, e); } });
+router.get('/payouts/unscheduled', async (req, res) => { try { ok(res, await payout.unscheduled()); } catch (e) { fail(res, e); } });
+router.get('/payouts/export-log', async (req, res) => { try { ok(res, await payout.exportLog()); } catch (e) { fail(res, e); } });
+router.post('/payouts/export', async (req, res) => {
+  try {
+    const out = await payout.exportYuanta(req.body || {}, actorOf(req));
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(out.filename)}`);
+    res.setHeader('X-Payout-Count', String(out.count));
+    res.setHeader('X-Payout-Total', String(out.total));
+    res.setHeader('X-Payout-Skipped', encodeURIComponent(JSON.stringify(out.skipped)));
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, X-Payout-Count, X-Payout-Total, X-Payout-Skipped');
+    res.send(out.buffer);
+  } catch (e) { bad(res, e); }
+});
+router.post('/payouts/mark-paid', async (req, res) => { try { ok(res, await payout.markPaidMany((req.body || {}).ids, req.user?.id)); } catch (e) { bad(res, e); } });
+router.post('/payouts/notify-test', authorize('operation_accounting', 'operation_lead', 'super_admin'), async (req, res) => {
+  try { ok(res, await require('../jobs/vendorPayoutNotify').sendVendorPayoutNotification({ force: true })); } catch (e) { fail(res, e); }
+});
+
 // 附件
 router.post  ('/requests/:id/files',
   async (req, res) => { try { ok(res, await svc.addFile(req.params.id, req.body || {}, 'system')); } catch (e) { fail(res, e); } });

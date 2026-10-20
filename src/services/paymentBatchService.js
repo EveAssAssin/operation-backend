@@ -377,6 +377,7 @@ async function listExportLog({ limit = 100 } = {}) {
 
 
 module.exports = {
+  buildYuantaXlsx,   // 廠商出款（vendorPayoutService）共用
   // 批次
   list, get, listEligibleRequests, createBatch,
   exportBatch, markBatchPaid, cancelBatch,
