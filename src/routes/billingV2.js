@@ -73,6 +73,10 @@ router.patch('/sources/:id', authorize('billing.manage'), async (req, res) => {
     const allowed = ['code','name','dept_erpid','contact_name','contact_phone','contact_email','notes','is_active'];
     const payload = {};
     allowed.forEach(k => { if (req.body[k] !== undefined) payload[k] = req.body[k]; });
+    if (req.body.subject_id) {
+      try { const sj = await require('../services/ledgerSubjects').mustGet(req.body.subject_id); payload.subject_id = sj.id; payload.ledger_code = sj.ledger_code; }
+      catch (e) { return res.status(400).json({ success: false, message: e.message }); }
+    }
 
     const data = await svc.updateSource(req.params.id, payload);
     res.json({ success: true, data });
@@ -182,8 +186,12 @@ router.post('/bills', authorize('billing.create'), async (req, res) => {
     const {
       source_id, accounting_category_id, period, title, description,
       total_amount, invoice_no, invoice_date, attachment_urls, notes,
-      allocations = [],
+      allocations = [], subject_id,
     } = req.body;
+    // 會計科目（2026-10-21）：手動開帳一定要選；月報格子跟著科目
+    let subj;
+    try { subj = await require('../services/ledgerSubjects').mustGet(subject_id); }
+    catch (e) { return res.status(400).json({ success: false, message: e.message }); }
 
     if (!source_id || !period || !title || total_amount === undefined) {
       return res.status(400).json({
@@ -198,6 +206,7 @@ router.post('/bills', authorize('billing.create'), async (req, res) => {
         total_amount, invoice_no, invoice_date,
         attachment_urls: attachment_urls || [],
         notes,
+        subject_id: subj.id, ledger_code: subj.ledger_code,
         status: 'draft',
       },
       allocations,

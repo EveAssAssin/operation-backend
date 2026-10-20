@@ -436,6 +436,13 @@ async function cleanAcct(acct) {
     if (n !== null && !(n >= 1 && n <= 60)) throw new Error('分攤月數要 1～60');
     out.amort_months = n && n > 1 ? n : null;
   }
+  // 會計科目（2026-10-21）：選了科目＝月報格子跟著科目
+  if (acct.subject_id !== undefined) {
+    if (acct.subject_id) {
+      const sj = await require('./ledgerSubjects').mustGet(acct.subject_id);
+      out.subject_id = sj.id; out.ledger_code = sj.ledger_code;
+    } else out.subject_id = null;
+  }
   return Object.keys(out).length ? out : null;
 }
 async function setAccounting(id, acct, actor) {
@@ -450,12 +457,17 @@ async function setAccounting(id, acct, actor) {
 }
 async function postBill(billId, row, receivedAt) {
   try {
-    return await LP.applyToBill(billId, { report_ym: row.report_ym, ledger_code: row.ledger_code, amort_months: row.amort_months, fee_ym: row.period, received_at: receivedAt, by: row.acct_set_by || null });
+    return await LP.applyToBill(billId, { report_ym: row.report_ym, ledger_code: row.ledger_code, subject_id: row.subject_id || null, amort_months: row.amort_months, fee_ym: row.period, received_at: receivedAt, by: row.acct_set_by || null });
   } catch (e) { console.error('[vendorPayment] 套用入帳設定失敗', billId, e && e.message); return null; }
 }
 
 async function approveRequest(id, actorSystemId, acct, actorName) {
   const c = await cleanAcct(acct);
+  // 會計科目一定要選（這次帶的或之前存過的）
+  if (!(c && c.subject_id)) {
+    const { data: cur } = await supabase.from('vendor_payment_requests').select('subject_id').eq('id', id).maybeSingle();
+    if (!cur || !cur.subject_id) throw new Error('請先選會計科目再通過（之後才能歸類分析）');
+  }
   const { data, error } = await supabase.from('vendor_payment_requests')
     .update({
       status: 'approved',

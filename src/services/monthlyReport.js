@@ -593,7 +593,7 @@ async function build(ym, store, opts = {}) {
   if (shares > 100) warnings.push(`股東股數合計 ${shares}，超過 100`);
   const [y, mo] = ym.split('-').map(Number);
 
-  return {
+  const out = {
     ym, store, store_name: dept.data ? dept.data.store_name : null,
     status: report ? report.status : 'draft', report,
     revenue,
@@ -632,6 +632,12 @@ async function build(ym, store, opts = {}) {
     aimin: am ? { name: am.name, sales: r0(am.sales), orders: am.order_count, paid: r0(am.paid), paid_by_method: am.paid_by_method, closings: am.closings } : null,
     warnings, settings: st, market_end: mkt.end || null, year: y,
   };
+  // 會計科目（2026-10-21）：每一筆明細補 subject_name（沒選過的用格子的預設科目）
+  if (opts.withLines) {
+    const all = [...left, ...right].flatMap((g) => g.rows || []).flatMap((r) => (r.lines || []).map((l) => { if (!l.ledger_code) l.ledger_code = r.code; return l; }));
+    try { await require('./ledgerSubjects').attach(all); } catch (e) { warnings.push(`會計科目讀不到：${e.message}`); }
+  }
+  return out;
 }
 
 /** 帳本明細（2026-10-20）：某月全部門市的每一筆支出（已關帳的用關帳快照），給帳單管理「📒 帳本明細」篩選／趨勢用；快取 5 分鐘 */
@@ -664,6 +670,7 @@ async function bookMonth(ym, { fresh } = {}) {
     }
   };
   await Promise.all([worker(), worker(), worker(), worker()]);
+  try { await require('./ledgerSubjects').attach(lines); } catch (e) { errors.push({ store: '-', error: `會計科目：${e.message}` }); }
   const v = { ym, lines, errors };
   bookCache.set(ym, { at: Date.now(), v });
   return v;

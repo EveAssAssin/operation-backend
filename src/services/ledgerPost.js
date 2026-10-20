@@ -59,6 +59,10 @@ async function plan(store, amount, startYm, n, closedFn) {
  * acct = { report_ym, ledger_code, amort_months, fee_ym, received_at, by }
  */
 async function applyToBill(billId, acct) {
+  if (acct.subject_id) {
+    const sj = await require('./ledgerSubjects').byId(acct.subject_id);
+    if (sj) { acct.ledger_code = acct.ledger_code || sj.ledger_code; await supabase.from('bills').update({ subject_id: sj.id, ledger_code: sj.ledger_code }).eq('id', billId); }
+  }
   const { data: als } = await supabase.from('bill_allocations').select('id, store_erpid, allocated_amount').eq('bill_id', billId);
   if (!als || !als.length) return { done: 0 };
   const cut = await cutoffDay();

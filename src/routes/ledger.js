@@ -28,6 +28,7 @@ const { authenticate, authorizeModule } = require('../middleware/auth');
 const MR = require('../services/monthlyReport');
 const MA = require('../services/monthlyAudit');
 const LV = require('../services/ledgerVouchers');
+const LS = require('../services/ledgerSubjects');
 
 router.use(authenticate, authorizeModule('billing', 'view'));
 const canEdit = authorizeModule('billing', 'edit');
@@ -93,7 +94,12 @@ router.post('/manual', canEdit, async (req, res) => {
     if (type === 'adjust' && !reason) return bad(res, '調帳一定要寫原因');
     if (await closed(store, ym)) return bad(res, '這個月已關帳，請記在下個月或先重新開帳', 409);
     const vendor = String(b.vendor || '').trim() || null;
-    const row = { entry_type: type, store_erpid: store, report_ym: ym, fee_ym: b.fee_ym || null, ledger_code: code, amount, vendor, reason: reason || null, files: Array.isArray(b.files) ? b.files : [], created_by: who(req) };
+    // 會計科目（2026-10-21）：支出格子一律要選（清掉手填值不用）
+    let subjectId = null;
+    if (!b.clear && await LS.needsSubject(code)) {
+      try { subjectId = (await LS.mustGet(b.subject_id, code)).id; } catch (e) { return bad(res, e.message); }
+    }
+    const row = { entry_type: type, store_erpid: store, report_ym: ym, fee_ym: b.fee_ym || null, ledger_code: code, amount, vendor, reason: reason || null, files: Array.isArray(b.files) ? b.files : [], created_by: who(req), subject_id: subjectId };
     if (type === 'value') {
       // 同店同月同科目同廠商只留一筆：舊的作廢再寫新的（留紀錄）
       let q = supabase.from('ledger_manual_entries').update({ void_at: new Date().toISOString(), void_by: who(req) })
@@ -114,13 +120,13 @@ router.post('/manual', canEdit, async (req, res) => {
 const addYm = (ym, k) => { const [y, m] = ym.split('-').map(Number); return new Date(Date.UTC(y, m - 1 + k, 1)).toISOString().slice(0, 7); };
 router.get('/amortize', async (req, res) => {
   try {
-    let q = supabase.from('ledger_manual_entries').select('id, amort_group, amort_seq, amort_n, amort_total, store_erpid, report_ym, ledger_code, amount, vendor, reason, created_by, created_at, void_at')
+    let q = supabase.from('ledger_manual_entries').select('id, amort_group, amort_seq, amort_n, amort_total, store_erpid, report_ym, ledger_code, amount, vendor, reason, created_by, created_at, void_at, subject_id')
       .not('amort_group', 'is', null).order('created_at', { ascending: false }).limit(2000);
     if (req.query.store) q = q.eq('store_erpid', String(req.query.store));
     const { data, error } = await q; if (error) throw error;
     const g = {};
     for (const r of data || []) {
-      const x = (g[r.amort_group] = g[r.amort_group] || { group: r.amort_group, store: r.store_erpid, ledger_code: r.ledger_code, total: Number(r.amort_total), n: r.amort_n, vendor: r.vendor,
+      const x = (g[r.amort_group] = g[r.amort_group] || { group: r.amort_group, store: r.store_erpid, ledger_code: r.ledger_code, subject_id: r.subject_id || null, total: Number(r.amort_total), n: r.amort_n, vendor: r.vendor,
         reason: String(r.reason || '').replace(/^分攤 \d+\/\d+（[^）]*）：/, ''), created_by: r.created_by, created_at: r.created_at, months: [] });
       x.months.push({ id: r.id, seq: r.amort_seq, ym: r.report_ym, amount: Number(r.amount), void: !!r.void_at });
     }
@@ -132,7 +138,10 @@ router.get('/amortize', async (req, res) => {
 router.post('/amortize', canEdit, async (req, res) => {
   try {
     const b = req.body || {};
-    const store = String(b.store || ''), code = String(b.ledger_code || ''), from = String(b.from_ym || '');
+    // 會計科目（2026-10-21）：一定要選，月報格子跟著科目走
+    let subj;
+    try { subj = await LS.mustGet(b.subject_id, b.ledger_code || null); } catch (e) { return bad(res, e.message); }
+    const store = String(b.store || ''), code = subj.ledger_code, from = String(b.from_ym || '');
     const total = Math.round(Number(b.total)), n = Math.floor(Number(b.months));
     const reason = String(b.reason || '').trim(), vendor = String(b.vendor || '').trim() || null;
     if (!store || !code || !YM.test(from)) return bad(res, '缺門市／科目／起始月份');
@@ -147,7 +156,7 @@ router.post('/amortize', canEdit, async (req, res) => {
     const group = `am_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
     const rows = yms.map((ym, k) => ({ entry_type: 'amort', store_erpid: store, report_ym: ym, fee_ym: ym, ledger_code: code, amount: k === n - 1 ? last : each, vendor,
       reason: `分攤 ${k + 1}/${n}（總額 ${total.toLocaleString()}）：${reason}`, files: Array.isArray(b.files) ? b.files : [], created_by: who(req),
-      amort_group: group, amort_seq: k + 1, amort_n: n, amort_total: total }));
+      amort_group: group, amort_seq: k + 1, amort_n: n, amort_total: total, subject_id: subj.id }));
     const { error } = await supabase.from('ledger_manual_entries').insert(rows);
     if (error) throw error;
     res.json({ success: true, data: { group, months: yms, each, last } });
@@ -168,7 +177,7 @@ router.delete('/amortize/:group', canEdit, async (req, res) => {
 // 已關帳的月份不能寫入也不能移出；有分攤的要先取消分攤才能改月份
 const LP = require('../services/ledgerPost');
 async function allocView(billId) {
-  const { data: bill } = await supabase.from('bills').select('id, bill_no, title, period, status, report_ym, report_ym_manual, received_at, submitted_at, created_at, confirmed_at, ledger_code, source_id, accounting_category_id, source_system').eq('id', billId).maybeSingle();
+  const { data: bill } = await supabase.from('bills').select('id, bill_no, title, period, status, report_ym, report_ym_manual, received_at, submitted_at, created_at, confirmed_at, ledger_code, source_id, accounting_category_id, source_system, subject_id').eq('id', billId).maybeSingle();
   if (!bill) return null;
   const [{ data: als }, { data: src }, { data: cat }] = await Promise.all([
     supabase.from('bill_allocations').select('id, store_erpid, store_name, allocated_amount, report_ym, fee_ym, ledger_code').eq('bill_id', billId).order('store_name'),
@@ -191,7 +200,9 @@ async function allocView(billId) {
       effective_code: a.ledger_code || defCode || 'other', code_auto: !a.ledger_code,
       schedule: valid ? sc.map((x) => ({ seq: x.seq, ym: x.report_ym, amount: Number(x.amount), closed: isC(a.store_erpid, x.report_ym), shifted_from: x.shifted_from })) : [] });
   }
-  return { bill: { ...bill, source_name: src && src.name, category_name: cat && cat.name, default_code: defCode, auto_ym: autoYm, cutoff: cut }, allocations: rows };
+  const subj = bill.subject_id ? await LS.byId(bill.subject_id) : (defCode ? await LS.defaultOf(defCode) : null);
+  return { bill: { ...bill, source_name: src && src.name, category_name: cat && cat.name, default_code: defCode, auto_ym: autoYm, cutoff: cut,
+    subject_name: subj ? subj.name : null, subject_ledger: subj ? subj.ledger_code : null, subject_set: !!bill.subject_id }, allocations: rows };
 }
 router.get('/bill/:id', async (req, res) => {
   try { const v = await allocView(req.params.id); if (!v) return bad(res, '找不到帳單', 404); res.json({ success: true, data: v }); } catch (e) { fail(res, e); }
@@ -270,26 +281,31 @@ router.get('/book', async (req, res) => {
     const yms = []; for (let m = from; m <= to && yms.length < 12; m = LP.addYm(m, 1)) yms.push(m);
     const months = [];
     for (const ym of yms) months.push(await MR.bookMonth(ym, { fresh: req.query.fresh === '1' && ym === yms[yms.length - 1] }));
-    const f = { store: String(req.query.store || ''), code: String(req.query.code || ''), group: String(req.query.group || ''), source: String(req.query.source || ''), q: String(req.query.q || '').trim() };
+    const f = { store: String(req.query.store || ''), code: String(req.query.code || ''), group: String(req.query.group || ''), source: String(req.query.source || ''), subject: String(req.query.subject || ''), q: String(req.query.q || '').trim() };
     let lines = months.flatMap((m) => m.lines);
     if (f.store) lines = lines.filter((l) => l.store === f.store);
     if (f.code) lines = lines.filter((l) => l.code === f.code);
     if (f.group) lines = lines.filter((l) => l.group === f.group);
     if (f.source) lines = lines.filter((l) => l.source_name === f.source || l.source === f.source);
-    if (f.q) lines = lines.filter((l) => `${l.ref_title || ''} ${l.name} ${l.store_name}`.includes(f.q));
-    const byCode = {}, byStore = {}, bySource = {};
+    if (f.subject) lines = lines.filter((l) => l.subject_id === f.subject);
+    if (f.q) lines = lines.filter((l) => `${l.ref_title || ''} ${l.name} ${l.store_name} ${l.subject_name || ''}`.includes(f.q));
+    const byCode = {}, byStore = {}, bySource = {}, bySubject = {};
     for (const l of lines) {
       const c = (byCode[l.code] = byCode[l.code] || { code: l.code, name: l.name, group: l.group, group_name: l.group_name, months: {}, total: 0 });
       c.months[l.ym] = (c.months[l.ym] || 0) + l.amount; c.total += l.amount;
       const s = (byStore[l.store] = byStore[l.store] || { store: l.store, store_name: l.store_name, months: {}, total: 0 });
       s.months[l.ym] = (s.months[l.ym] || 0) + l.amount; s.total += l.amount;
       bySource[l.source_name] = (bySource[l.source_name] || 0) + l.amount;
+      const sk = l.subject_id || `none:${l.code}`;
+      const sj = (bySubject[sk] = bySubject[sk] || { subject_id: l.subject_id || null, name: l.subject_name || l.name, code: l.code, code_name: l.name, months: {}, total: 0, unset: 0 });
+      sj.months[l.ym] = (sj.months[l.ym] || 0) + l.amount; sj.total += l.amount; if (!l.subject_set) sj.unset += l.amount;
     }
     const total = lines.reduce((t, l) => t + l.amount, 0);
     res.json({ success: true, data: {
       months: yms, total, count: lines.length,
       by_code: Object.values(byCode).sort((a, b) => b.total - a.total),
       by_store: Object.values(byStore).sort((a, b) => b.total - a.total),
+      by_subject: Object.values(bySubject).sort((a, b) => b.total - a.total),
       by_source: Object.entries(bySource).map(([k, v]) => ({ source: k, amount: v })).sort((a, b) => b.amount - a.amount),
       lines: lines.sort((a, b) => b.ym.localeCompare(a.ym) || String(a.store_name).localeCompare(String(b.store_name), 'zh-Hant') || b.amount - a.amount).slice(0, 3000),
       truncated: lines.length > 3000, errors: months.flatMap((m) => m.errors.map((e) => ({ ...e, ym: m.ym }))),
@@ -513,7 +529,9 @@ router.post('/accounts', canEdit, async (req, res) => {
       auto_source: isRev || b.auto_source === 'manual' ? 'manual' : 'bill', sort_order: ((last && last.sort_order) || 0) + 1, is_active: true,
       note: `新增於 ${new Date().toISOString().slice(0, 10)}，${who(req)}` };
     const { data, error } = await supabase.from('ledger_accounts').insert(row).select().single();
-    if (error) throw error; res.json({ success: true, data });
+    if (error) throw error;
+    if (row.kind === 'expense') await LS.ensureDefault(code, name);
+    res.json({ success: true, data });
   } catch (e) { fail(res, e); }
 });
 router.patch('/accounts/:code', canEdit, async (req, res) => {
@@ -813,6 +831,55 @@ router.post('/vouchers', voucherGuard, canEdit, voucherUpload.array('files', 10)
 });
 router.delete('/vouchers/:id', voucherGuard, canEdit, async (req, res) => {
   try { res.json({ success: true, data: await LV.voidOne(req.params.id, who(req)) }); } catch (e) { bad(res, e.message); }
+});
+
+
+// ── 會計科目（2026-10-21）：月報格子底下的細項；手填／調帳／分攤／開帳都要選 ──
+//   GET   /api/ledger/subjects[?all=1]        清單（all＝含停用）
+//   POST  /api/ledger/subjects {ledger_code, name, note}
+//   PATCH /api/ledger/subjects/:id {name, is_active, sort_order, note}
+//   PATCH /api/ledger/manual/:id/subject {subject_id}   補選手填／調帳／分攤（分攤整組一起改）
+//   PATCH /api/ledger/bill/:id/subject {subject_id}     改帳單的科目（月報格子跟著換；有月份已關帳就不能換格子）
+router.get('/subjects', async (req, res) => {
+  try { const v = await LS.all(true); res.json({ success: true, data: req.query.all === '1' ? v : v.filter((s) => s.is_active) }); } catch (e) { fail(res, e); }
+});
+router.post('/subjects', canEdit, async (req, res) => {
+  try { res.json({ success: true, data: await LS.create(req.body || {}, who(req)) }); } catch (e) { bad(res, e.message); }
+});
+router.patch('/subjects/:id', canEdit, async (req, res) => {
+  try { res.json({ success: true, data: await LS.patch(req.params.id, req.body || {}) }); } catch (e) { bad(res, e.message); }
+});
+router.patch('/manual/:id/subject', canEdit, async (req, res) => {
+  try {
+    const { data: m } = await supabase.from('ledger_manual_entries').select('id, ledger_code, amort_group, void_at').eq('id', req.params.id).maybeSingle();
+    if (!m || m.void_at) return bad(res, '找不到這筆（或已作廢）', 404);
+    const s = await LS.mustGet((req.body || {}).subject_id, m.ledger_code);
+    let q = supabase.from('ledger_manual_entries').update({ subject_id: s.id });
+    q = m.amort_group ? q.eq('amort_group', m.amort_group) : q.eq('id', m.id);
+    const { error } = await q; if (error) throw error;
+    MR.clearBookCache && MR.clearBookCache();
+    res.json({ success: true, data: { subject_id: s.id, subject_name: s.name } });
+  } catch (e) { bad(res, e.message); }
+});
+router.patch('/bill/:id/subject', canEdit, async (req, res) => {
+  try {
+    const { data: bill } = await supabase.from('bills').select('id, ledger_code, period').eq('id', req.params.id).maybeSingle();
+    if (!bill) return bad(res, '找不到帳單', 404);
+    const s = await LS.mustGet((req.body || {}).subject_id);
+    const { data: als } = await supabase.from('bill_allocations').select('id, store_erpid, report_ym, ledger_code').eq('bill_id', bill.id);
+    const changesCell = (als || []).some((a) => (a.ledger_code || bill.ledger_code) !== s.ledger_code);
+    if (changesCell) {
+      for (const a of als || []) {
+        const ym = a.report_ym || bill.period;
+        if (ym && await closed(String(a.store_erpid), ym)) return bad(res, `${a.store_erpid} ${ym} 已關帳，不能換到別的月報格子（同一格的科目可以換）`, 409);
+      }
+      await supabase.from('bill_allocations').update({ ledger_code: null, updated_at: new Date().toISOString() }).eq('bill_id', bill.id);
+    }
+    const { error } = await supabase.from('bills').update({ subject_id: s.id, ledger_code: s.ledger_code, updated_at: new Date().toISOString() }).eq('id', bill.id);
+    if (error) throw error;
+    MR.clearBookCache && MR.clearBookCache();
+    res.json({ success: true, data: { subject_id: s.id, subject_name: s.name, ledger_code: s.ledger_code } });
+  } catch (e) { bad(res, e.message); }
 });
 
 module.exports = router;
