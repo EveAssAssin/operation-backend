@@ -98,7 +98,7 @@ async function savePrice(b, actor) {
   const amount = Number(b.amount);
   const eff = String(b.effective_from || curYm());
   if (!/^\d+$/.test(bind)) { const e = new Error('要選商品（bind_id）'); e.status = 400; throw e; }
-  if (b.amount === '' || b.amount == null || !Number.isFinite(amount) || amount < 0) { const e = new Error(`金額不對（${b.name || bind}）`); e.status = 400; throw e; }
+  if (b.amount === '' || b.amount == null || !Number.isFinite(amount)) { const e = new Error(`金額不對（${b.name || bind}）`); e.status = 400; throw e; }
   if (!YM.test(eff)) { const e = new Error('生效月份要 YYYY-MM'); e.status = 400; throw e; }
   const row = { bind_id: Number(bind), name: b.name || null, brand: b.brand || null, catena: b.catena || null, model: b.model || null, amount, effective_from: eff, note: b.note || null };
   const { data: ex } = await supabase.from('proc_price_items').select('*').eq('bind_id', Number(bind)).eq('effective_from', eff).eq('is_active', true).maybeSingle();
@@ -124,7 +124,7 @@ router.post('/prices/batch', async (req, res) => {
     if (list.length > 500) return bad(res, '一次最多 500 筆');
     for (const b of list) {   // 先全部檢查，避免存一半
       const a = Number(b.amount);
-      if (!/^\d+$/.test(String(b.bind_id || '')) || b.amount === '' || b.amount == null || !Number.isFinite(a) || a < 0) return bad(res, `金額不對（${b.name || b.bind_id}）`);
+      if (!/^\d+$/.test(String(b.bind_id || '')) || b.amount === '' || b.amount == null || !Number.isFinite(a)) return bad(res, `金額不對（${b.name || b.bind_id}）`);
     }
     const saved = [];
     for (const b of list) saved.push(await savePrice(b, req.actor));

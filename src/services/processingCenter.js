@@ -164,8 +164,8 @@ async function open(ym, store, actor) {
 
   let billId = null; let reportYm = null;
   if (total !== 0) {
-    const items = counted.filter((o) => o.amount).map((o, i) => ({ type: 'completion', seq_no: i + 1, item_date: o.done_at.slice(0, 10), doc_number: o.order_number,
-      product_spec: o.lines.filter((l) => l.price).map((l) => `${l.name || l.bind_id} ${l.price}`).join('／'), quantity: 1, unit_price: o.amount, total: o.amount,
+    const items = counted.filter((o) => o.amount).map((o, i) => ({ type: o.amount < 0 ? 'return' : 'completion', seq_no: i + 1, item_date: o.done_at.slice(0, 10), doc_number: o.order_number,
+      product_spec: o.lines.filter((l) => l.price).map((l) => `${l.name || l.bind_id} ${l.price}`).join('／'), quantity: 1, unit_price: Math.abs(o.amount), total: o.amount,
       store_erpid: store, store_name: s.store_name }))
       .concat(s.extras.map((e, i) => ({ type: Number(e.amount) < 0 ? 'return' : 'completion', seq_no: counted.length + i + 1, doc_number: e.order_number || null,
         product_spec: `追加：${e.reason}`, quantity: 1, unit_price: Math.abs(Number(e.amount)), total: Number(e.amount), store_erpid: store, store_name: s.store_name })));
