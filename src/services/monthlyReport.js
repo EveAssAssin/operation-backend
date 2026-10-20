@@ -18,7 +18,7 @@ const RATIO_TARGET = { 人事: 23, 包裝: 10, 鏡片: 15, 鏡框: 12, 營運費
 const DIVIDEND_CODES = ['marketing_fund', 'depreciation'];
 const SOURCE_NAME = {
   bill: '開帳單', billing_order: '部門開帳', opex: '營運費用', recurring: '固定支出', fixed: '固定金額',
-  manual_value: '手填', manual_adjust: '調帳', erp_cost: 'ERP 費用單', aimin_expense: '愛民支出', planning_bill: '企劃部開帳', storehouse: '倉庫開帳', contract: '合約', basic: '基本資料', check: '支票', card_fee: '刷卡費率', lefthand_salary: '左手薪資',
+  manual_value: '手填', manual_adjust: '調帳', manual_amort: '分攤', erp_cost: 'ERP 費用單', aimin_expense: '愛民支出', planning_bill: '企劃部開帳', storehouse: '倉庫開帳', contract: '合約', basic: '基本資料', check: '支票', card_fee: '刷卡費率', lefthand_salary: '左手薪資',
 };
 
 const MARKET_BASE = process.env.MARKET_BACKEND_URL || 'https://market-backend-0544.onrender.com';

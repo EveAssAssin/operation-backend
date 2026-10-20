@@ -104,6 +104,62 @@ router.post('/manual', canEdit, async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
+// ── 分攤開帳（2026-10-20）：一筆金額分 N 個月列入同一家店同一個科目 ──
+// POST {store, ledger_code, total, from_ym, months(2～60), vendor, reason(必填)}；每月 floor(total/N)，零頭放最後一個月
+// 任何一個月已關帳就整筆不建；GET ?store= 列出這家店的分攤；DELETE /amortize/:group 作廢還沒關帳的那幾個月
+const addYm = (ym, k) => { const [y, m] = ym.split('-').map(Number); return new Date(Date.UTC(y, m - 1 + k, 1)).toISOString().slice(0, 7); };
+router.get('/amortize', async (req, res) => {
+  try {
+    let q = supabase.from('ledger_manual_entries').select('id, amort_group, amort_seq, amort_n, amort_total, store_erpid, report_ym, ledger_code, amount, vendor, reason, created_by, created_at, void_at')
+      .not('amort_group', 'is', null).order('created_at', { ascending: false }).limit(2000);
+    if (req.query.store) q = q.eq('store_erpid', String(req.query.store));
+    const { data, error } = await q; if (error) throw error;
+    const g = {};
+    for (const r of data || []) {
+      const x = (g[r.amort_group] = g[r.amort_group] || { group: r.amort_group, store: r.store_erpid, ledger_code: r.ledger_code, total: Number(r.amort_total), n: r.amort_n, vendor: r.vendor,
+        reason: String(r.reason || '').replace(/^分攤 \d+\/\d+（[^）]*）：/, ''), created_by: r.created_by, created_at: r.created_at, months: [] });
+      x.months.push({ id: r.id, seq: r.amort_seq, ym: r.report_ym, amount: Number(r.amount), void: !!r.void_at });
+    }
+    const list = Object.values(g).map((x) => ({ ...x, months: x.months.sort((a, b) => a.seq - b.seq), from_ym: x.months.reduce((m, r) => (!m || r.ym < m ? r.ym : m), ''), to_ym: x.months.reduce((m, r) => (r.ym > m ? r.ym : m), '') }))
+      .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+    res.json({ success: true, data: list });
+  } catch (e) { fail(res, e); }
+});
+router.post('/amortize', canEdit, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const store = String(b.store || ''), code = String(b.ledger_code || ''), from = String(b.from_ym || '');
+    const total = Math.round(Number(b.total)), n = Math.floor(Number(b.months));
+    const reason = String(b.reason || '').trim(), vendor = String(b.vendor || '').trim() || null;
+    if (!store || !code || !YM.test(from)) return bad(res, '缺門市／科目／起始月份');
+    if (!Number.isFinite(total) || total === 0) return bad(res, '總金額不對');
+    if (!(n >= 2 && n <= 60)) return bad(res, '分攤月數要 2～60');
+    if (!reason) return bad(res, '要寫說明（例：招牌更換，分 12 個月）');
+    if (!(await okCode(code)) ) return bad(res, '沒有這個科目');
+    const yms = Array.from({ length: n }, (_, k) => addYm(from, k));
+    const { data: cl } = await supabase.from('store_month_reports').select('ym').eq('store_erpid', store).in('ym', yms).eq('status', 'closed');
+    if ((cl || []).length) return bad(res, `${cl.map((x) => x.ym).join('、')} 已關帳，請從之後的月份開始分攤`, 409);
+    const each = Math.trunc(total / n), last = total - each * (n - 1);
+    const group = `am_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    const rows = yms.map((ym, k) => ({ entry_type: 'amort', store_erpid: store, report_ym: ym, fee_ym: ym, ledger_code: code, amount: k === n - 1 ? last : each, vendor,
+      reason: `分攤 ${k + 1}/${n}（總額 ${total.toLocaleString()}）：${reason}`, files: Array.isArray(b.files) ? b.files : [], created_by: who(req),
+      amort_group: group, amort_seq: k + 1, amort_n: n, amort_total: total }));
+    const { error } = await supabase.from('ledger_manual_entries').insert(rows);
+    if (error) throw error;
+    res.json({ success: true, data: { group, months: yms, each, last } });
+  } catch (e) { fail(res, e); }
+});
+router.delete('/amortize/:group', canEdit, async (req, res) => {
+  try {
+    const { data } = await supabase.from('ledger_manual_entries').select('id, store_erpid, report_ym').eq('amort_group', req.params.group).is('void_at', null);
+    if (!(data || []).length) return bad(res, '找不到或已作廢', 404);
+    const kept = [], ids = [];
+    for (const r of data) { if (await closed(r.store_erpid, r.report_ym)) kept.push(r.report_ym); else ids.push(r.id); }
+    if (ids.length) { const { error } = await supabase.from('ledger_manual_entries').update({ void_at: new Date().toISOString(), void_by: who(req) }).in('id', ids); if (error) throw error; }
+    res.json({ success: true, data: { voided: ids.length, kept_closed: kept.sort() } });
+  } catch (e) { fail(res, e); }
+});
+
 router.delete('/manual/:id', canEdit, async (req, res) => {
   try {
     const { data: m } = await supabase.from('ledger_manual_entries').select('store_erpid, report_ym').eq('id', req.params.id).maybeSingle();
