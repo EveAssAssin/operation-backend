@@ -95,11 +95,27 @@ router.post('/requests/:id/approve', async (req, res) => { try { ok(res, await s
 router.post('/requests/:id/reject',  async (req, res) => { try { ok(res, await svc.rejectRequest(req.params.id, req.body?.reason, req.user?.id)); } catch (e) { fail(res, e); } });
 router.post('/requests/:id/mark-paid', async (req, res) => { try { ok(res, await svc.markPaid(req.params.id, req.user?.id)); }                  catch (e) { fail(res, e); } });
 
+// 廠商入口 V1（2026-10-20）：分配門市（會計可調整）、附件上傳私有 bucket
+const multer = require('multer');
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+router.get('/targets', async (req, res) => { try { ok(res, await svc.listTargets()); } catch (e) { fail(res, e); } });
+router.put('/requests/:id/allocations', async (req, res) => {
+  try { ok(res, await svc.saveAllocations(req.params.id, (req.body || {}).rows, { actorType: 'system', actorId: req.user?.id, actorName: req.user?.name || req.user?.member_id })); }
+  catch (e) { res.status(400).json({ success: false, message: e.message }); }
+});
+router.post('/requests/:id/upload', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ success: false, message: '請附上檔案' });
+    ok(res, await svc.uploadRequestFile(req.params.id, { buffer: req.file.buffer, mimeType: req.file.mimetype,
+      originalName: Buffer.from(req.file.originalname || '', 'latin1').toString('utf8'), file_type: req.query.file_type }, 'system'));
+  } catch (e) { res.status(400).json({ success: false, message: e.message }); }
+});
+
 // 附件
 router.post  ('/requests/:id/files',
   async (req, res) => { try { ok(res, await svc.addFile(req.params.id, req.body || {}, 'system')); } catch (e) { fail(res, e); } });
 router.delete('/files/:id',
-  async (req, res) => { try { ok(res, await svc.deleteFile(req.params.id)); } catch (e) { fail(res, e); } });
+  async (req, res) => { try { await svc.removeStoredFile(req.params.id); ok(res, await svc.deleteFile(req.params.id)); } catch (e) { fail(res, e); } });
 
 // 發票
 router.post  ('/requests/:id/invoices',

@@ -114,7 +114,13 @@ async function getRequest(id) {
   // 附件
   const { data: files } = await supabase.from('vendor_payment_files')
     .select('*').eq('request_id', id).order('uploaded_at', { ascending: true });
-  data.files = files || [];
+  data.files = await signFiles(files || []);
+
+  // 分配門市（廠商入口 V1，2026-10-20）
+  const { data: allocs } = await supabase.from('vendor_payment_allocations')
+    .select('*').eq('request_id', id).order('seq', { ascending: true });
+  data.allocations = allocs || [];
+  data.alloc_total = Math.round((allocs || []).reduce((a, x) => a + Number(x.amount || 0), 0) * 100) / 100;
 
   // 發票
   const { data: invoices } = await supabase.from('vendor_invoices')
@@ -188,7 +194,7 @@ async function updateRequest(id, patch, { actorType, actorId }) {
   // 廠商只能改自己的 draft
   if (actorType === 'vendor') {
     if (before.created_by_vendor !== actorId) throw new Error('無權編輯此請款單');
-    if (before.status !== 'draft') throw new Error('已送出的請款單不能編輯');
+    if (!['draft', 'rejected'].includes(before.status)) throw new Error('已送出的請款單不能編輯');
   }
   // 系統人員：draft / submitted 可改；approved/paid/rejected 不能改基本欄位
   if (actorType === 'system' && !['draft','submitted'].includes(before.status)) {
@@ -229,12 +235,20 @@ async function submitRequest(id, { actorType, actorId }) {
   const { data: req } = await supabase.from('vendor_payment_requests')
     .select('status, created_by_vendor').eq('id', id).maybeSingle();
   if (!req) throw new Error('找不到請款單');
-  if (req.status !== 'draft') throw new Error('只有草稿可送審');
+  if (!['draft', 'rejected'].includes(req.status)) throw new Error('只有草稿或被退回的請款可送審');
   if (actorType === 'vendor' && req.created_by_vendor !== actorId) {
     throw new Error('無權送審');
   }
+  if (actorType === 'vendor') {
+    const [{ data: al }, { data: fl }] = await Promise.all([
+      supabase.from('vendor_payment_allocations').select('amount').eq('request_id', id),
+      supabase.from('vendor_payment_files').select('id').eq('request_id', id),
+    ]);
+    if (!(al || []).length) throw new Error('請先填「項目名稱／金額／門市」至少一列');
+    if (!(fl || []).length) throw new Error('請先上傳帳單照片或 Excel');
+  }
   const { data, error } = await supabase.from('vendor_payment_requests')
-    .update({ status: 'submitted', submitted_at: new Date().toISOString() })
+    .update({ status: 'submitted', submitted_at: new Date().toISOString(), rejection_reason: null })
     .eq('id', id).select().single();
   if (error) throw new Error(error.message);
   return data;
@@ -444,6 +458,11 @@ async function markPaid(id, actorSystemId) {
     }).eq('id', id).eq('status', 'approved').select().single();
   if (error) throw new Error(error.message);
   if (!data) throw new Error('只有已通過的請款可標記撥款');
+  // 廠商入口的請款：付款完成才進門市月報（營運 2026-10-20）→ 照分配門市產生帳單＋分攤
+  try {
+    const billId = await billFromAllocations(data);
+    if (billId) data.linked_bill_id = billId;
+  } catch (e) { console.warn('[vendorPayment] billFromAllocations:', e && e.message); }
     fireWebhookIfMarket(data, 'operation_completed');
   return data;
 }
@@ -566,7 +585,143 @@ async function upsertCompanyProfile(payload) {
 }
 
 
+
+// ════════════════════════════════════════════════════════════
+//   廠商入口 V1（2026-10-20）：分配門市、附件私有存放、付款後產生帳單
+// ════════════════════════════════════════════════════════════
+const FILE_BUCKET = 'vendor-files';
+const r2 = (n) => Math.round(Number(n) * 100) / 100;
+
+/** 可選的門市／部門（門市在前；部門名稱是純數字的不列） */
+async function listTargets() {
+  const { data } = await supabase.from('departments').select('store_erpid, store_name, report_kind, is_active').eq('is_active', true);
+  return (data || []).filter((d) => d.report_kind === 'store' || !/^\d+$/.test(String(d.store_name || '')))
+    .map((d) => ({ store_erpid: d.store_erpid, store_name: d.store_name, kind: d.report_kind === 'store' ? 'store' : 'dept' }))
+    .sort((a, b) => (a.kind === b.kind ? String(a.store_name).localeCompare(String(b.store_name), 'zh-Hant') : a.kind === 'store' ? -1 : 1));
+}
+
+/**
+ * 存整份分配（覆蓋）。rows: [{item_name, store_erpid, amount, note}]
+ * 廠商：只能改自己的草稿／被退回的；會計：送審中／已通過都能改（付款後不能改），改過的列記 adjusted_by，保留廠商原本填的。
+ * 請款總額＝分配合計。
+ */
+async function saveAllocations(request_id, rows, { actorType, actorId, actorName }) {
+  const { data: req } = await supabase.from('vendor_payment_requests').select('id, status, created_by_vendor, source_id').eq('id', request_id).maybeSingle();
+  if (!req) throw new Error('找不到請款單');
+  if (actorType === 'vendor') {
+    if (req.created_by_vendor !== actorId) throw new Error('無權編輯此請款單');
+    if (!['draft', 'rejected'].includes(req.status)) throw new Error('已送出的請款單不能改分配，要改請聯絡樂活會計');
+  } else if (['paid'].includes(req.status)) {
+    throw new Error('已付款的請款不能改分配（已進門市月報，要改請用月報調帳）');
+  }
+  if (!Array.isArray(rows) || !rows.length) throw new Error('至少要一列');
+  if (rows.length > 300) throw new Error('一張請款最多 300 列');
+  const targets = new Map((await listTargets()).map((t) => [String(t.store_erpid), t]));
+  const clean = rows.map((x, i) => {
+    const name = String(x.item_name || '').trim().slice(0, 100);
+    const store = String(x.store_erpid || '');
+    const amt = Number(x.amount);
+    if (!name) throw new Error(`第 ${i + 1} 列沒有項目名稱`);
+    if (!targets.has(store)) throw new Error(`第 ${i + 1} 列門市不對`);
+    if (!Number.isFinite(amt) || amt === 0) throw new Error(`第 ${i + 1} 列金額不對`);
+    return { id: x.id || null, item_name: name, store_erpid: store, store_name: targets.get(store).store_name, amount: r2(amt), note: x.note ? String(x.note).slice(0, 200) : null };
+  });
+  const { data: before } = await supabase.from('vendor_payment_allocations').select('*').eq('request_id', request_id);
+  const old = new Map((before || []).map((b) => [b.id, b]));
+  const now = new Date().toISOString();
+  const ins = clean.map((c, i) => {
+    const o = c.id ? old.get(c.id) : null;
+    const row = { request_id, seq: i + 1, item_name: c.item_name, store_erpid: c.store_erpid, store_name: c.store_name, amount: c.amount, note: c.note };
+    if (actorType === 'vendor') { row.vendor_amount = c.amount; row.vendor_store = c.store_erpid; }
+    else {
+      row.vendor_amount = o ? o.vendor_amount : null; row.vendor_store = o ? o.vendor_store : null;
+      const changed = !o || Number(o.amount) !== c.amount || o.store_erpid !== c.store_erpid || o.item_name !== c.item_name;
+      row.adjusted_by = changed ? (actorName || actorId || '會計') : (o.adjusted_by || null);
+      row.adjusted_at = changed ? now : (o.adjusted_at || null);
+    }
+    return row;
+  });
+  // 會計刪掉的廠商列也要留痕：記在請款單 description 不合適 → 記 log
+  if (actorType !== 'vendor') {
+    const keep = new Set(clean.filter((c) => c.id).map((c) => c.id));
+    const gone = (before || []).filter((b) => !keep.has(b.id) && b.vendor_amount != null);
+    if (gone.length) console.log('[vendorPayment] 會計刪除廠商分配列', request_id, JSON.stringify(gone.map((g) => [g.item_name, g.store_erpid, g.vendor_amount])));
+  }
+  const { error: dErr } = await supabase.from('vendor_payment_allocations').delete().eq('request_id', request_id);
+  if (dErr) throw new Error(dErr.message);
+  const { error: iErr } = await supabase.from('vendor_payment_allocations').insert(ins);
+  if (iErr) throw new Error(iErr.message);
+  const total = r2(clean.reduce((a, c) => a + c.amount, 0));
+  await supabase.from('vendor_payment_requests').update({ total_amount: total }).eq('id', request_id);
+  return { total, rows: ins.length };
+}
+
+/** 上傳附件到私有 bucket（廠商／會計共用） */
+async function uploadRequestFile(request_id, { buffer, mimeType, originalName, file_type }, actorType) {
+  if (!['summary', 'detail', 'invoice', 'other'].includes(file_type)) file_type = 'summary';
+  const okType = /^(image\/|application\/pdf|application\/vnd\.(ms-excel|openxmlformats-officedocument\.spreadsheetml)|text\/csv)/.test(mimeType || '');
+  if (!okType) throw new Error('只收照片、PDF、Excel、CSV');
+  const { data: req } = await supabase.from('vendor_payment_requests').select('source_id').eq('id', request_id).maybeSingle();
+  if (!req) throw new Error('找不到請款單');
+  const ext = (String(originalName || '').match(/\.[A-Za-z0-9]{1,6}$/) || [''])[0];
+  const path = `${req.source_id}/${request_id}/${Date.now()}_${Math.random().toString(36).slice(2, 8)}${ext}`;
+  const { error } = await supabase.storage.from(FILE_BUCKET).upload(path, buffer, { contentType: mimeType, upsert: false });
+  if (error) throw new Error(`上傳失敗：${error.message}`);
+  const { data, error: e2 } = await supabase.from('vendor_payment_files').insert([{
+    request_id, file_type, file_name: String(originalName || '附件').slice(0, 200), file_url: `storage:${FILE_BUCKET}`,
+    storage_path: path, file_size: buffer.length, mime_type: mimeType, uploaded_by_type: actorType || 'system',
+  }]).select().single();
+  if (e2) { await supabase.storage.from(FILE_BUCKET).remove([path]).catch(() => {}); throw new Error(e2.message); }
+  return data;
+}
+
+/** 附件發 1 小時簽名網址（舊資料沒有 storage_path 的照原本 file_url） */
+async function signFiles(files) {
+  const withPath = files.filter((f) => f.storage_path);
+  if (!withPath.length) return files;
+  const { data } = await supabase.storage.from(FILE_BUCKET).createSignedUrls(withPath.map((f) => f.storage_path), 3600);
+  const m = new Map((data || []).map((x) => [x.path, x.signedUrl]));
+  return files.map((f) => (f.storage_path ? { ...f, url: m.get(f.storage_path) || null } : { ...f, url: /^https?:/.test(f.file_url || '') ? f.file_url : null }));
+}
+
+async function removeStoredFile(id) {
+  const { data: f } = await supabase.from('vendor_payment_files').select('storage_path').eq('id', id).maybeSingle();
+  if (f && f.storage_path) await supabase.storage.from(FILE_BUCKET).remove([f.storage_path]).catch(() => {});
+}
+
+/** 付款完成 → 照分配門市產生帳單（confirmed）＋分攤；列入月報月份＝請款月份＋付款日依截止日決定（bills.received_at＝付款時間） */
+async function billFromAllocations(row) {
+  if (!row || row.linked_bill_id) return row && row.linked_bill_id;
+  const { data: al } = await supabase.from('vendor_payment_allocations').select('*').eq('request_id', row.id).order('seq');
+  if (!al || !al.length) return null;
+  const byStore = new Map();
+  for (const a of al) {
+    const cur = byStore.get(a.store_erpid) || { store_erpid: a.store_erpid, store_name: a.store_name, amount: 0, names: [] };
+    cur.amount = r2(cur.amount + Number(a.amount));
+    cur.names.push(`${a.item_name} ${Number(a.amount).toLocaleString()}`);
+    byStore.set(a.store_erpid, cur);
+  }
+  const total = r2(al.reduce((s, a) => s + Number(a.amount), 0));
+  const items = al.map((a, i) => ({ seq_no: i + 1, product_spec: a.item_name, quantity: 1, unit_price: Number(a.amount), total: Number(a.amount), store_erpid: a.store_erpid, store_name: a.store_name }));
+  const paidAt = row.paid_at || new Date().toISOString();
+  const { data: bill, error } = await supabase.from('bills').insert({
+    source_id: row.source_id, period: row.period, title: row.title, total_amount: total, status: 'confirmed', items,
+    description: `由廠商請款 ${row.request_no || row.id} 付款後自動建立`, source_ref: row.request_no,
+    submitted_at: row.submitted_at || paidAt, confirmed_at: paidAt, received_at: paidAt, created_by_type: 'system', source_system: 'vendor_portal',
+  }).select('id, bill_no').single();
+  if (error) { console.error('[vendorPayment] 付款後建帳單失敗：', error.message); return null; }
+  const { error: aErr } = await supabase.from('bill_allocations').insert([...byStore.values()].map((x) => ({
+    bill_id: bill.id, store_erpid: x.store_erpid, store_name: x.store_name, allocated_amount: x.amount,
+    allocation_note: `請款 ${row.request_no}：${x.names.join('、')}`.slice(0, 500),
+  })));
+  if (aErr) console.error('[vendorPayment] 付款後建分攤失敗：', aErr.message);
+  await supabase.from('vendor_payment_requests').update({ linked_bill_id: bill.id }).eq('id', row.id);
+  console.log(`[vendorPayment] ✅ ${row.request_no} 付款 → 帳單 ${bill.bill_no}，${byStore.size} 個門市`);
+  return bill.id;
+}
+
 module.exports = {
+  listTargets, saveAllocations, uploadRequestFile, signFiles, removeStoredFile, billFromAllocations,
   // 銀行帳號
   listBankAccounts, createBankAccount, updateBankAccount, deleteBankAccount,
   // 請款單

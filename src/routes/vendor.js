@@ -411,17 +411,54 @@ router.post('/requests/:id/submit', authenticateVendor, async (req, res) => {
 });
 
 // 附件（廠商只能對自己的請款上傳）
-router.post('/requests/:id/files', authenticateVendor, async (req, res) => {
-  const { data: req_row } = await supabase.from('vendor_payment_requests')
-    .select('source_id, status, created_by_vendor').eq('id', req.params.id).maybeSingle();
-  if (!req_row || req_row.source_id !== req.vendor.source_id) {
-    return res.status(403).json({ success: false, message: '無權上傳' });
-  }
-  if (req_row.status !== 'draft' && req_row.status !== 'rejected') {
-    return res.status(400).json({ success: false, message: '已送審的請款不能再加附件' });
-  }
-  try { vpOk(res, await vpSvc.addFile(req.params.id, req.body || {}, 'vendor')); }
-  catch (e) { vpFail(res, e); }
+// 附件：只收真的上傳（2026-10-20 起不再收廠商自己帶的 file_url）
+const multer = require('multer');
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+async function ownEditable(req, res) {
+  const { data: r } = await supabase.from('vendor_payment_requests').select('source_id, status, created_by_vendor').eq('id', req.params.id).maybeSingle();
+  if (!r || r.source_id !== req.vendor.source_id) { res.status(403).json({ success: false, message: '無權操作' }); return false; }
+  if (!['draft', 'rejected'].includes(r.status)) { res.status(400).json({ success: false, message: '已送審的請款不能再改，要改請聯絡樂活會計' }); return false; }
+  return true;
+}
+router.post('/requests/:id/files', authenticateVendor, (req, res) => res.status(410).json({ success: false, message: '請用上傳檔案' }));
+router.post('/requests/:id/upload', authenticateVendor, upload.single('file'), async (req, res) => {
+  try {
+    if (!(await ownEditable(req, res))) return;
+    if (!req.file) return res.status(400).json({ success: false, message: '請附上檔案' });
+    vpOk(res, await vpSvc.uploadRequestFile(req.params.id, { buffer: req.file.buffer, mimeType: req.file.mimetype,
+      originalName: Buffer.from(req.file.originalname || '', 'latin1').toString('utf8'), file_type: req.query.file_type }, 'vendor'));
+  } catch (e) { res.status(400).json({ success: false, message: e.message }); }
+});
+// 分配門市：項目名稱／金額／門市（請款總額＝合計）
+router.get('/targets', authenticateVendor, async (req, res) => { try { vpOk(res, await vpSvc.listTargets()); } catch (e) { vpFail(res, e); } });
+router.put('/requests/:id/allocations', authenticateVendor, async (req, res) => {
+  try {
+    if (!(await ownEditable(req, res))) return;
+    vpOk(res, await vpSvc.saveAllocations(req.params.id, (req.body || {}).rows, { actorType: 'vendor', actorId: req.vendor.id }));
+  } catch (e) { res.status(400).json({ success: false, message: e.message }); }
+});
+
+// 我的合約（合約管理裡「廠商」選這家、且勾了給廠商看）
+router.get('/contracts', authenticateVendor, async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('contracts')
+      .select('id, type, name, status, start_date, end_date, signed_date, monthly_amount, total_amount, type_data, file_url')
+      .eq('source_id', req.vendor.source_id).eq('vendor_visible', true).neq('status', 'archived').order('start_date', { ascending: false });
+    if (error) throw new Error(error.message);
+    const ids = (data || []).map((c) => c.id);
+    const { data: files } = ids.length ? await supabase.from('attachments').select('id, entity_id, original_name, storage_path, mime_type, size_bytes')
+      .eq('entity_type', 'contract').in('entity_id', ids) : { data: [] };
+    const paths = (files || []).map((f) => f.storage_path).filter(Boolean);
+    const { data: signed } = paths.length ? await supabase.storage.from('attachments').createSignedUrls(paths, 3600) : { data: [] };
+    const url = new Map((signed || []).map((x) => [x.path, x.signedUrl]));
+    vpOk(res, (data || []).map((c) => {
+      const td = c.type_data || {};
+      return { id: c.id, name: c.name, status: c.status, start_date: c.start_date, end_date: c.end_date, signed_date: c.signed_date, total_amount: c.total_amount,
+        benefits: td.benefits || null, terms: td.terms || td.payment_terms || null,
+        files: (files || []).filter((f) => f.entity_id === c.id).map((f) => ({ id: f.id, name: f.original_name, mime: f.mime_type, url: url.get(f.storage_path) || null }))
+          .concat(c.file_url && !(files || []).some((f) => f.entity_id === c.id) ? [{ id: 'main', name: '合約檔案', url: c.file_url }] : []) };
+    }));
+  } catch (e) { vpFail(res, e); }
 });
 
 router.delete('/files/:id', authenticateVendor, async (req, res) => {
@@ -436,7 +473,7 @@ router.delete('/files/:id', authenticateVendor, async (req, res) => {
   if (!['draft','rejected'].includes(req_row.status)) {
     return res.status(400).json({ success: false, message: '已送審的請款不能刪附件' });
   }
-  try { vpOk(res, await vpSvc.deleteFile(req.params.id)); }
+  try { await vpSvc.removeStoredFile(req.params.id); vpOk(res, await vpSvc.deleteFile(req.params.id)); }
   catch (e) { vpFail(res, e); }
 });
 

@@ -50,12 +50,13 @@ async function updateContract(id, patch) {
     'start_date', 'end_date', 'signed_date',
     'total_amount', 'monthly_amount', 'currency',
     'type_data', 'file_url', 'status', 'note',
-    'store_erpid', 'purpose', 'renewed_from', 'payment',
+    'store_erpid', 'purpose', 'renewed_from', 'payment', 'source_id', 'vendor_visible',
   ];
   const update = {};
   for (const k of allowed) if (patch[k] !== undefined) update[k] = patch[k];
   if (update.purpose !== undefined && update.purpose !== 'tax') update.purpose = 'actual';
   if (update.store_erpid === '') update.store_erpid = null;
+  if (update.source_id === '') update.source_id = null;
   if (Object.keys(update).length === 0) return getContract(id);
   const { data, error } = await supabase
     .from('contracts')
@@ -100,6 +101,8 @@ function sanitize(input, createdBy) {
     purpose:        input.purpose === 'tax' ? 'tax' : 'actual', // 實際／報稅用；月報用實際
     renewed_from:   input.renewed_from || null,
     payment:        input.payment || {},
+    source_id:      input.source_id || null,                  // 2026-10-20：對應廠商（billing_sources），廠商登入看得到
+    vendor_visible: input.vendor_visible !== false,
     created_by:     createdBy || null,
   };
   return row;
