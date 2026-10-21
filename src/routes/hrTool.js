@@ -48,6 +48,15 @@ router.get('/handovers/:id', async (req, res) => {
   try { ok(res, await rc.call('get', `/handovers/${encodeURIComponent(req.params.id)}`)); } catch (e) { fail(res, e); }
 });
 
+// 交接預設項目（2026-10-21 從市場部後台搬過來；資料仍在市場部 handover_templates，門市交接＋離職交接共用）
+const TPL_EDIT = ['operation_lead', 'operation_hr', 'super_admin', 'dept_head'];
+router.get('/handover-templates', async (req, res) => {
+  try { ok(res, { items: await rc.call('get', '/handover-templates'), can_edit: TPL_EDIT.includes(req.user && req.user.role) }); } catch (e) { fail(res, e); }
+});
+router.put('/handover-templates', authorize(...TPL_EDIT), async (req, res) => {
+  try { ok(res, await rc.call('put', '/handover-templates', { data: { items: (req.body || {}).items }, actor: req.user })); } catch (e) { fail(res, e); }
+});
+
 router.use(authorize(...HR));   // 以下限人事
 
 router.get('/list', async (req, res) => {
