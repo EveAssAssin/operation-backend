@@ -531,16 +531,36 @@ async function build(ym, store, opts = {}) {
         am ? { label: '愛民系統訂單', amount: r0(aSales) } : null].filter(Boolean) },
     contact_sales: { name: '隱眼業績（帳上）', kind: 'sales', amount: cS.amount, from: cS.from, erp: cSys, basis: salesBasis,
       refs: so ? [{ label: '隱形眼鏡物料', amount: r0(so.contact_lens) }, { label: '護理產品物料', amount: r0(so.care) }] : (erp ? [{ label: 'ERP 帳上（標籤）', amount: cSys }] : []) },
-    glasses_receipt: { name: '眼鏡真實實收', kind: 'receipt', amount: filled('glasses_receipt') ? r0(val('glasses_receipt')) : null, from: 'manual', erp: bookG,
-      refs: [bk ? { label: 'ERP 帳面實收（不含 API PAY）', amount: r0(bk.glasses) } : null, am ? { label: '愛民系統收款', amount: r0(aPaid) } : null].filter(Boolean) },
-    contact_receipt: { name: '隱眼真實實收', kind: 'receipt', amount: filled('contact_receipt') ? r0(val('contact_receipt')) : null, from: 'manual', erp: bookC,
-      refs: bk && bk.split ? [{ label: 'ERP 帳面實收（不含 API PAY）', amount: r0(bk.contact) }] : [] },
     api_pay: { name: 'API 支付（儲值金消費）', kind: 'other', amount: filled('api_pay') ? r0(val('api_pay')) : apiSys, from: filled('api_pay') ? 'manual' : (apiSys == null ? 'none' : 'system'), erp: apiSys,
       refs: cf ? [{ label: 'ERP 現金流 apiPay', amount: apiSys }, { label: 'ERP 現金流合計（帳上實收）', amount: r0(cf.total) }] : [] },
     stored_value: { name: '儲值收款（不列業績）', kind: 'other', amount: filled('stored_value') ? r0(val('stored_value')) : null, from: 'manual', erp: null, no_source: true },
   };
-  // 會計自訂的收入科目（2026-10-20）：kind=revenue、不是內建那三個 → 手填，算進獲利用的實收
-  const FIXED_REV = ['glasses_receipt', 'contact_receipt', 'api_pay'];
+  // ── 真實實收（2026-10-21 營運：只填一格「總真實實收」）──
+  //    receipt_total 有填＝用它；沒填但有舊的眼鏡／隱眼兩格（9 月從試算表填的）＝兩格相加
+  //    眼鏡／隱眼各自多少只拿來算分店損益與成本率：舊兩格照填的、只有總數就照帳面實收（沒有再照業績）比例拆
+  const salesTotal = gS.amount == null && cS.amount == null ? null : r0((gS.amount || 0) + (cS.amount || 0));
+  const legG = filled('glasses_receipt') ? r0(val('glasses_receipt')) : null;
+  const legC = filled('contact_receipt') ? r0(val('contact_receipt')) : null;
+  const totFilled = filled('receipt_total');
+  const receiptTotal = totFilled ? r0(val('receipt_total')) : (legG == null && legC == null ? null : r0((legG || 0) + (legC || 0)));
+  const receiptFilled = receiptTotal != null;
+  let glassesIn = 0, contactIn = 0, splitBy = null;
+  if (receiptTotal != null) {
+    if (!totFilled) { glassesIn = legG || 0; contactIn = legC || 0; splitBy = 'legacy'; }
+    else {
+      const share = bookTotal ? (bookG || 0) / bookTotal : (salesTotal ? (gS.amount || 0) / salesTotal : 1);
+      splitBy = bookTotal ? 'book' : (salesTotal ? 'sales' : 'all_glasses');
+      glassesIn = r0(receiptTotal * share); contactIn = receiptTotal - glassesIn;
+    }
+  }
+  revenue.receipt_total = { name: '總真實實收', kind: 'receipt', amount: receiptTotal, from: 'manual', erp: bookTotal,
+    legacy: !totFilled && receiptTotal != null ? { glasses: legG, contact: legC } : null, split_by: splitBy,
+    refs: [bk ? { label: '帳面眼鏡實收', amount: bookG } : null, bk && bk.split ? { label: '帳面隱眼實收', amount: bookC } : null].filter(Boolean) };
+  // 舊欄位保留（店長月報、查帳提醒還在讀）：放拆出來的數字、標 derived
+  revenue.glasses_receipt = { name: '眼鏡真實實收', kind: 'receipt', amount: receiptTotal == null ? null : glassesIn, from: 'manual', erp: bookG, derived: true };
+  revenue.contact_receipt = { name: '隱眼真實實收', kind: 'receipt', amount: receiptTotal == null ? null : contactIn, from: 'manual', erp: bookC, derived: true };
+  // 會計自訂的收入科目（2026-10-20）：kind=revenue、不是內建那幾個 → 手填，算進獲利用的實收
+  const FIXED_REV = ['receipt_total', 'glasses_receipt', 'contact_receipt', 'api_pay'];
   let extraIn = 0;
   for (const a of accs.filter((x) => x.kind === 'revenue' && !FIXED_REV.includes(x.code))) {
     const amt = filled(a.code) ? r0(val(a.code)) : null;
@@ -548,16 +568,11 @@ async function build(ym, store, opts = {}) {
     extraIn += amt || 0;
   }
   if (gS.amount == null) warnings.push('眼鏡業績系統拿不到（ERP／愛民系統都沒資料）');
-  ['glasses_receipt', 'contact_receipt'].forEach((k) => { if (revenue[k].amount == null) warnings.push(`${revenue[k].name}還沒填（參考 ${revenue[k].erp == null ? '—' : revenue[k].erp.toLocaleString()}）`); });
-  const glassesIn = revenue.glasses_receipt.amount || 0;
-  const contactIn = revenue.contact_receipt.amount || 0;
+  if (receiptTotal == null) warnings.push(`總真實實收還沒填（帳面實收 ${bookTotal == null ? '—' : bookTotal.toLocaleString()}）`);
   const apiIn = revenue.api_pay.amount || 0;
-  const totalIn = glassesIn + contactIn + apiIn + extraIn;   // 算獲利用（含 API 支付、自訂收入）
+  const totalIn = (receiptTotal || 0) + apiIn + extraIn;   // 算獲利用（含 API 支付、自訂收入）
 
-  // 總業績、總實收（眼鏡＋藥拋）與實收差：會計確認收到的錢 vs 帳上業績；差到 gap_alert_pct（預設 10%）要特別關注
-  const salesTotal = gS.amount == null && cS.amount == null ? null : r0((gS.amount || 0) + (cS.amount || 0));
-  const receiptFilled = revenue.glasses_receipt.amount != null && revenue.contact_receipt.amount != null;
-  const receiptTotal = revenue.glasses_receipt.amount == null && revenue.contact_receipt.amount == null ? null : r0(glassesIn + contactIn);
+  // 實收差：會計確認收到的錢 vs 帳上業績；差到 gap_alert_pct（預設 10%）要特別關注（只看合計）
   const gapOf = (label, sales, receipt) => {
     if (sales == null || receipt == null) return { label, sales, receipt, diff: null, pct: null, alert: false };
     const diff = r0(receipt - sales);
@@ -566,9 +581,9 @@ async function build(ym, store, opts = {}) {
   };
   const gap = {
     alert_pct: st.gap_alert_pct,
-    glasses: gapOf('眼鏡', gS.amount, revenue.glasses_receipt.amount),
-    contact: gapOf('藥拋', cS.amount, revenue.contact_receipt.amount),
-    total: gapOf('合計', salesTotal, receiptFilled ? receiptTotal : null),
+    glasses: gapOf('眼鏡', gS.amount, null),
+    contact: gapOf('藥拋', cS.amount, null),
+    total: gapOf('合計', salesTotal, receiptTotal),
   };
   ['glasses', 'contact', 'total'].forEach((k) => { const g = gap[k]; if (g.alert) warnings.push(`${g.label}實收差 ${g.pct > 0 ? '+' : ''}${g.pct}%（實收 ${g.receipt.toLocaleString()}／業績 ${g.sales.toLocaleString()}），超過 ${st.gap_alert_pct}%`); });
 
@@ -715,7 +730,7 @@ async function overview(ym) {
           book_receipt_total: r.totals.book_receipt_total != null ? r.totals.book_receipt_total : null, bad_debt: r.totals.bad_debt != null ? r.totals.bad_debt : null,
           glasses_receipt: r.revenue.glasses_receipt.amount, contact_receipt: r.revenue.contact_receipt.amount, gap_pct: r.gap.total.pct, gap_alert: r.gap.total.alert,
           erp_total: r.revenue.glasses_receipt.erp == null ? null : r.revenue.glasses_receipt.erp + (r.revenue.contact_receipt.erp || 0),
-          filled: r.revenue.glasses_receipt.amount != null && r.revenue.contact_receipt.amount != null, warnings: (r.warnings || []).length, imported: !!r.imported });
+          filled: r.totals.receipt_filled != null ? !!r.totals.receipt_filled : (r.revenue.glasses_receipt.amount != null && r.revenue.contact_receipt.amount != null), warnings: (r.warnings || []).length, imported: !!r.imported });
       } catch (e) { out.push({ store: s.store_erpid, store_name: s.store_name, error: e.message }); }
     }
   };

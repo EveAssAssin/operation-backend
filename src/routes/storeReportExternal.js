@@ -37,7 +37,7 @@ function managerView(snap, rep) {
   const t = snap.totals || {};
   return {
     store: snap.store, store_name: snap.store_name, ym: snap.ym, closed_at: rep.closed_at,
-    revenue: ['glasses_sales', 'contact_sales', 'glasses_receipt', 'contact_receipt', 'api_pay'].map(pick).filter(Boolean),
+    revenue: ['glasses_sales', 'contact_sales', 'receipt_total', 'api_pay'].map(pick).filter(Boolean),
     totals: {
       sales_total: t.sales_total, receipt_total: t.receipt_total, total_in: t.total_in, total_out: t.total_out,
       glasses_out: t.glasses_out, contact_out: t.contact_out, glasses_profit: t.glasses_profit, contact_profit: t.contact_profit, profit: t.profit,
