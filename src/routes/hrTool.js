@@ -113,7 +113,7 @@ router.get('/:id', async (req, res) => {
       ['身分證統一編號', pii.id_no],
       ['出生日期', pii.birthday ? `${pii.birthday}（民國 ${roc(pii.birthday)}）` : ''],
       ['退保日期', r.resign_date ? `${r.resign_date}（民國 ${roc(r.resign_date)}）` : ''],
-      ['退保原因', '離職'],
+      ['退保原因', r.kind === 'suspend' && r.suspend_outcome !== 'auto_resign' ? '留職停薪' : '離職'],
     ];
     const layoff = [
       ['事業單位', unit ? unit.name : ''],
@@ -137,7 +137,7 @@ router.get('/:id', async (req, res) => {
         nhi: { ...LINKS.nhi, fields: nhi },
         layoff: { ...layoffSite, city, note: '法定：離職日前 10 日通報（勞基法第 16 條、就服法第 33 條）。網站要手動登入填寫，下面逐欄複製。', fields: layoff },
       },
-      type_name: TYPE_NAME[r.resign_type] || '',
+      type_name: r.kind === 'suspend' && r.suspend_outcome !== 'auto_resign' ? '降職停薪' : (TYPE_NAME[r.resign_type] || ''),
     });
   } catch (e) { fail(res, e); }
 });
