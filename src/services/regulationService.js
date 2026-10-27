@@ -550,8 +550,10 @@ async function approveAllLow(user) {
 // ════════════════════════════════════════════════════════════
 async function searchEmployees(q) {
   let query = supabase.from('employees').select('erpid, name, store_name, jobtitle, app_number').eq('is_active', true).order('store_name').limit(30);
-  const s = String(q || '').trim();
-  if (s) query = /^\d+$/.test(s) ? query.eq('erpid', s) : query.or(`name.ilike.%${s}%,store_name.ilike.%${s}%`);
+  // 去掉注音等輸入法還沒組完的字
+  const s = String(q || '').replace(/[\u3100-\u312F\u02C7\u02CA\u02CB\u02D9]/g, '').replace(/[%,()]/g, '').trim();
+  if (!s) return [];
+  query = /^\d+$/.test(s) ? query.or(`erpid.eq.${s},app_number.eq.${s}`) : query.or(`name.ilike.%${s}%,store_name.ilike.%${s}%`);
   return must(await query, '查員工失敗');
 }
 

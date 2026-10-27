@@ -57,7 +57,8 @@ router.get('/settings', view, async (req, res) => {
 router.put('/settings/reviewer', edit, async (req, res) => {
   try {
     const cur = await svc.getReviewer();
-    if (req.user?.role !== 'super_admin' && !(cur?.erpid && svc.isReviewer(req.user, cur))) throw new Error('只有系統管理員或目前的審核人可以更換審核人');
+    // 還沒設過審核人：有規範管理編輯權限的人都可以設定；設定後只有系統管理員或目前的審核人可以更換
+    if (cur?.erpid && req.user?.role !== 'super_admin' && !svc.isReviewer(req.user, cur)) throw new Error('只有系統管理員或目前的審核人可以更換審核人');
     ok(res, await svc.setReviewer(req.body?.erpid, req.user?.name));
   } catch (e) { fail(res, e); }
 });
