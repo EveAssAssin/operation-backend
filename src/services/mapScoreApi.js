@@ -198,7 +198,20 @@ async function getReasons(roletype) {
   return Array.isArray(data) ? data : [];
 }
 
+// ───────────────────────────────────────────────────────────────
+// #41 取得規範清單（分頁，每頁最多 200）
+//   回傳：{ totalCount, totalPage, page, pageSize, reasons:[...] }
+// ───────────────────────────────────────────────────────────────
+async function getReasonList(page = 1, pagesize = 200, startTime, endTime) {
+  const body = { method: 'getreasonlist', page: String(page), pagesize: String(pagesize) };
+  if (startTime && endTime) { body.startTime = startTime; body.endTime = endTime; }
+  const res = await callApi(body);
+  const data = parseData(res.data);
+  return data && typeof data === 'object' ? data : { reasons: [] };
+}
+
 module.exports = {
+  getReasonList,
   aesEncrypt,
   getScoreRecords,
   getEmployeeBalance,

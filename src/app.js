@@ -172,6 +172,9 @@ app.use('/api/vendor-payment', require('./routes/vendorPayment'));
 // 匯款批次（S2：元大格式匯出 + 進項發票）
 app.use('/api/payment-batch', authenticate, require('./routes/paymentBatch'));
 
+// 規範系統（主檔、版本、送審審核、引用條文扣分）
+app.use('/api/regulations', authenticate, require('./routes/regulations'));
+
 // ── 內部同步觸發（部署初期用，確認正常後可移除）──────
 app.post('/api/internal/sync', async (req, res) => {
   const { runEmployeeSync } = require('./services/personnelSync');
