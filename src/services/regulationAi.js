@@ -293,4 +293,59 @@ async function runAudit({ limit = Number(process.env.REGULATION_AUDIT_BATCH || 6
   }
 }
 
-module.exports = { enabled, hashDoc, assist, chooseOption, check, resolveIssue, ensureChecked, auditRegulation, runAudit, getAuditStatus, tryOps };
+
+// ════════════════════════════════════════════════════════════
+// AI 整理：替還沒填基本資料的規範產生「摘要／類型／適用情境／負責部門／關鍵字」建議
+//   存成巡檢結果 kind=整理（fix＝set_meta 指令）→ 人按「產生草稿」或「全部送審」→ 審核人通過才生效
+// ════════════════════════════════════════════════════════════
+const DOC_TYPES = ['作業流程', '行政規定', '產品知識', '工作職掌', '人事規範', '其他'];
+async function metaSuggest(regId, batchId) {
+  const reg = must(await supabase.from('regulations').select('id, title, current_version').eq('id', regId).single(), '讀取規範失敗');
+  const cur = must(await supabase.from('regulation_versions').select('doc').eq('regulation_id', regId).eq('version', reg.current_version).maybeSingle(), '讀取內容失敗');
+  const doc = cur?.doc; if (!doc) return null;
+  const system = `你在幫眼鏡連鎖公司整理內部規範，讓人和 AI 都容易找到、看懂。讀完規範後填基本資料，只輸出 JSON：
+{"doc_type":"${DOC_TYPES.join('|')}","summary":"一句話說這份規範在管什麼（40 字內，不要寫『本規範』）","scenario":"什麼時候會用到（30 字內，例如：客人要退貨時、每天打烊前）","owner_dept":"最可能負責的部門（營運部／市場部／企劃部／人資／財務／倉庫／加工中心／其他，看不出來就空字串）","keywords":"8～15 個門市人員會拿來搜尋的詞，用、分隔，包含同義詞與口語說法"}
+用台灣繁體中文、口語。看不出來的欄位給空字串，不要亂猜。`;
+  const out = parseJson(await claude({ model: MODEL_FAST, system, maxTokens: 700, timeout: 60000, content: [{ type: 'text', text: D.docToPrompt(doc, 12000) }] }));
+  const ops = [];
+  const set = (field, v, max) => { v = String(v || '').trim().slice(0, max); if (v && !String(doc[field] || '').trim()) ops.push({ op: 'set_meta', field, value: v }); };
+  if (DOC_TYPES.includes(out.doc_type) && !doc.doc_type) ops.push({ op: 'set_meta', field: 'doc_type', value: out.doc_type });
+  set('summary', out.summary, 80); set('scenario', out.scenario, 60); set('owner_dept', out.owner_dept, 20);
+  const kw = [...new Set([...String(doc.keywords || '').split(/[、,，\s]+/), ...String(out.keywords || '').split(/[、,，\s]+/)].map(x => x.trim()).filter(x => x.length >= 2))].slice(0, 20).join('、');
+  if (kw && kw !== String(doc.keywords || '').trim()) ops.push({ op: 'set_meta', field: 'keywords', value: kw });
+  if (!ops.length) return null;
+  const t = tryOps(doc, ops); if (t.error) return null;
+  const detail = ops.map(o => `${({ doc_type: '類型', summary: '摘要', scenario: '適用情境', owner_dept: '負責部門', keywords: '關鍵字' })[o.field]}：${o.value}`).join('\n');
+  const row = { regulation_id: regId, version: reg.current_version, batch_id: batchId, severity: 'info', kind: '整理', title: 'AI 整理：補上基本資料',
+    detail, codes: [], fix: { label: '套用這些基本資料', ops: t.ops }, status: 'open' };
+  await supabase.from('regulation_audit_findings').delete().eq('regulation_id', regId).eq('kind', '整理').eq('status', 'open');
+  must(await supabase.from('regulation_audit_findings').insert(row), '寫入建議失敗');
+  return row;
+}
+let metaJob = { running: false, progress: '', startedAt: null, finishedAt: null, result: null, error: null };
+const getMetaStatus = () => metaJob;
+async function runMetaSuggest({ limit = 600 } = {}) {
+  if (!enabled()) throw new Error('AI 功能未啟用：請在 Render 設定 ANTHROPIC_API_KEY');
+  if (metaJob.running) throw new Error('AI 整理進行中');
+  metaJob = { running: true, progress: '準備中', startedAt: new Date().toISOString(), finishedAt: null, result: null, error: null };
+  const batchId = `meta-${Date.now()}`;
+  try {
+    // 只挑缺摘要或缺類型的；已經有一筆待處理建議的跳過
+    const regs = must(await supabase.from('regulations').select('id, summary, doc_type').eq('status', 'active').limit(2000), '讀取規範失敗')
+      .filter(r => !r.summary || !r.doc_type);
+    const has = new Set(must(await supabase.from('regulation_audit_findings').select('regulation_id').eq('kind', '整理').in('status', ['open', 'drafted']), '讀取建議失敗').map(r => r.regulation_id));
+    const ids = regs.filter(r => !has.has(r.id)).map(r => r.id).slice(0, limit);
+    let made = 0, failed = 0;
+    for (let i = 0; i < ids.length; i++) {
+      metaJob.progress = `AI 整理第 ${i + 1}/${ids.length} 份`;
+      try { if (await metaSuggest(ids[i], batchId)) made += 1; } catch (e) { failed += 1; console.warn('[RegMeta]', ids[i], e.message); }
+    }
+    metaJob = { ...metaJob, running: false, progress: '完成', finishedAt: new Date().toISOString(), result: { checked: ids.length, made, failed } };
+    return metaJob.result;
+  } catch (e) {
+    metaJob = { ...metaJob, running: false, progress: '失敗', finishedAt: new Date().toISOString(), error: e.message };
+    throw e;
+  }
+}
+
+module.exports = { metaSuggest, runMetaSuggest, getMetaStatus, enabled, hashDoc, assist, chooseOption, check, resolveIssue, ensureChecked, auditRegulation, runAudit, getAuditStatus, tryOps };

@@ -8,11 +8,13 @@
 
 const CN_NUM = '一二三四五六七八九十';
 const RE_SEC     = new RegExp(`^([${CN_NUM}]{1,3})[、.．]\\s*(.+)$`);
-const RE_DETAIL  = /^(\d{1,2})-(\d{1,2})[.．](\d{1,2})[.．]?\s*(.*)$/;
-const RE_SMALL   = /^(\d{1,2})-(\d{1,2})(?![\d])[.．、]?\s*(.*)$/;
+// 多層編號：1-1、1-1.1、1-1-2、1-1-2-1、1--1-2-2（打錯兩個減號）、1-1-6.1 …（至少一個「-」）
+//   路徑＝所有數字，條文代碼 <規範>-<大項>.<路徑用 . 串>；1-1／1-1.1 跟舊版代碼一樣
+const RE_PATH    = /^(\d{1,2}(?:\s*-{1,2}\s*\d{1,2}(?!\d))+(?:[.．]\d{1,2}(?!\d))*)[.．、]?\s*(.*)$/;
 const RE_MID     = /^(\d{1,2})[.．、](?!\d)\s*(.*)$/;
+const RE_MID_SP  = /^(\d{1,2})[ \u3000]+(?![\d個月天年日次元分人位%％])(\S.{0,40})$/;   // 「5   新人扣分事項」只在接續目前中項號碼時才算
 const RE_NOTE    = /^(註|例|備註|舉例|補充)\s*(\d*)\s*[:：]\s*(.*)$/;
-const RE_STAMP   = /[<＜]\s*(\d{2,4}\s*\/\s*\d{1,2}\s*\/\s*\d{1,2})\s*([^>＞]{0,20})[>＞]/g;
+const RE_STAMP   = /[<＜]\s*(\d{2,4}\s*[\/.\-]\s*\d{1,2}\s*[\/.\-]\s*\d{1,2})\s*([^>＞]{0,20})[>＞]/g;
 const RE_TOP     = /【\s*至頂\s*】/g;
 const RE_INDEX_H = /^MAP\s*(分類)?\s*(索引|引索|搜尋索引|搜尋引索)/;
 
@@ -22,7 +24,7 @@ function cleanLine(s) {
 
 function stripStamps(text, stamps) {
   return text.replace(RE_STAMP, (m, d, what) => {
-    stamps.push({ date: d.replace(/\s/g, ''), what: (what || '').trim() });
+    stamps.push({ date: d.replace(/\s/g, '').replace(/[.\-]/g, '/'), what: (what || '').trim() });
     return '';
   }).trim();
 }
@@ -31,12 +33,114 @@ function endsSentence(s) {
   return /[。！？!?：:；;）)」』\]】]$/.test(s);
 }
 
+
+// ── 表格：MAP 的 HTML 表格去標籤後變成「一格一行、用整行 tab 分隔」的文字 ──
+//   一個區塊＝連續以 tab 開頭（或空白）的行；內容行最常見的 tab 數＝L
+//   只有 tab 的行：L-1 個＝換列、L 個＝換格
+//   轉成 markdown 表格（一整個表格＝一條條文），跨列合併（rowspan）的格子從上一列補
+const TAB_MARK = '\u0000TABLE';
+const isPureTab = (l) => /^\t+$/.test(l);
+const tabCount = (l) => (l.match(/^\t*/) || [''])[0].length;
+const cellClean = (s) => s.replace(/ /g, ' ').replace(/​/g, '').replace(/[ \t]+/g, ' ').trim();
+
+function blockToTable(block) {
+  const counts = {};
+  block.forEach(l => { if (!isPureTab(l) && cellClean(l)) { const k = tabCount(l); counts[k] = (counts[k] || 0) + 1; } });
+  const L = Number(Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0] || 0);
+  if (L < 2) return null;
+  // 連續的「只有 tab」行看成一組：
+  //   組裡有少於 L 個 tab 的行 → 換列；全部是 L 個且 ≥2 行 → 換格（</td><td>）；只有 1 行 → 同一格裡換段落
+  const rows = []; let row = null, cell = null;
+  const closeCell = () => { cell = null; };
+  const closeRow = () => { cell = null; if (row && row.length) rows.push(row); row = null; };
+  // 另一種格式：格子之間沒有分隔行（一行就是一格）
+  let seps = 0, r0 = 0;
+  block.forEach(l => { if (isPureTab(l) && l.length === L) r0 += 1; else { if (r0 >= 2) seps += 1; r0 = 0; } });
+  const linePerCell = seps === 0;
+  let run = [];
+  const flushRun = () => {
+    if (!run.length) return;
+    if (run.some(k => k < L)) closeRow();
+    else if (run.length >= 2) closeCell();
+    else if (cell) cell.push('');
+    run = [];
+  };
+  for (const l of block) {
+    if (isPureTab(l)) { run.push(l.length); continue; }
+    if (!/\t/.test(l) && !cellClean(l)) { if (!run.length && cell) cell.push(''); continue; }
+    flushRun();
+    const t = cellClean(l);
+    if (linePerCell && cell && !/^[<＜]\s*\d{2,4}\s*[\/.\-]/.test(t)) cell = null;   // 一行一格（只有日期戳記的行接在上一格）
+    if (!row) row = [];
+    if (!cell) { cell = []; row.push(cell); }
+    cell.push(t);
+  }
+  flushRun();
+  closeRow();
+  if (!rows.length) return null;
+  // 同一格裡的段落用 <br> 接（畫面換行、AI 也看得懂）
+  const txt = rows.map(r => r.map(c => c.join('\n').replace(/\n{2,}/g, '\n').trim().split('\n').map(x => x.trim()).filter(Boolean).join('<br>')));
+  return txt;
+}
+
+function tableToMarkdown(rows, stamps) {
+  const st = (s) => stripStamps(s.replace(RE_TOP, ''), stamps).replace(/\|/g, '／');
+  rows = rows.map(r => r.map(st));
+  const width = rows[0].length >= 2 ? rows[0].length : Math.max(...rows.map(r => r.length));
+  if (width <= 1 || rows.length <= 1) {
+    // 只有一欄或一列的「排版用表格」→ 當一般段落
+    return { text: rows.map(r => r.filter(Boolean).join(' ｜ ')).filter(Boolean).join('\n'), irregular: false, plain: true };
+  }
+  let irregular = false;
+  const full = [];
+  rows.forEach((r, i) => {
+    // 比表頭多的格子＝同一格裡的段落被拆開（MAP 沒留分隔行），接回最後一欄
+    if (r.length > width) r = [...r.slice(0, width - 1), r.slice(width - 1).filter(Boolean).join('<br>')];
+    if (r.length < width && i > 0) {
+      const prev = full[i - 1];
+      full.push([...prev.slice(0, width - r.length), ...r]);
+      if (width - r.length > 2) irregular = true;
+    } else if (r.length < width) { full.push([...r, ...Array(width - r.length).fill('')]); irregular = true; }
+    else full.push(r);
+  });
+  const line = (r) => `| ${r.map(c => c || ' ').join(' | ')} |`;
+  const md = [line(full[0]), `| ${full[0].map(() => '---').join(' | ')} |`, ...full.slice(1).map(line)].join('\n');
+  return { text: md, irregular, plain: false };
+}
+
+/** 把原文裡的表格區塊換成一行記號，表格另外存 */
+function extractTables(raw) {
+  const lines = String(raw || '').replace(/\r/g, '').split('\n');
+  const out = [], tables = [];
+  let i = 0;
+  while (i < lines.length) {
+    if (/^\t/.test(lines[i]) || (isPureTab(lines[i]))) {
+      let j = i; const block = [];
+      while (j < lines.length && (/^\t/.test(lines[j]) || !cellClean(lines[j]))) { block.push(lines[j]); j++; }
+      // 區塊尾端的空行還回去
+      while (block.length && !/\t/.test(block[block.length - 1])) { block.pop(); j--; }
+      const pureTabs = block.filter(isPureTab).length;
+      const rows = pureTabs >= 3 ? blockToTable(block) : null;
+      if (rows && rows.length) { tables.push(rows); out.push(`${TAB_MARK}${tables.length - 1}`); i = j; continue; }
+      for (let k = i; k < j; k++) out.push(lines[k]);
+      i = j; if (j === i) i++;
+      continue;
+    }
+    out.push(lines[i]); i++;
+  }
+  return { text: out.join('\n'), tables };
+}
+
 function parseRegulation(reasonId, rawText, opts = {}) {
   const id = String(reasonId);
-  const lines = String(rawText || '').replace(/\r/g, '').split('\n').map(cleanLine);
+  const ex = extractTables(rawText);
+  const lines = ex.text.split('\n').map(l => (l.startsWith(TAB_MARK) ? l : cleanLine(l)));
   const doc = { keywords: '', sections: [], flags: [] };
 
-  let sec = null, mid = null, small = null, detail = null, last = null;
+  let sec = null, mid = null, last = null;
+  let byPath = new Map();   // 本大項裡「編號路徑 → 條文」，找上層用
+  let midNo = 0;            // 本大項目前的中項號碼
+  let sub = null;           // 條文底下又從 1. 開始的清單：{ host, next }
   let skipIndexLine = false;
   const used = new Set();
 
@@ -50,7 +154,7 @@ function parseRegulation(reasonId, rawText, opts = {}) {
   const newSection = (no, title) => {
     sec = { no: no || '', title: title || '', items: [] };
     doc.sections.push(sec);
-    mid = small = detail = null; last = null;
+    mid = null; last = null; byPath = new Map(); midNo = 0; sub = null;
   };
   const ensureSection = () => { if (!sec) newSection('', '（前言）'); };
   const mkClause = (code, no, text) => {
@@ -98,30 +202,59 @@ function parseRegulation(reasonId, rawText, opts = {}) {
     }
     RE_TOP.lastIndex = 0;
 
-    // 細項
-    if ((m = line.match(RE_DETAIL))) {
+    // 表格（整個表格＝一條條文，掛在上一條有編號的條文底下）
+    if (line.startsWith(TAB_MARK)) {
       ensureSection();
-      const parent = small || mid;
-      if (!parent) { doc.flags.push(`細項無上層：${line.slice(0, 20)}`); }
-      const code = uniqueCode(`${id}-${secIdx()}.${m[1]}.${m[2]}.${m[3]}`);
-      detail = mkClause(code, `${m[1]}-${m[2]}.${m[3]}`, m[4]);
-      (parent ? parent.subs : sec.items).push(detail);
-      last = detail; continue;
+      const stamps = [];
+      const tb = tableToMarkdown(ex.tables[Number(line.slice(TAB_MARK.length))], stamps);
+      if (!tb.text) continue;
+      sec._p = (sec._p || 0) + 1;
+      const c = mkClause(uniqueCode(`${id}-${secIdx()}.p${sec._p}`), '', '');
+      c.text = tb.text; c.stamps.push(...stamps); c.loose = true;
+      if (!tb.plain) { c.table = true; if (tb.irregular) c.flags.push('表格欄位對不齊，需人工確認'); }
+      const host = last && !last.loose ? last : (mid || null);
+      (host ? host.subs : sec.items).push(c);
+      last = c; continue;
     }
-    // 小項
-    if ((m = line.match(RE_SMALL))) {
+    // 多層編號（1-1、1-1-2、1-1.1 …）
+    if ((m = line.match(RE_PATH))) {
       ensureSection();
-      const code = uniqueCode(`${id}-${secIdx()}.${m[1]}.${m[2]}`);
-      small = mkClause(code, `${m[1]}-${m[2]}`, m[3]); detail = null;
-      if (mid) mid.subs.push(small); else { sec.items.push(small); doc.flags.push(`小項無中項：${m[1]}-${m[2]}`); }
-      last = small; continue;
+      sub = null;
+      const path = m[1].split(/\s*-{1,2}\s*|[.．]/).filter(Boolean).map(Number);
+      if (/--/.test(m[1])) doc.flags.push(`編號打錯（兩個減號）：${m[1]}`);
+      let parent = null;
+      for (let k = path.length - 1; k >= 1 && !parent; k--) parent = byPath.get(path.slice(0, k).join('.')) || null;
+      if (!parent) { parent = mid; doc.flags.push(`編號找不到上層：${path.join('-')}`); }
+      const code = uniqueCode(`${id}-${secIdx()}.${path.join('.')}`);
+      const c = mkClause(code, path.join('-'), m[2]);
+      (parent ? parent.subs : sec.items).push(c);
+      byPath.set(path.join('.'), c);
+      last = c; continue;
     }
     // 中項
-    if ((m = line.match(RE_MID))) {
+    if (!(m = line.match(RE_MID)) && (m = line.match(RE_MID_SP)) && !(sec && midNo >= 1 && Number(m[1]) === midNo + 1)) m = null;
+    if (m) {
       ensureSection();
-      const code = uniqueCode(`${id}-${secIdx()}.${m[1]}`);
-      mid = mkClause(code, m[1], m[2]); small = detail = null;
+      const n = Number(m[1]);
+      // 清單接續：上一條底下的 1. 2. 3. …
+      if (sub && n === sub.next) {
+        const c = mkClause(uniqueCode(`${sub.host.code}.${n}`), String(n), m[2]);
+        sub.host.subs.push(c); sub.next += 1; last = c; continue;
+      }
+      // 號碼回到 1（而且比目前中項小）＝上一條底下的清單，不是新的中項
+      if (n === 1 && midNo >= 1 && last && last.code) {
+        const host = last.loose && mid ? mid : last;
+        sub = { host, next: 2 };
+        const c = mkClause(uniqueCode(`${host.code}.${n}`), String(n), m[2]);
+        host.subs.push(c); last = c; continue;
+      }
+      sub = null;
+      if (midNo && n <= midNo) doc.flags.push(`中項編號重複或倒退：${n}`);
+      const code = uniqueCode(`${id}-${secIdx()}.${n}`);
+      mid = mkClause(code, String(n), m[2]);
       sec.items.push(mid);
+      byPath.set(String(n), mid);
+      midNo = n;
       last = mid; continue;
     }
     // 註／例
@@ -175,4 +308,7 @@ function countClauses(doc) {
   return n;
 }
 
-module.exports = { parseRegulation, countClauses };
+// 解析器版本：改了解析規則就 +1，伺服器開機時會把「從沒在本系統改過」的規範用新規則重新解析一次（regulationService.reparseIfNeeded）
+const PARSER_VERSION = 2;   // 2026-10-27：多層編號 1-1-2-1、清單重新從 1 開始、表格轉 markdown、日期戳記 2026.07.21
+
+module.exports = { parseRegulation, countClauses, PARSER_VERSION, _extractTables: extractTables };

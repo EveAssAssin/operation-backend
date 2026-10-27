@@ -51,7 +51,7 @@ const edit = authorizeModule('regulations', 'edit');
 router.get('/settings', view, async (req, res) => {
   try {
     const reviewer = await svc.getReviewer();
-    ok(res, { reviewer, is_reviewer: svc.isReviewer(req.user, reviewer), import: svc.getImportStatus(), audit: AI.getAuditStatus(), ai: AI.enabled(), roles: svc.MAP_ROLES });
+    ok(res, { reviewer, is_reviewer: svc.isReviewer(req.user, reviewer), import: svc.getImportStatus(), audit: AI.getAuditStatus(), meta: AI.getMetaStatus(), meta_draft: svc.getMetaDraftStatus(), ai: AI.enabled(), roles: svc.MAP_ROLES });
   } catch (e) { fail(res, e, 500); }
 });
 router.put('/settings/reviewer', edit, async (req, res) => {
@@ -103,6 +103,22 @@ router.post('/audit/run', edit, async (req, res) => {
     const ids = req.body?.regulation_id ? [Number(req.body.regulation_id)] : undefined;
     AI.runAudit({ regulationIds: ids, limit: Number(req.body?.limit) || undefined, notify: ids ? null : svc.notifyAuditSummary }).catch(e => console.warn('[RegAudit]', e.message));
     ok(res, AI.getAuditStatus());
+  } catch (e) { fail(res, e); }
+});
+// AI 整理：替還沒填摘要／類型的規範產生基本資料建議（kind=整理），再一次全部產生草稿送審
+router.post('/audit/meta/run', edit, async (req, res) => {
+  try {
+    if (req.user?.role !== 'super_admin' && !svc.isReviewer(req.user, await svc.getReviewer())) throw new Error('只有系統管理員或審核人可以啟動 AI 整理');
+    AI.runMetaSuggest({ limit: Number(req.body?.limit) || undefined }).catch(e => console.warn('[RegMeta]', e.message));
+    ok(res, AI.getMetaStatus());
+  } catch (e) { fail(res, e); }
+});
+router.get('/audit/meta/status', view, (req, res) => ok(res, AI.getMetaStatus()));
+router.post('/audit/meta/draft-all', edit, async (req, res) => {
+  try {
+    if (req.user?.role !== 'super_admin' && !svc.isReviewer(req.user, await svc.getReviewer())) throw new Error('只有系統管理員或審核人可以這樣做');
+    svc.draftAllMeta(req.user).catch(e => console.warn('[RegMeta] draft-all', e.message));
+    ok(res, svc.getMetaDraftStatus());
   } catch (e) { fail(res, e); }
 });
 router.post('/audit/findings/:id/ignore', edit, async (req, res) => { try { ok(res, await svc.ignoreFinding(req.params.id, req.body?.reason, req.user)); } catch (e) { fail(res, e); } });

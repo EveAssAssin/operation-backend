@@ -121,7 +121,7 @@ function diffDocs(oldDoc, newDoc) {
   o.forEach((p, code) => { if (!n.has(code)) changes.push({ kind: 'del', code, ctype: p.ctype, display_no: p.display_no, section_title: p.section_title, old: p.text, penalty: p.penalty }); });
 
   const meta = [];
-  ['title', 'category', 'doc_type', 'summary', 'scenario', 'owner_dept'].forEach(k => {
+  ['title', 'category', 'doc_type', 'summary', 'scenario', 'owner_dept', 'keywords'].forEach(k => {
     if ((oldDoc?.[k] || '') !== (newDoc?.[k] || '')) meta.push({ field: k, old: oldDoc?.[k] || '', new: newDoc?.[k] || '' });
   });
   const oldRoles = [...(oldDoc?.roles || [])].sort().join(','), newRoles = [...(newDoc?.roles || [])].sort().join(',');
@@ -230,7 +230,7 @@ function locate(doc, code) {
   }
   return null;
 }
-const META_FIELDS = ['title', 'category', 'doc_type', 'summary', 'scenario', 'owner_dept', 'roles'];
+const META_FIELDS = ['title', 'category', 'doc_type', 'summary', 'scenario', 'owner_dept', 'roles', 'keywords'];
 function applyOps(docIn, ops = []) {
   const doc = JSON.parse(JSON.stringify(docIn));
   doc.sections = doc.sections || [];

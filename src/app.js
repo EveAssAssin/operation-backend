@@ -261,6 +261,8 @@ app.use((err, req, res, next) => {
   startScheduledNotifyDispatcher();  // 每分鐘掃自訂排程推播
   initHolidays();                    // 預載台灣假日快取（本年 + 明年）
   require('./services/shareholderRoster').startInvestSync();  // 左手股東部門 → portal「投資管理」角色（每 6 小時）
+  // 規範解析規則有更新 → 開機 1 分鐘後把沒在本系統改過的規範重新解析一次（只跑一次，記在 report_settings）
+  setTimeout(() => require('./services/regulationService').reparseIfNeeded().catch(e => console.error('[Regulation] reparse', e.message)), 60000);
 
   // 3. 開始接請求
   app.listen(PORT, () => {

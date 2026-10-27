@@ -4,7 +4,7 @@ const axios    = require('axios');
 const supabase = require('../config/supabase');
 const mapScore = require('./mapScoreApi');
 const linePush = require('./linePushService');
-const { parseRegulation } = require('./regulationParser');
+const { parseRegulation, PARSER_VERSION } = require('./regulationParser');
 const D = require('./regulationDoc');
 const AI = require('./regulationAi');
 
@@ -175,6 +175,73 @@ async function importFromMap(by) {
   } catch (e) {
     console.error('[Regulation] 匯入失敗：', e.message);
     importJob = { ...importJob, running: false, finishedAt: nowIso(), error: e.message, progress: '失敗' };
+    throw e;
+  }
+}
+
+/**
+ * 解析規則更新後，把「從沒在本系統改過」的規範用新規則重新解析（開機時自動跑一次，report_settings.regulation_parser_version 記錄）
+ *   - 有任何非 MAP 匯入的版本（草稿、送審、編輯過）→ 不動
+ *   - 有扣分紀錄引用、而新解析少了那個條文代碼 → 不動（列進 skipped）
+ *   - 內容沒變 → 不動；有變 → 新增一版（來源 map_import，所以之後 MAP 更新仍會自動同步）
+ *   - 本系統填的摘要／類型／情境／負責部門沿用
+ */
+async function reparseIfNeeded({ force = false } = {}) {
+  const { data: st } = await supabase.from('report_settings').select('value').eq('key', 'regulation_parser_version').maybeSingle();
+  const cur = Number(st?.value?.version || 1);
+  if (!force && cur >= PARSER_VERSION) return { skipped: true, version: cur };
+  if (importJob.running) throw new Error('匯入進行中');
+  importJob = { running: true, startedAt: nowIso(), finishedAt: null, result: null, error: null, progress: '重新解析：讀取 MAP' };
+  const result = { parser: PARSER_VERSION, total: 0, updated: 0, unchanged: 0, edited: 0, skipped: [], clauses: 0 };
+  try {
+    const existing = must(await supabase.from('regulations').select('id, current_version, used_codes, map_version'), '讀取現有規範失敗');
+    if (!existing.length) {
+      await supabase.from('report_settings').upsert({ key: 'regulation_parser_version', value: { version: PARSER_VERSION, at: nowIso(), result }, updated_at: nowIso() });
+      importJob = { ...importJob, running: false, finishedAt: nowIso(), result, progress: '完成（還沒有規範）' };
+      return result;
+    }
+    const { reasons, scores } = await fetchAllReasons();
+    const exMap = new Map(existing.map(r => [Number(r.id), r]));
+    const edited = new Set(must(await supabase.from('regulation_versions').select('regulation_id').neq('source', 'map_import'), '讀取版本失敗').map(v => Number(v.regulation_id)));
+    const cited = new Map();
+    must(await supabase.from('regulation_deductions').select('clause_code, regulation_id'), '讀取扣分失敗').forEach(d => {
+      const k = Number(d.regulation_id); if (!cited.has(k)) cited.set(k, new Set()); cited.get(k).add(d.clause_code);
+    });
+    result.total = reasons.length;
+    let k = 0;
+    for (const r of reasons) {
+      k += 1; importJob.progress = `重新解析 ${k}/${reasons.length}`;
+      const id = Number(r.reasonId);
+      const ex = exMap.get(id);
+      if (!ex) continue;                                   // 新規範交給一般匯入
+      if (edited.has(id)) { result.edited += 1; continue; }
+      const curV = must(await supabase.from('regulation_versions').select('doc').eq('regulation_id', id).eq('version', ex.current_version).maybeSingle(), '讀取現行版失敗');
+      const old = curV?.doc || {};
+      const doc = toDoc(r, parseRegulation(id, r.description), scores.get(id));
+      ['doc_type', 'summary', 'scenario', 'owner_dept'].forEach(f => { if (old[f]) doc[f] = old[f]; });
+      const codes = D.allCodes(doc);
+      const need = cited.get(id);
+      if (need && [...need].some(c => !codes.includes(c))) { result.skipped.push({ id, title: doc.title, reason: '扣分引用的條文代碼會消失' }); continue; }
+      const sig = (d) => JSON.stringify([d.sections, d.keywords, d.legacy_meta, d.title]);
+      if (sig(old) === sig(doc)) { result.unchanged += 1; continue; }
+      const v = Number(ex.current_version) + 1;
+      must(await supabase.from('regulation_versions').insert({ regulation_id: id, version: v, status: 'approved', doc, source: 'map_import',
+        change_note: `解析規則更新（第 ${PARSER_VERSION} 版）：多層編號、表格、清單重新整理條文`, created_by_name: '系統重新解析',
+        published_at: nowIso(), reviewed_by_name: '系統重新解析', reviewed_at: nowIso() }), '新增版本失敗');
+      const sc = scores.get(id);
+      must(await supabase.from('regulations').update({ title: doc.title, category: doc.category, roles: doc.roles, keywords: doc.keywords, legacy_meta: doc.legacy_meta,
+        current_version: v, used_codes: [...new Set([...(ex.used_codes || []), ...codes])],
+        ...(sc ? { score: sc.score, bonus: sc.bonus } : {}), map_version: r.version, map_update_time: r.updateTime || null, updated_at: nowIso() }).eq('id', id), '更新規範失敗');
+      await rebuildClauses(id, v, doc);
+      result.updated += 1; result.clauses += codes.length;
+    }
+    await supabase.from('report_settings').upsert({ key: 'regulation_parser_version', value: { version: PARSER_VERSION, at: nowIso(), result }, updated_at: nowIso() });
+    importJob = { ...importJob, running: false, finishedAt: nowIso(), result, progress: '重新解析完成' };
+    console.log('[Regulation] 重新解析完成', JSON.stringify({ ...result, skipped: result.skipped.length }));
+    return result;
+  } catch (e) {
+    console.error('[Regulation] 重新解析失敗：', e.message);
+    importJob = { ...importJob, running: false, finishedAt: nowIso(), error: e.message, progress: '重新解析失敗' };
     throw e;
   }
 }
@@ -498,7 +565,7 @@ async function approve(versionId, user, { doc, notifyStaff = false, notice } = {
   const codes = D.allCodes(finalDoc);
   must(await supabase.from('regulations').update({
     title: finalDoc.title, category: finalDoc.category || null, doc_type: finalDoc.doc_type || null, summary: finalDoc.summary || null,
-    scenario: finalDoc.scenario || null, owner_dept: finalDoc.owner_dept || null, roles: finalDoc.roles || [],
+    scenario: finalDoc.scenario || null, owner_dept: finalDoc.owner_dept || null, roles: finalDoc.roles || [], keywords: finalDoc.keywords || '',
     current_version: v.version, status: 'active', used_codes: [...new Set([...(reg.used_codes || []), ...codes])],
     map_sync_status: 'pending', updated_at: now,
   }).eq('id', reg.id), '更新規範失敗');
@@ -649,6 +716,52 @@ async function draftFromFinding(id, user) {
   must(await supabase.from('regulation_audit_findings').update({ status: 'drafted', draft_version_id: draft.id, handled_by: user?.name || null, handled_at: nowIso() }).eq('id', id), '更新失敗');
   return { version_id: saved.id, applied, note };
 }
+/**
+ * 「AI 整理」建議（摘要／類型／情境／負責部門／關鍵字）一次全部產生草稿並送審（背景跑）
+ *   只動基本資料、條文內容沒變 → 不跑 AI 監督檢查、不逐份推播；風險＝低 → 審核人到「審核」按「低風險全部通過」
+ *   已有草稿／送審中的規範跳過
+ */
+let metaDraftJob = { running: false, progress: '', result: null, error: null, finishedAt: null };
+const getMetaDraftStatus = () => metaDraftJob;
+async function submitMetaOnly(versionId, user) {
+  const v = await getVersion(versionId);
+  const reg = must(await supabase.from('regulations').select('*').eq('id', v.regulation_id).single(), '讀取規範失敗');
+  const oldDoc = (await getVersionByNo(reg.id, reg.current_version)).doc;
+  const review = await analyze(reg.id, oldDoc, v.doc, { withAi: false });
+  if (review.diff.changes.length) throw new Error('條文內容有變動，請照一般流程送審');
+  if (!review.diff.meta.length) throw new Error('沒有任何修改');
+  review.meta_only = true;
+  return must(await supabase.from('regulation_versions').update({ status: 'pending', submitted_at: nowIso(), review, review_note: null, updated_at: nowIso(),
+    created_by_name: v.created_by_name || user?.name || null }).eq('id', versionId).select().single(), '送審失敗');
+}
+async function draftAllMeta(user, { limit = 600 } = {}) {
+  if (metaDraftJob.running) throw new Error('處理中，請稍候');
+  metaDraftJob = { running: true, progress: '準備中', result: null, error: null, finishedAt: null };
+  const out = { drafted: 0, submitted: 0, skipped: [] };
+  try {
+    const rows = must(await supabase.from('regulation_audit_findings').select('id, regulation_id').eq('kind', '整理').eq('status', 'open').limit(limit), '讀取建議失敗');
+    for (let i = 0; i < rows.length; i++) {
+      const f = rows[i];
+      metaDraftJob.progress = `${i + 1}/${rows.length}`;
+      try {
+        const { open_draft } = await getRegulation(f.regulation_id);
+        if (open_draft) { out.skipped.push({ id: f.regulation_id, reason: open_draft.status === 'pending' ? '已在送審中' : '已有人在改草稿' }); continue; }
+        const d = await draftFromFinding(f.id, user); out.drafted += 1;
+        await submitMetaOnly(d.version_id, user); out.submitted += 1;
+      } catch (e) { out.skipped.push({ id: f.regulation_id, reason: e.message }); }
+    }
+    metaDraftJob = { running: false, progress: '完成', result: out, error: null, finishedAt: nowIso() };
+    const reviewer = await getReviewer();
+    if (reviewer?.app_number && out.submitted) {
+      await linePush.pushToUser(reviewer.app_number, `🤖 AI 整理：${out.submitted} 份規範的基本資料（摘要／類型／情境／關鍵字）已送審，都是低風險，可以按「低風險全部通過」。
+${FRONTEND}/regulations?tab=review`).catch(() => {});
+    }
+    return out;
+  } catch (e) {
+    metaDraftJob = { running: false, progress: '失敗', result: out, error: e.message, finishedAt: nowIso() };
+    throw e;
+  }
+}
 async function notifyAuditSummary(result) {
   const reviewer = await getReviewer();
   if (!reviewer?.app_number) return;
@@ -658,9 +771,9 @@ ${FRONTEND}/regulations?tab=audit`);
 }
 
 module.exports = {
-  listFindings, ignoreFinding, draftFromFinding, notifyAuditSummary,
+  listFindings, ignoreFinding, draftFromFinding, draftAllMeta, getMetaDraftStatus, notifyAuditSummary,
   MAP_ROLES, getReviewer, setReviewer, isReviewer,
-  importFromMap, getImportStatus,
+  importFromMap, getImportStatus, reparseIfNeeded,
   listRegulations, searchClauses, getRegulation, getVersion,
   createDraft, createNewRegulation, saveDraft, discardDraft,
   submitDraft, listDrafts, listReviews, getReview, approve, returnVersion, approveAllLow, analyze,
