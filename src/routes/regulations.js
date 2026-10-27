@@ -35,7 +35,12 @@ const express = require('express');
 const router  = express.Router();
 const { authorizeModule } = require('../middleware/auth');
 const supabase = require('../config/supabase');
+const multer = require('multer');
+const sharp  = require('sharp');
 const svc = require('../services/regulationService');
+const AI  = require('../services/regulationAi');
+const storage = require('../services/storageService');
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
 
 const ok   = (res, data) => res.json({ success: true, data });
 const fail = (res, e, code = 400) => { console.error('[Regulations]', e.message); res.status(code).json({ success: false, message: e.message }); };
@@ -46,7 +51,7 @@ const edit = authorizeModule('regulations', 'edit');
 router.get('/settings', view, async (req, res) => {
   try {
     const reviewer = await svc.getReviewer();
-    ok(res, { reviewer, is_reviewer: svc.isReviewer(req.user, reviewer), import: svc.getImportStatus(), ai: !!process.env.ANTHROPIC_API_KEY, roles: svc.MAP_ROLES });
+    ok(res, { reviewer, is_reviewer: svc.isReviewer(req.user, reviewer), import: svc.getImportStatus(), audit: AI.getAuditStatus(), ai: AI.enabled(), roles: svc.MAP_ROLES });
   } catch (e) { fail(res, e, 500); }
 });
 router.put('/settings/reviewer', edit, async (req, res) => {
@@ -63,6 +68,44 @@ router.post('/import', edit, async (req, res) => {
     ok(res, svc.getImportStatus());
   } catch (e) { fail(res, e); }
 });
+
+// ── 照片上傳（規範內文用）：壓到長邊 1600、JPEG ──
+router.post('/upload', edit, upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) throw new Error('沒有收到檔案');
+    if (!/^image\//.test(req.file.mimetype)) throw new Error('只能上傳圖片');
+    const buf = await sharp(req.file.buffer).rotate().resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 82 }).toBuffer();
+    const url = await storage.uploadPhoto(buf, 'photo.jpg', 'regulations');
+    ok(res, { url, size_before: req.file.size, size_after: buf.length });
+  } catch (e) { fail(res, e); }
+});
+
+// ── AI：編輯助理、監督檢查 ──
+router.post('/versions/:vid/assist', edit, async (req, res) => {
+  try { ok(res, await AI.assist(req.params.vid, req.body || {}, req.user)); } catch (e) { fail(res, e); }
+});
+router.post('/versions/:vid/assist/choose', edit, async (req, res) => {
+  try { ok(res, await AI.chooseOption(req.params.vid, Number(req.body?.log_index), req.body?.key)); } catch (e) { fail(res, e); }
+});
+router.post('/versions/:vid/ai-check', edit, async (req, res) => { try { ok(res, await AI.check(req.params.vid)); } catch (e) { fail(res, e); } });
+router.post('/versions/:vid/ai-check/:iid/resolve', edit, async (req, res) => {
+  try { ok(res, await AI.resolveIssue(req.params.vid, req.params.iid, req.body || {}, req.user)); } catch (e) { fail(res, e); }
+});
+
+// ── 巡檢 ──
+router.get('/audit/findings', view, async (req, res) => {
+  try { ok(res, await svc.listFindings({ status: req.query.status ?? 'open', regulationId: req.query.regulation_id })); } catch (e) { fail(res, e, 500); }
+});
+router.post('/audit/run', edit, async (req, res) => {
+  try {
+    if (req.user?.role !== 'super_admin' && !svc.isReviewer(req.user, await svc.getReviewer())) throw new Error('只有系統管理員或審核人可以啟動巡檢');
+    const ids = req.body?.regulation_id ? [Number(req.body.regulation_id)] : undefined;
+    AI.runAudit({ regulationIds: ids, limit: Number(req.body?.limit) || undefined, notify: ids ? null : svc.notifyAuditSummary }).catch(e => console.warn('[RegAudit]', e.message));
+    ok(res, AI.getAuditStatus());
+  } catch (e) { fail(res, e); }
+});
+router.post('/audit/findings/:id/ignore', edit, async (req, res) => { try { ok(res, await svc.ignoreFinding(req.params.id, req.body?.reason, req.user)); } catch (e) { fail(res, e); } });
+router.post('/audit/findings/:id/draft', edit, async (req, res) => { try { ok(res, await svc.draftFromFinding(req.params.id, req.user)); } catch (e) { fail(res, e); } });
 
 // ── 扣分 ──
 router.get('/employees/search', view, async (req, res) => { try { ok(res, await svc.searchEmployees(req.query.q)); } catch (e) { fail(res, e, 500); } });

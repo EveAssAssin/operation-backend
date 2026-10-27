@@ -6,6 +6,7 @@ const mapScore = require('./mapScoreApi');
 const linePush = require('./linePushService');
 const { parseRegulation } = require('./regulationParser');
 const D = require('./regulationDoc');
+const AI = require('./regulationAi');
 
 const FRONTEND = (process.env.OPERATION_FRONTEND_URL || 'https://operation-frontend.onrender.com').replace(/\/$/, '');
 const MAP_ROLES = ['LOHAS店長', '副店長', 'LOHAS店員', '穩定新人', '新進人員', '區長', '辦公室', '直通車店長', '直通車店員'];
@@ -276,6 +277,8 @@ function normalizeDoc(doc) {
     c.t = c.t || null;
     c.pen = (c.pen === '' || c.pen === undefined || c.pen === null) ? null : Math.trunc(Number(c.pen));
     c.notes = (c.notes || []).filter(n => String(n.text || '').trim()).map(n => ({ kind: n.kind === '例' ? '例' : '註', text: String(n.text).trim() }));
+    c.images = (Array.isArray(c.images) ? c.images : []).filter(im => im && im.url).map(im => ({ url: String(im.url), caption: String(im.caption || '').trim() }));
+    if (!c.images.length) delete c.images;
     c.subs = Array.isArray(c.subs) ? c.subs : [];
     clean(c.subs);
   });
@@ -375,7 +378,8 @@ async function analyze(regId, oldDoc, newDoc, { withAi = true } = {}) {
     const { count } = await supabase.from('regulation_deductions').select('id', { count: 'exact', head: true }).in('clause_code', touched).gte('created_at', since).neq('status', 'rejected');
     recentDeductions = count || 0;
   }
-  const penaltyChanges = diff.changes.filter(c => c.ctype === '規定' || c.old_ctype === '規定' || (c.fields || []).includes('penalty')).length;
+  // 每一條都可以引用扣分 → 除了單純移動位置，其他變動都算扣分相關
+  const penaltyChanges = diff.changes.filter(c => c.kind !== 'move').length;
   const ai = withAi ? await aiReview(newDoc.title, diff, risk) : null;
   return {
     diff, risk: risk.level, risk_reasons: risk.reasons, checks,
@@ -397,6 +401,16 @@ async function submitDraft(versionId, user) {
   const review = await analyze(reg.id, oldDoc, v.doc);
   if (!review.diff.changes.length && !review.diff.meta.length) throw new Error('沒有任何修改，不需要送審');
   if (review.checks.some(c => c.lv === 'warn')) throw new Error(`還有問題要先處理：${review.checks.filter(c => c.lv === 'warn').map(c => c.text).join('；')}`);
+  // AI 監督檢查：結果過期就重跑；還有沒處理的警告 → 不能送審
+  if (AI.enabled()) {
+    const chk = await AI.ensureChecked(versionId);
+    if (chk.unresolved.length) {
+      const e = new Error(`AI 檢查還有 ${chk.unresolved.length} 個問題沒處理（修正，或忽略並寫原因）：${chk.unresolved.map(i => i.title).join('；')}`);
+      e.code = 'AI_UNRESOLVED'; throw e;
+    }
+    const ac = chk.ai_checks;
+    review.ai_checks = { at: ac.at, issues: (ac.issues || []).map(i => ({ id: i.id, level: i.level, kind: i.kind, title: i.title, detail: i.detail, codes: i.codes, other_regs: i.other_regs, resolved: ac.resolved?.[i.id] || null })) };
+  }
   const saved = must(await supabase.from('regulation_versions').update({
     status: 'pending', submitted_at: nowIso(), review, review_note: null, updated_at: nowIso(),
     created_by_name: v.created_by_name || user?.name || null,
@@ -488,6 +502,7 @@ async function approve(versionId, user, { doc, notifyStaff = false, notice } = {
     map_sync_status: 'pending', updated_at: now,
   }).eq('id', reg.id), '更新規範失敗');
   await rebuildClauses(reg.id, v.version, finalDoc);
+  await supabase.from('regulation_audit_findings').update({ status: 'resolved', handled_at: now }).eq('draft_version_id', versionId);
 
   // 通知送審人
   const app = await lookupSubmitterAppNumber(v);
@@ -602,7 +617,45 @@ async function rejectDeduction(id, user, reason) {
   return { ok: true };
 }
 
+// ════════════════════════════════════════════════════════════
+// 巡檢結果
+// ════════════════════════════════════════════════════════════
+async function listFindings({ status = 'open', regulationId } = {}) {
+  let q = supabase.from('regulation_audit_findings').select('*, regulations(title, category)').order('created_at', { ascending: false }).limit(500);
+  if (status) q = q.eq('status', status);
+  if (regulationId) q = q.eq('regulation_id', regulationId);
+  return must(await q, '讀取巡檢結果失敗');
+}
+async function ignoreFinding(id, reason, user) {
+  if (!String(reason || '').trim()) throw new Error('忽略要寫原因');
+  must(await supabase.from('regulation_audit_findings').update({ status: 'ignored', ignore_reason: String(reason).trim(), handled_by: user?.name || null, handled_at: nowIso() }).eq('id', id), '更新失敗');
+  return { ok: true };
+}
+/** 依巡檢問題產生（或併入）修正草稿 */
+async function draftFromFinding(id, user) {
+  const f = must(await supabase.from('regulation_audit_findings').select('*').eq('id', id).maybeSingle(), '讀取巡檢結果失敗');
+  if (!f) throw new Error('找不到這個問題');
+  const draft = await createDraft(f.regulation_id, user);   // 已有草稿就沿用
+  let doc = draft.doc;
+  let applied = false, note = '';
+  if (f.fix?.ops?.length) {
+    try { doc = D.applyOps(doc, f.fix.ops); applied = true; } catch (e) { note = `AI 修正套不上（${e.message}），請手動修改`; }
+  }
+  const change = `巡檢：${f.title}`;
+  const saved = await saveDraft(draft.id, { doc, change_note: draft.change_note ? `${draft.change_note}；${change}` : change }, user);
+  must(await supabase.from('regulation_audit_findings').update({ status: 'drafted', draft_version_id: draft.id, handled_by: user?.name || null, handled_at: nowIso() }).eq('id', id), '更新失敗');
+  return { version_id: saved.id, applied, note };
+}
+async function notifyAuditSummary(result) {
+  const reviewer = await getReviewer();
+  if (!reviewer?.app_number) return;
+  await linePush.pushToUser(reviewer.app_number,
+    `🔎 規範巡檢完成：檢查 ${result.checked} 份，發現 ${result.found} 個問題（需要處理 ${result.warn} 個）${result.failed ? `，${result.failed} 份檢查失敗` : ''}
+${FRONTEND}/regulations?tab=audit`);
+}
+
 module.exports = {
+  listFindings, ignoreFinding, draftFromFinding, notifyAuditSummary,
   MAP_ROLES, getReviewer, setReviewer, isReviewer,
   importFromMap, getImportStatus,
   listRegulations, searchClauses, getRegulation, getVersion,

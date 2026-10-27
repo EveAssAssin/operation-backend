@@ -213,6 +213,7 @@ const { startDuplicateNeedsNotifyJob }        = require('./jobs/notifyDuplicateN
 const { startFollowUpNotifyJob }              = require('./jobs/notifyRecruitmentFollowUps');
 const { startAppointedUnitJobs }              = require('./jobs/syncAppointedUnits');
 const { startScheduledNotifyDispatcher }      = require('./jobs/scheduledNotifyDispatcher');
+const { startRegulationAuditJob }            = require('./jobs/regulationAudit');
 const { init: initHolidays }                  = require('./services/taiwanHolidayService');
 const { runMigrations }                       = require('./lib/migrator');
 
@@ -242,6 +243,7 @@ app.use((err, req, res, next) => {
 
   // 2. 啟動排程任務
   startScheduledSync();
+  startRegulationAuditJob();
   startLineUidScheduledSync();
   startBillingScheduledSync();
   startChiLensSyncJob();             // 每天 02:30 路奇鏡片帳單（上月＋本月）

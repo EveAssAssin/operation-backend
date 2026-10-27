@@ -25,7 +25,7 @@ function flatten(doc) {
       out.push({
         code: c.code, parent_code: parent, section_index: si, section_no: cnNo(si), section_title: sec.title || '',
         display_no: `${cnNo(si)}、${displayNo(level, p)}`, level, ctype: c.t || null,
-        text: c.text || '', notes: c.notes || [], penalty: (c.pen === undefined || c.pen === null || c.pen === '') ? null : Number(c.pen),
+        text: c.text || '', notes: c.notes || [], images: c.images || [], penalty: (c.pen === undefined || c.pen === null || c.pen === '') ? null : Number(c.pen),
         sort: sort++,
       });
       walk(c.subs || [], level + 1, p, c.code);
@@ -106,6 +106,7 @@ function diffDocs(oldDoc, newDoc) {
     if ((p.ctype || null) !== (c.ctype || null)) fields.push('ctype');
     if (p.penalty !== c.penalty) fields.push('penalty');
     if (notesKey(p.notes) !== notesKey(c.notes)) fields.push('notes');
+    if (JSON.stringify(p.images || []) !== JSON.stringify(c.images || [])) fields.push('images');
     const moved = p.parent_code !== c.parent_code || p.section_title !== c.section_title;
     if (fields.length || moved) {
       changes.push({
@@ -130,21 +131,32 @@ function diffDocs(oldDoc, newDoc) {
   return { changes, meta };
 }
 
-/** 風險分級：高＝動到規定／扣分／適用身分或刪條文；低＝只有移動、少量錯字、說明欄位；其餘中 */
+/**
+ * 風險分級（每一條都可以引用扣分，所以看「改動會不會改變員工該怎麼做」）
+ *   高：刪條文、改扣分、改適用身分、數字（時間／金額／數量）有變、內容大改（> 20 字）
+ *   中：新增條文、內容中幅修改（5～20 字）、註／例／照片變動
+ *   低：只有移動位置、錯字等小修（≤ 4 字）、摘要／情境等說明欄位
+ */
+const nums = (t) => (String(t || '').match(/\d+(?:[.:：／/]\d+)*/g) || []).join(',');
 function riskOf(diff) {
   const { changes, meta } = diff;
   const reasons = [];
-  const isRule = (c) => c.ctype === '規定' || c.old_ctype === '規定';
   changes.forEach(c => {
     if (c.kind === 'del') reasons.push(['高', `刪除條文 ${c.code}`]);
-    if (c.kind === 'mod' && c.fields.includes('penalty')) reasons.push(['高', `${c.code} 扣分改變`]);
-    if (c.kind === 'mod' && c.fields.includes('ctype') && (c.ctype === '規定' || c.old_ctype === '規定')) reasons.push(['高', `${c.code} 規定類型改變`]);
-    if (c.kind === 'mod' && isRule(c) && c.fields.includes('text') && c.char_diff > 4) reasons.push(['高', `規定 ${c.code} 內容修改`]);
-    if (c.kind === 'add' && c.ctype === '規定') reasons.push(['高', `新增規定 ${c.code}`]);
-    if (c.kind === 'add' && c.ctype !== '規定') reasons.push(['中', `新增條文 ${c.code}`]);
-    if (c.kind === 'mod' && !isRule(c) && (c.char_diff > 4 || c.fields.includes('notes'))) reasons.push(['中', `${c.code} 內容修改`]);
+    if (c.kind === 'add') reasons.push(['中', `新增條文 ${c.code}`]);
+    if (c.kind !== 'mod') return;
+    if (c.fields.includes('penalty')) reasons.push(['高', `${c.code} 扣分改變`]);
+    if (c.fields.includes('text')) {
+      if (nums(c.old) !== nums(c.new)) reasons.push(['高', `${c.code} 數字（時間／金額／數量）改變`]);
+      else if (c.char_diff > 20) reasons.push(['高', `${c.code} 內容大幅修改`]);
+      else if (c.char_diff > 4) reasons.push(['中', `${c.code} 內容修改`]);
+    }
+    if (c.fields.includes('notes') || c.fields.includes('images')) reasons.push(['中', `${c.code} 註／例／照片變動`]);
   });
-  meta.forEach(m => { if (m.field === 'roles') reasons.push(['高', '適用身分改變']); });
+  meta.forEach(m => {
+    if (m.field === 'roles') reasons.push(['高', '適用身分改變']);
+    if (m.field === 'title') reasons.push(['中', '規範標題改變']);
+  });
   const level = reasons.some(r => r[0] === '高') ? '高' : reasons.some(r => r[0] === '中') ? '中' : '低';
   return { level, reasons: reasons.map(r => r[1]) };
 }
@@ -160,8 +172,6 @@ function ruleChecks(doc, { knownTitles = [] } = {}) {
   if (empty.length) out.push({ lv: 'warn', text: `有 ${empty.length} 條內容是空的：${empty.slice(0, 5).map(c => c.display_no).join('、')}` });
   if (!String(doc.title || '').trim()) out.push({ lv: 'warn', text: '規範標題是空的' });
   if (!(doc.sections || []).length) out.push({ lv: 'warn', text: '沒有任何大項' });
-  const ruleNoPen = flat.filter(c => c.ctype === '規定' && c.penalty === null);
-  if (ruleNoPen.length) out.push({ lv: 'info', text: `${ruleNoPen.length} 條規定沒有逐條設定扣分，扣分時會用整份預設分數` });
   // 『』引用的規範是否存在
   const norm = (s) => String(s || '').replace(/[「」『』\s]/g, '').replace(/MAP$/i, '').toLowerCase();
   const titleSet = new Set(knownTitles.map(norm));
@@ -200,4 +210,84 @@ function plainSummary(diff) {
   return lines;
 }
 
-module.exports = { flatten, allCodes, assignCodes, diffDocs, riskOf, ruleChecks, plainSummary, cnNo, charDiffCount };
+// ── 套用 AI 建議（結構化修改指令）─────────────────────────────
+//   每個 op 都以條文代碼定位，找不到就丟錯，不會改到別的地方
+//   replace_text {code,text} · add_clause {parent_code?|section_index?, after_code?, text, pen?}
+//   delete_clause {code} · add_note {code,kind,text} · set_penalty {code,pen}
+//   set_meta {field,value} · add_section {title, after_section_index?, clauses:[text]}
+//   add_image {code,url,caption} · set_image_caption {code,url,caption}
+//   move_clause {code, to_parent_code?|to_section_index?, after_code?}
+function locate(doc, code) {
+  for (const sec of doc.sections || []) {
+    const walk = (arr, parent) => {
+      for (let i = 0; i < arr.length; i++) {
+        if (arr[i].code === code) return { arr, i, node: arr[i], parent, sec };
+        const r = walk(arr[i].subs || [], arr[i]); if (r) return r;
+      }
+      return null;
+    };
+    const r = walk(sec.items || [], null); if (r) return r;
+  }
+  return null;
+}
+const META_FIELDS = ['title', 'category', 'doc_type', 'summary', 'scenario', 'owner_dept', 'roles'];
+function applyOps(docIn, ops = []) {
+  const doc = JSON.parse(JSON.stringify(docIn));
+  doc.sections = doc.sections || [];
+  const need = (code) => { const r = locate(doc, code); if (!r) throw new Error(`找不到條文 ${code}`); return r; };
+  const newClause = (o) => ({ text: String(o.text || '').trim(), t: null, notes: [], subs: [], pen: (o.pen === undefined || o.pen === null || o.pen === '') ? null : Number(o.pen) });
+  for (const op of ops) {
+    switch (op.op) {
+      case 'replace_text': need(op.code).node.text = String(op.text || '').trim(); break;
+      case 'delete_clause': { const r = need(op.code); r.arr.splice(r.i, 1); break; }
+      case 'add_note': { const r = need(op.code); r.node.notes = r.node.notes || []; r.node.notes.push({ kind: op.kind === '例' ? '例' : '註', text: String(op.text || '').trim() }); break; }
+      case 'set_penalty': need(op.code).node.pen = (op.pen === null || op.pen === '') ? null : Number(op.pen); break;
+      case 'set_meta': if (META_FIELDS.includes(op.field)) doc[op.field] = op.value; break;
+      case 'add_image': { const r = need(op.code); r.node.images = r.node.images || []; r.node.images.push({ url: op.url, caption: op.caption || '' }); break; }
+      case 'set_image_caption': { const r = need(op.code); (r.node.images || []).forEach(im => { if (!op.url || im.url === op.url) im.caption = op.caption || ''; }); break; }
+      case 'add_section': {
+        const sec = { title: String(op.title || '').trim(), items: (op.clauses || []).map(t => newClause({ text: t })) };
+        const at = Number.isInteger(op.after_section_index) ? op.after_section_index + 1 : doc.sections.length;
+        doc.sections.splice(Math.max(0, Math.min(at, doc.sections.length)), 0, sec); break;
+      }
+      case 'add_clause': case 'move_clause': {
+        let node;
+        if (op.op === 'move_clause') { const r = need(op.code); node = r.node; r.arr.splice(r.i, 1); } else node = newClause(op);
+        const parentCode = op.op === 'move_clause' ? op.to_parent_code : op.parent_code;
+        const secIdx = op.op === 'move_clause' ? op.to_section_index : op.section_index;
+        let arr;
+        if (parentCode) { const p = need(parentCode); p.node.subs = p.node.subs || []; arr = p.node.subs; }
+        else if (op.after_code) { arr = need(op.after_code).arr; }
+        else if (Number.isInteger(secIdx) && doc.sections[secIdx]) arr = doc.sections[secIdx].items;
+        else throw new Error('新增條文要指定放在哪裡');
+        let pos = arr.length;
+        if (op.after_code) { const k = arr.findIndex(x => x.code === op.after_code); if (k >= 0) pos = k + 1; }
+        arr.splice(pos, 0, node); break;
+      }
+      default: throw new Error(`不認得的修改指令：${op.op}`);
+    }
+  }
+  return doc;
+}
+
+/** 給 AI 看的精簡文字版（代碼＋編號＋內容） */
+function docToPrompt(doc, maxChars = 30000) {
+  const lines = [`標題：${doc.title || ''}`, `分類：${doc.category || ''}`, `適用身分：${(doc.roles || []).join('、')}`];
+  if (doc.summary) lines.push(`摘要：${doc.summary}`);
+  (doc.sections || []).forEach((sec, si) => {
+    lines.push(`【大項 ${si}】${cnNo(si)}、${sec.title || ''}`);
+    const walk = (arr, level, path) => arr.forEach((c, i) => {
+      const p = [...path, i];
+      lines.push(`${'  '.repeat(level)}[${c.code || '新'}] ${displayNo(level, p)} ${c.text || ''}${c.pen != null ? `（扣分 ${c.pen}）` : ''}`);
+      (c.notes || []).forEach(n => lines.push(`${'  '.repeat(level + 1)}${n.kind}：${n.text}`));
+      (c.images || []).forEach(im => lines.push(`${'  '.repeat(level + 1)}〔照片〕${im.caption || '（無說明）'}`));
+      walk(c.subs || [], level + 1, p);
+    });
+    walk(sec.items || [], 1, []);
+  });
+  let out = lines.join('\n');
+  if (out.length > maxChars) out = `${out.slice(0, maxChars)}\n…（後面省略）`;
+  return out;
+}
+
+module.exports = { applyOps, locate, docToPrompt, flatten, allCodes, assignCodes, diffDocs, riskOf, ruleChecks, plainSummary, cnNo, charDiffCount };
