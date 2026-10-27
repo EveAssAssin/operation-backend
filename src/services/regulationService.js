@@ -126,7 +126,7 @@ async function importFromMap(by) {
       const ex = exMap.get(id);
       const codes = D.allCodes(doc);
       if (!ex) {
-        newRegs.push({ id, title: doc.title, category: doc.category, roles: doc.roles, keywords: doc.keywords, legacy_meta: doc.legacy_meta,
+        newRegs.push({ id, status: 'active', title: doc.title, category: doc.category, roles: doc.roles, keywords: doc.keywords, legacy_meta: doc.legacy_meta,
           current_version: 1, used_codes: codes, score: sc.score, bonus: sc.bonus, source: 'map_import', map_reason_id: id,
           map_version: r.version, map_update_time: r.updateTime || null, map_sync_status: 'synced' });
         newVers.push({ regulation_id: id, version: 1, status: 'approved', doc, source: 'map_import', change_note: `自 MAP 匯入（MAP 第 ${r.version} 版）`,
@@ -510,7 +510,7 @@ async function approve(versionId, user, { doc, notifyStaff = false, notice } = {
   if (app) linePush.pushToUser(app, `✅ 規範審核通過：${finalDoc.title}（第 ${v.version} 版）${edited ? '\n審核人有修改部分內容，請到系統查看。' : ''}`).catch(() => {});
   // 推播規範更新給受影響人員
   let notified = 0;
-  if (notifyStaff && String(notice || '').trim()) notified = await pushNoticeToRoles(finalDoc.roles, String(notice).trim());
+  if (notifyStaff && String(notice || '').trim()) notified = await pushNoticeToRoles(finalDoc.roles, `${String(notice).trim()}\n\n查看規範：${FRONTEND}/rules?reg=${reg.id}`);
   return { ok: true, edited, notified };
 }
 

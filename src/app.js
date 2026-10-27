@@ -172,6 +172,8 @@ app.use('/api/vendor-payment', require('./routes/vendorPayment'));
 // 匯款批次（S2：元大格式匯出 + 進項發票）
 app.use('/api/payment-batch', authenticate, require('./routes/paymentBatch'));
 
+// 人員「查規範」（不需登入，用 APP 編號確認身分）
+app.use('/api/regulations-public', require('./routes/regulationsPublic'));
 // 規範系統（主檔、版本、送審審核、引用條文扣分）
 app.use('/api/regulations', authenticate, require('./routes/regulations'));
 

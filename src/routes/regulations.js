@@ -108,6 +108,11 @@ router.post('/audit/run', edit, async (req, res) => {
 router.post('/audit/findings/:id/ignore', edit, async (req, res) => { try { ok(res, await svc.ignoreFinding(req.params.id, req.body?.reason, req.user)); } catch (e) { fail(res, e); } });
 router.post('/audit/findings/:id/draft', edit, async (req, res) => { try { ok(res, await svc.draftFromFinding(req.params.id, req.user)); } catch (e) { fail(res, e); } });
 
+// ── 人員提問紀錄（哪些問題規範沒寫到）──
+router.get('/questions', view, async (req, res) => {
+  try { ok(res, await require('../services/regulationPublic').listQuestions({ found: req.query.found })); } catch (e) { fail(res, e, 500); }
+});
+
 // ── 扣分 ──
 router.get('/employees/search', view, async (req, res) => { try { ok(res, await svc.searchEmployees(req.query.q)); } catch (e) { fail(res, e, 500); } });
 router.get('/deductions', view, async (req, res) => { try { ok(res, await svc.listDeductions(req.query)); } catch (e) { fail(res, e, 500); } });
