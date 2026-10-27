@@ -41,7 +41,7 @@ function parseData(data) {
 }
 
 // ── HTTP POST（支援 http / https）─────────────────────────────
-function post(body) {
+function post(body, timeoutMs = DEFAULT_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     const url     = new URL(BASE_URL);
     const payload = JSON.stringify(body);
@@ -73,7 +73,7 @@ function post(body) {
     });
 
     req.on('error', reject);
-    req.setTimeout(DEFAULT_TIMEOUT_MS, () => {
+    req.setTimeout(timeoutMs, () => {
       req.destroy();
       reject(new Error('MAP API 請求超時'));
     });
@@ -83,8 +83,8 @@ function post(body) {
 }
 
 // ── 統一呼叫：檢查 statecode ───────────────────────────────────
-async function callApi(body) {
-  const res  = await post(body);
+async function callApi(body, timeoutMs) {
+  const res  = await post(body, timeoutMs);
   const code = String(res.statecode ?? res.stateCode ?? '');
   if (code !== '0') {
     const err = new Error(`MAP API 錯誤（${body.method}）：${res.message || '未知錯誤'}`);
@@ -202,10 +202,21 @@ async function getReasons(roletype) {
 // #41 取得規範清單（分頁，每頁最多 200）
 //   回傳：{ totalCount, totalPage, page, pageSize, reasons:[...] }
 // ───────────────────────────────────────────────────────────────
-async function getReasonList(page = 1, pagesize = 200, startTime, endTime) {
+//   規範內文很大（200 筆約 1.7MB），所以預設每頁 50 筆、逾時 90 秒、失敗自動重試 3 次
+async function getReasonList(page = 1, pagesize = 50, startTime, endTime) {
   const body = { method: 'getreasonlist', page: String(page), pagesize: String(pagesize) };
   if (startTime && endTime) { body.startTime = startTime; body.endTime = endTime; }
-  const res = await callApi(body);
+  let res, lastErr;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try { res = await callApi(body, 90000); break; }
+    catch (e) {
+      lastErr = e;
+      if (e.statecode) throw e;                       // MAP 明確回錯，不重試
+      console.warn(`[MAP] getreasonlist 第 ${page} 頁第 ${attempt} 次失敗：${e.message}`);
+      await new Promise(r => setTimeout(r, attempt * 3000));
+    }
+  }
+  if (!res) throw new Error(`讀取 MAP 規範第 ${page} 頁失敗（已重試 3 次）：${lastErr?.message}`);
   const data = parseData(res.data);
   return data && typeof data === 'object' ? data : { reasons: [] };
 }

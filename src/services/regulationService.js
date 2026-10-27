@@ -67,7 +67,7 @@ async function fetchAllReasons() {
   const all = [];
   let page = 1, totalPage = 1;
   do {
-    const d = await mapScore.getReasonList(page, 200);
+    const d = await mapScore.getReasonList(page, 50);
     all.push(...(d.reasons || []));
     totalPage = Number(d.totalPage || 1);
     importJob.progress = `讀取 MAP 規範第 ${page}/${totalPage} 頁`;
@@ -79,7 +79,7 @@ async function fetchAllReasons() {
     try {
       const cats = await mapScore.getReasons(role);
       cats.forEach(c => (c.reasons || []).forEach(r => { if (!scores.has(r.reasonId)) scores.set(r.reasonId, { score: Number(r.score), bonus: Number(r.bonus) }); }));
-    } catch (e) { /* 單一身分失敗不影響 */ }
+    } catch (e) { console.warn(`[Regulation] 讀取 ${role} 分數失敗：${e.message}`); }
   }
   return { reasons: all, scores };
 }
@@ -173,6 +173,7 @@ async function importFromMap(by) {
     importJob = { ...importJob, running: false, finishedAt: nowIso(), result, progress: '完成' };
     return result;
   } catch (e) {
+    console.error('[Regulation] 匯入失敗：', e.message);
     importJob = { ...importJob, running: false, finishedAt: nowIso(), error: e.message, progress: '失敗' };
     throw e;
   }
