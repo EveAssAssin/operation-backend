@@ -113,26 +113,35 @@ async function ask(emp, question, history = []) {
   } catch (e) { console.warn('[RegAsk] 關鍵字失敗：', e.message); }
   if (!keywords.length) keywords = [qtext.slice(0, 6)];
 
+  // 2. 撈候選條文：每個關鍵字最多 400 條（常見詞如「結帳」會命中上百條，只取前幾十條會漏掉關鍵條文）
   const score = new Map();
   const add = (c, w) => { if (!ids.has(Number(c.regulation_id))) return; const cur = score.get(c.code) || { c, n: 0 }; cur.n += w; score.set(c.code, cur); };
   const SEL = 'code, regulation_id, parent_code, display_no, section_title, text, notes, sort, regulations(title)';
   for (const kw of keywords) {
-    const { data } = await supabase.from('regulation_clauses').select(SEL).eq('active', true).ilike('text', `%${kw}%`).limit(60);
-    (data || []).forEach(c => add(c, 1));
+    const w = qtext.includes(kw) ? 2 : 1;   // 問題裡原本就有的詞比 AI 補的同義詞重要
+    const { data } = await supabase.from('regulation_clauses').select(SEL).eq('active', true).ilike('text', `%${kw}%`).limit(400);
+    (data || []).forEach(c => add(c, w));
     // 規範標題命中關鍵字（例如「交件」→「眼鏡交件流程MAP」）→ 把那份規範前面的條文也拉進來
     const { data: regs } = await supabase.from('regulations').select('id').eq('status', 'active').ilike('title', `%${kw}%`).limit(3);
     for (const r of regs || []) {
-      const { data: cl } = await supabase.from('regulation_clauses').select(SEL).eq('active', true).eq('regulation_id', r.id).order('sort').limit(20);
-      (cl || []).forEach(c => add(c, 0.5));
+      const { data: cl } = await supabase.from('regulation_clauses').select(SEL).eq('active', true).eq('regulation_id', r.id).order('sort').limit(30);
+      (cl || []).forEach(c => add(c, 1.5));
     }
   }
-  // 同一條同時命中多個關鍵字 → 分數加乘
-  score.forEach(v => { const t = v.c.text || ''; v.n += keywords.filter(k => t.includes(k)).length * 0.5; });
+  // 3. 排序：命中幾個關鍵字＋和問題字面的相似度（中文兩字詞重疊）；太長的條文稍微降權
+  const bigrams = (t) => { const z = String(t || '').replace(/[^\u4e00-\u9fffA-Za-z0-9]/g, ''); const out = new Set(); for (let i = 0; i < z.length - 1; i++) out.add(z.slice(i, i + 2)); return out; };
+  const qb = bigrams(qtext);
+  score.forEach(v => {
+    const t = v.c.text || '';
+    const tb = bigrams(t); let ov = 0; qb.forEach(b => { if (tb.has(b)) ov += 1; });
+    v.n += ov;
+    if (t.length > 400) v.n -= 0.5;
+  });
   // 命中越多關鍵字越前面；同一份規範最多 8 條，總共 45 條
   const perReg = new Map();
   const picked = [...score.values()].sort((a, b) => b.n - a.n).filter(({ c }) => {
-    const k = perReg.get(c.regulation_id) || 0; if (k >= 8) return false; perReg.set(c.regulation_id, k + 1); return true;
-  }).slice(0, 40).map(x => x.c);
+    const k = perReg.get(c.regulation_id) || 0; if (k >= 10) return false; perReg.set(c.regulation_id, k + 1); return true;
+  }).slice(0, 80).map(x => x.c);
   // 子條文要連同上層條文一起給 AI，才看得懂前後文
   const have = new Set(picked.map(c => c.code));
   const parents = [...new Set(picked.map(c => c.parent_code).filter(p => p && !have.has(p)))].slice(0, 15);
@@ -141,7 +150,8 @@ async function ask(emp, question, history = []) {
     (data || []).forEach(c => picked.push(c));
   }
 
-  const ctx = picked.map(c => `【${c.code}】《${c.regulations?.title}》${c.section_title ? `${c.section_title} ` : ''}${c.display_no}：${c.text}${(c.notes || []).map(n => `（${n.kind}：${n.text}）`).join('')}`).join('\n');
+  const cut = (t, n) => (String(t || '').length > n ? `${String(t).slice(0, n)}…` : String(t || ''));
+  const ctx = picked.map(c => `【${c.code}】《${c.regulations?.title}》${c.section_title ? `${c.section_title} ` : ''}${c.display_no}：${cut(c.text, 300)}${(c.notes || []).map(n => `（${n.kind}：${cut(n.text, 120)}）`).join('')}`).join('\n');
   const system = `你是樂活眼鏡的規範小幫手，回答門市與總部同仁「公司規範怎麼規定」。
 規則：
 1. 只能根據下面提供的規範條文回答，不可以用常識或猜測補充公司規定。
