@@ -76,6 +76,16 @@ router.post('/propose/versions/:vid/assist', editLimit, who, can, own, async (re
 router.post('/propose/versions/:vid/assist/choose', editLimit, who, can, own, async (req, res) => { try { ok(res, await AI.chooseOption(req.params.vid, Number(req.body?.log_index), req.body?.key)); } catch (e) { pfail(res, e); } });
 router.post('/propose/versions/:vid/ai-check', editLimit, who, can, own, async (req, res) => { try { ok(res, await AI.check(req.params.vid)); } catch (e) { pfail(res, e); } });
 router.post('/propose/versions/:vid/ai-check/:iid/resolve', editLimit, who, can, own, async (req, res) => { try { ok(res, await AI.resolveIssue(req.params.vid, req.params.iid, req.body || {}, U(req))); } catch (e) { pfail(res, e); } });
+// 上傳 Word → AI 轉成系統格式（背景工作，結果回給編輯器）
+const Docx = require('../services/regulationDocx');
+const uploadDocx = multer({ storage: multer.memoryStorage(), limits: { fileSize: 40 * 1024 * 1024 } });
+router.post('/propose/import-docx', editLimit, who, can, uploadDocx.single('file'), async (req, res) => {
+  try {
+    if (!Docx.isDocx(req.file)) throw new Error('請上傳 .docx 檔（舊的 .doc 請先在 Word 另存成 .docx）');
+    ok(res, Docx.start(`app:${req.emp.app_number}`, req.file.buffer, { title: req.body?.title }));
+  } catch (e) { pfail(res, e); }
+});
+router.get('/propose/import-docx/:job', who, (req, res) => { try { ok(res, Docx.get(`app:${req.emp.app_number}`, req.params.job)); } catch (e) { fail(res, e, 404); } });
 // app_number 放 query（multipart 的 body 在 multer 之前讀不到）
 router.post('/propose/upload', editLimit, who, can, upload.single('file'), async (req, res) => {
   try {

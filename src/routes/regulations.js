@@ -90,6 +90,17 @@ router.post('/upload', edit, upload.single('file'), async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
+// ── 上傳 Word → AI 轉成系統格式（背景工作，前端輪詢；結果只回給編輯器，不直接存檔）──
+const Docx = require('../services/regulationDocx');
+const uploadDocx = multer({ storage: multer.memoryStorage(), limits: { fileSize: 40 * 1024 * 1024 } });
+router.post('/import-docx', edit, uploadDocx.single('file'), async (req, res) => {
+  try {
+    if (!Docx.isDocx(req.file)) throw new Error('請上傳 .docx 檔（舊的 .doc 請先在 Word 另存成 .docx）');
+    ok(res, Docx.start(`u:${req.user?.id}`, req.file.buffer, { title: req.body?.title }));
+  } catch (e) { fail(res, e); }
+});
+router.get('/import-docx/:job', view, (req, res) => { try { ok(res, Docx.get(`u:${req.user?.id}`, req.params.job)); } catch (e) { fail(res, e, 404); } });
+
 // ── AI：編輯助理、監督檢查 ──
 router.post('/versions/:vid/assist', edit, async (req, res) => {
   try { ok(res, await AI.assist(req.params.vid, req.body || {}, req.user)); } catch (e) { fail(res, e); }

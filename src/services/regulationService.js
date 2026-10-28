@@ -289,7 +289,26 @@ async function getRegulation(id) {
     .eq('regulation_id', id).order('version', { ascending: false }), '讀取版本失敗');
   const cur = must(await supabase.from('regulation_versions').select('doc').eq('regulation_id', id).eq('version', reg.current_version).maybeSingle(), '讀取內容失敗');
   const open = versions.find(v => OPEN_STATUSES.includes(v.status)) || null;
-  return { regulation: reg, doc: cur?.doc || null, versions, open_draft: open };
+  return { regulation: reg, doc: cur?.doc || null, versions, open_draft: open, recent_change: await recentChange(id) };
+}
+
+/** 最近一次在本系統審核通過的修改（30 天內；MAP 匯入的不算）＋AI 的白話說明 —— 規範最上方顯示用（後台與 App 查規範共用） */
+const RECENT_DAYS = Number(process.env.REGULATION_RECENT_DAYS || 30);
+async function recentChange(regId) {
+  const since = new Date(Date.now() - RECENT_DAYS * 864e5).toISOString();
+  const { data } = await supabase.from('regulation_versions')
+    .select('version, change_note, published_at, review, reviewer_edited')
+    .eq('regulation_id', regId).eq('status', 'approved').neq('source', 'map_import').gte('published_at', since)
+    .order('version', { ascending: false }).limit(1);
+  const v = data?.[0];
+  if (!v) return null;
+  const ch = (v.review?.diff?.changes || []).filter(c => c.kind !== 'move');
+  return {
+    version: v.version, published_at: v.published_at, change_note: v.change_note || '',
+    summary: v.review?.summary || [], ai: !!v.review?.ai,
+    counts: { add: ch.filter(c => c.kind === 'add').length, mod: ch.filter(c => c.kind !== 'add' && c.kind !== 'del' && c.kind !== 'delete').length, del: ch.filter(c => c.kind === 'del' || c.kind === 'delete').length },
+    codes: ch.filter(c => c.kind !== 'del' && c.kind !== 'delete').map(c => c.code).filter(Boolean).slice(0, 60),
+  };
 }
 
 async function getVersion(versionId) {
@@ -554,7 +573,10 @@ async function approve(versionId, user, { doc, notifyStaff = false, notice } = {
     if (edited) {
       const oldDoc = reg.current_version > 0 ? (await getVersionByNo(reg.id, reg.current_version)).doc : { sections: [] };
       review = await analyze(reg.id, oldDoc, finalDoc, { withAi: false });
-      review.summary = v.review?.summary || review.summary;
+      // 審核人有改 → 用最後版本重新請 AI 白話說明（規範最上方「最近修改」顯示這份）
+      const ai = await aiReview(finalDoc.title, review.diff, D.riskOf(review.diff));
+      review.summary = ai?.summary?.length ? ai.summary : (v.review?.summary || review.summary);
+      review.ai = !!ai || !!v.review?.ai;
       review.notes = v.review?.notes || [];
       if (review.checks.some(c => c.lv === 'warn')) throw new Error(`修改後有問題：${review.checks.filter(c => c.lv === 'warn').map(c => c.text).join('；')}`);
     }
@@ -777,6 +799,6 @@ module.exports = {
   importFromMap, getImportStatus, reparseIfNeeded,
   listRegulations, searchClauses, getRegulation, getVersion,
   createDraft, createNewRegulation, saveDraft, discardDraft,
-  submitDraft, listDrafts, listReviews, getReview, approve, returnVersion, approveAllLow, analyze,
+  submitDraft, listDrafts, listReviews, getReview, approve, returnVersion, approveAllLow, analyze, recentChange,
   searchEmployees, createDeduction, listDeductions, approveDeduction, rejectDeduction, mapReasonTitle,
 };

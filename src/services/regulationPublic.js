@@ -58,7 +58,9 @@ async function getRegulation(id) {
   if (!reg || reg.status !== 'active') throw new Error('找不到這份規範');
   const v = must(await supabase.from('regulation_versions').select('doc, published_at, change_note').eq('regulation_id', id).eq('version', reg.current_version).maybeSingle(), '讀取內容失敗');
   const doc = v?.doc || { sections: [] };
-  return { regulation: reg, doc: { ...doc, parse_flags: undefined }, published_at: v?.published_at, change_note: v?.change_note };
+  let recent_change = null;
+  try { recent_change = await require('./regulationService').recentChange(reg.id); } catch (e) { console.warn('[RegPublic] recentChange', e.message); }
+  return { regulation: reg, doc: { ...doc, parse_flags: undefined }, published_at: v?.published_at, change_note: v?.change_note, recent_change };
 }
 
 /** 最近更新：本系統審核通過的版本（不含從 MAP 匯入的），附修改對照與開始扣分日 */
