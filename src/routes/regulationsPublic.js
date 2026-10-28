@@ -34,4 +34,56 @@ router.post('/ask', askLimit, who, async (req, res) => {
 });
 router.post('/feedback', who, async (req, res) => { try { ok(res, await svc.feedback(req.emp, req.body?.id, req.body?.helpful)); } catch (e) { fail(res, e); } });
 
+// ── 提出新增／修改規範（左手稱號符合才可以；送審後指定審核人通過才上線）2026-10-28 ──
+const multer = require('multer');
+const sharp  = require('sharp');
+const P   = require('../services/regulationPropose');
+const reg = require('../services/regulationService');
+const AI  = require('../services/regulationAi');
+const storage = require('../services/storageService');
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
+const editLimit = rateLimit({ windowMs: 10 * 60 * 1000, max: 120, standardHeaders: true, legacyHeaders: false,
+  message: { success: false, message: '操作太頻繁，請過幾分鐘再試' } });
+const pfail = (res, e) => fail(res, e, e.status || 400);
+const can = async (req, res, next) => { try { req.can = await P.mustCan(req.emp); next(); } catch (e) { pfail(res, e); } };
+const own = async (req, res, next) => { try { req.ver = await P.ownVersion(req.emp, req.params.vid); next(); } catch (e) { pfail(res, e); } };
+const U = (req) => P.userOf(req.emp);
+
+router.get('/propose/me', who, async (req, res) => {
+  try {
+    const c = await P.check(req.emp);
+    let meta = null;
+    if (c.can) meta = { roles: reg.MAP_ROLES, categories: (await svc.categories()).map(r => r.category).filter((x, i, a) => x && a.indexOf(x) === i), ai: AI.enabled() };
+    ok(res, { can: c.can, reason: c.reason, matched: c.matched || [], meta, mine: await P.mine(req.emp) });
+  } catch (e) { pfail(res, e); }
+});
+router.post('/propose/new', editLimit, who, can, async (req, res) => { try { ok(res, await P.createNew(req.emp, req.body || {})); } catch (e) { pfail(res, e); } });
+router.post('/propose/:id/draft', editLimit, who, can, async (req, res) => { try { ok(res, await P.startEdit(req.emp, req.params.id)); } catch (e) { pfail(res, e); } });
+router.get('/propose/versions/:vid', who, own, (req, res) => ok(res, req.ver));
+router.put('/propose/versions/:vid', editLimit, who, can, own, async (req, res) => { try { ok(res, await reg.saveDraft(req.params.vid, req.body || {}, U(req))); } catch (e) { pfail(res, e); } });
+router.post('/propose/versions/:vid/preview', editLimit, who, can, own, async (req, res) => {
+  try {
+    const v = req.ver;
+    const { regulation } = await reg.getRegulation(v.regulation_id);
+    const cur = regulation.current_version > 0 ? (await reg.getRegulation(v.regulation_id)).doc : { sections: [] };
+    const a = await reg.analyze(v.regulation_id, cur, v.doc, { withAi: false });
+    ok(res, { risk: a.risk, risk_reasons: a.risk_reasons, checks: a.checks, summary: a.summary, changes: a.diff.changes.length + a.diff.meta.length });
+  } catch (e) { pfail(res, e); }
+});
+router.post('/propose/versions/:vid/submit', editLimit, who, can, own, async (req, res) => { try { ok(res, await reg.submitDraft(req.params.vid, U(req))); } catch (e) { pfail(res, e); } });
+router.post('/propose/versions/:vid/discard', editLimit, who, can, own, async (req, res) => { try { ok(res, await reg.discardDraft(req.params.vid)); } catch (e) { pfail(res, e); } });
+router.post('/propose/versions/:vid/assist', editLimit, who, can, own, async (req, res) => { try { ok(res, await AI.assist(req.params.vid, req.body || {}, U(req))); } catch (e) { pfail(res, e); } });
+router.post('/propose/versions/:vid/assist/choose', editLimit, who, can, own, async (req, res) => { try { ok(res, await AI.chooseOption(req.params.vid, Number(req.body?.log_index), req.body?.key)); } catch (e) { pfail(res, e); } });
+router.post('/propose/versions/:vid/ai-check', editLimit, who, can, own, async (req, res) => { try { ok(res, await AI.check(req.params.vid)); } catch (e) { pfail(res, e); } });
+router.post('/propose/versions/:vid/ai-check/:iid/resolve', editLimit, who, can, own, async (req, res) => { try { ok(res, await AI.resolveIssue(req.params.vid, req.params.iid, req.body || {}, U(req))); } catch (e) { pfail(res, e); } });
+// app_number 放 query（multipart 的 body 在 multer 之前讀不到）
+router.post('/propose/upload', editLimit, who, can, upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) throw new Error('沒有收到檔案');
+    if (!/^image\//.test(req.file.mimetype)) throw new Error('只能上傳圖片');
+    const buf = await sharp(req.file.buffer).rotate().resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 82 }).toBuffer();
+    ok(res, { url: await storage.uploadPhoto(buf, 'photo.jpg', 'regulations'), size_before: req.file.size, size_after: buf.length });
+  } catch (e) { pfail(res, e); }
+});
+
 module.exports = router;

@@ -28,7 +28,7 @@ async function verify(appNumber) {
     roles = hit.length ? [...new Set([...hit, '新進人員', '穩定新人'])] : STORE_ROLES;   // 新人／穩定新人從職稱看不出來，一律帶上
     if (/區長/.test(job)) roles = [...new Set([...roles, '區長'])];
   }
-  return { erpid: emp.erpid, name: emp.name, store_name: emp.store_name, jobtitle: emp.jobtitle, roles };
+  return { erpid: emp.erpid, name: emp.name, store_name: emp.store_name, jobtitle: emp.jobtitle, roles, app_number: emp.app_number };
 }
 
 /** 這個人適用的規範編號（規範沒設適用身分的，視為全部適用） */

@@ -62,6 +62,15 @@ router.put('/settings/reviewer', edit, async (req, res) => {
     ok(res, await svc.setReviewer(req.body?.erpid, req.user?.name));
   } catch (e) { fail(res, e); }
 });
+// App「查規範」誰可以提出新增／修改（左手權限／稱號）；改設定＝系統管理員或審核人
+const Propose = require('../services/regulationPropose');
+router.get('/settings/propose', view, async (req, res) => { try { ok(res, await Propose.getRule()); } catch (e) { fail(res, e, 500); } });
+router.put('/settings/propose', edit, async (req, res) => {
+  try {
+    if (req.user?.role !== 'super_admin' && !svc.isReviewer(req.user, await svc.getReviewer())) throw new Error('只有系統管理員或審核人可以改');
+    ok(res, await Propose.setRule(req.body || {}, req.user?.name));
+  } catch (e) { fail(res, e); }
+});
 router.post('/import', edit, async (req, res) => {
   try {
     if (req.user?.role !== 'super_admin' && !svc.isReviewer(req.user, await svc.getReviewer())) throw new Error('只有系統管理員或審核人可以匯入');

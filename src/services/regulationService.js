@@ -527,6 +527,7 @@ async function getReview(versionId) {
 
 async function lookupSubmitterAppNumber(v) {
   let erp = null;
+  if (/^app:/.test(String(v.created_by_id || ''))) return String(v.created_by_id).slice(4);   // App「查規範」提出的（regulationPropose）
   if (v.created_by_id) {
     const { data } = await supabase.from('system_users').select('erpid').eq('id', v.created_by_id).maybeSingle();
     erp = data?.erpid || null;
@@ -599,7 +600,7 @@ async function returnVersion(versionId, user, reason) {
     status: 'returned', review_note: String(reason).trim(), reviewed_by_name: user?.name || null, reviewed_at: nowIso(), updated_at: nowIso(),
   }).eq('id', versionId), '退回失敗');
   const app = await lookupSubmitterAppNumber(v);
-  if (app) linePush.pushToUser(app, `↩️ 規範被退回：${v.doc?.title}（第 ${v.version} 版）\n原因：${String(reason).trim()}\n${FRONTEND}/regulations?reg=${v.regulation_id}`).catch(() => {});
+  if (app) linePush.pushToUser(app, `↩️ 規範被退回：${v.doc?.title}（第 ${v.version} 版）\n原因：${String(reason).trim()}\n${/^app:/.test(String(v.created_by_id || '')) ? `${FRONTEND}/rules?tab=propose&app_number=${encodeURIComponent(app)}` : `${FRONTEND}/regulations?reg=${v.regulation_id}`}`).catch(() => {});
   return { ok: true };
 }
 
