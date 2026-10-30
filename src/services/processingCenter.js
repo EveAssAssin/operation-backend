@@ -24,7 +24,8 @@ const tpe = (ts) => new Date(ts * 1000 + 8 * 3600e3).toISOString().slice(0, 16).
 const tpeDate = (ts) => new Date(ts * 1000 + 8 * 3600e3).toISOString().slice(0, 10);
 const addDays = (d, k) => new Date(Date.parse(d + 'T00:00:00Z') + k * 86400e3).toISOString().slice(0, 10);
 
-const CYCLE_DEF = { start: '2026-08-21', end_day: 20, lookback_days: 90, include_no_lens: false, credit_months: 6 };
+// exclude_stores：不列入加工中心開帳的門市（ERP 門市編號；營運 10-30：SUBANG SS15＝120069）
+const CYCLE_DEF = { start: '2026-08-21', end_day: 20, lookback_days: 90, include_no_lens: false, credit_months: 6, exclude_stores: ['120069'] };
 let cfgCache = null;
 async function cycleCfg() {
   if (cfgCache && Date.now() - cfgCache.at < 60000) return cfgCache.v;
@@ -152,7 +153,8 @@ async function compute(ym, { fresh } = {}) {
     supabase.from('proc_order_extra').select('*').eq('ym', ym).is('voided_at', null).order('created_at'),
   ]);
   const products = feed.products || {};
-  const orders = (feed.orders || []).filter((o) => cfg.include_no_lens || !o.no_lens);
+  const excluded = new Set((cfg.exclude_stores || []).map(String));
+  const orders = (feed.orders || []).filter((o) => (cfg.include_no_lens || !o.no_lens) && !excluded.has(String(o.store_id)));
   const nums = orders.map((o) => o.order_number);
   const billed = new Map();
   for (let i = 0; i < nums.length; i += 500) {
@@ -211,12 +213,14 @@ async function compute(ym, { fresh } = {}) {
   }
   // 沖回：之前開帳過、現在取消了且加工沒做完
   for (const c of credits || []) {
+    if (excluded.has(String(c.store_erpid))) continue;
     const s = S(String(c.store_erpid));
     const amt = -Math.abs(Number(c.amount));
     s.credits.push({ order_number: c.order_number, billed_ym: c.ym, order_date: c.order_date, amount: amt });
     s.credit_amount = r2(s.credit_amount + amt);
   }
   for (const e of extrasQ.data || []) {
+    if (excluded.has(String(e.store_erpid))) continue;
     const s = S(String(e.store_erpid));
     s.extras.push(e); s.extra_amount = r2(s.extra_amount + Number(e.amount));
   }
@@ -228,7 +232,7 @@ async function compute(ym, { fresh } = {}) {
   for (const [id, m] of Object.entries(opened)) if (!stores[id]) { S(id); stores[id].diff = r2(-Number(m.amount)); }
   const itemList = [...items.values()].map((it) => ({ ...it, stores: [...it.stores].sort(), store_count: it.stores.size }))
     .sort((a, b) => b.orders - a.orders || (a.name > b.name ? 1 : -1));
-  return { ym, cycle: { ...cr, first_ym: firstYm, include_no_lens: !!cfg.include_no_lens }, stores, items: itemList,
+  return { ym, cycle: { ...cr, first_ym: firstYm, include_no_lens: !!cfg.include_no_lens, exclude_stores: [...excluded] }, stores, items: itemList,
     feed: { count: orders.length, ms: feed.ms, filter_tags: feed.filter_tags || [] }, priced_items: prices.rows.length };
 }
 
@@ -262,6 +266,8 @@ async function open(ym, store, actor) {
   store = String(store);
   const { data: ex } = await supabase.from('proc_month_store').select('id').eq('ym', ym).eq('store_erpid', store).is('voided_at', null).maybeSingle();
   if (ex) throw Object.assign(new Error('這家店這一期已經開帳了，要改請先「重新開帳」'), { status: 409 });
+  const cfg0 = await cycleCfg();
+  if ((cfg0.exclude_stores || []).map(String).includes(store)) throw Object.assign(new Error('這家門市不列入加工中心開帳'), { status: 400 });
   const s = await storeDetail(ym, store, { fresh: true });
   const counted = s.orders.filter((o) => o.state === 'count' || o.state === 'late');
   const credits = s.credits || [];
