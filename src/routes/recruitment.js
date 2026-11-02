@@ -249,14 +249,17 @@ router.get('/applicants/check-rejection-history', async (req, res) => {
 // POST /api/recruitment/applicants
 router.post('/applicants', async (req, res) => {
   try {
-    const { date, platform, name, code, phone, target_store_erpid, target_store_name, target_store_note, need_id } = req.body;
+    const { date, platform, source, name, code, phone, target_store_erpid, target_store_name, target_store_note, need_id } = req.body;
     if (!platform || !name) return bad(res, 'platform 與 name 為必填');
+    const VALID_SOURCES = ['主動投遞', '關注者媒合', '條件媒合'];
+    const srcVal = source && VALID_SOURCES.includes(source) ? source : '主動投遞';
 
     const { data, error } = await supabase
       .from('recruitment_applicants')
       .insert({
         date: date || new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Taipei' }),
         platform, name,
+        source:             srcVal,
         code:               code               || null,
         phone:              phone              || null,
         target_store_erpid: target_store_erpid || null,
@@ -331,7 +334,7 @@ router.put('/applicants/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const {
-      name, code, phone, platform, target_store_erpid, target_store_name, target_store_note,
+      name, code, phone, platform, source, target_store_erpid, target_store_name, target_store_note,
       interview_date, interview_time, status, reject_reason,
       // Batch 2 新增：標記 / 待追蹤
       tag_stars, tag_notes, candidate_status, expected_reply_date, follow_up_date, follow_up_notes,
@@ -356,6 +359,7 @@ router.put('/applicants/:id', async (req, res) => {
       code:               code               || null,
       phone:              phone              || null,
       platform,
+      source:             (source && ['主動投遞','關注者媒合','條件媒合'].includes(source)) ? source : '主動投遞',
       target_store_erpid: target_store_erpid || null,
       target_store_name:  target_store_name  || null,
       target_store_note:  target_store_note  || null,
