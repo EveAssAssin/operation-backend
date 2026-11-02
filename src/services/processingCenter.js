@@ -287,6 +287,8 @@ async function open(ym, store, actor) {
         product_spec: `追加：${e.reason}`, quantity: 1, unit_price: Math.abs(Number(e.amount)), total: Number(e.amount), store_erpid: store, store_name: s.store_name })))
       .map((it, i) => ({ ...it, seq_no: i + 1 }));
     const now = new Date().toISOString();
+    // 重新開帳作廢的舊帳單還佔著 source_ref（bills 有 unique 索引，作廢的也算）→ 先改名讓出來
+    await releaseRef(`PROC-${ym}-${store}`);
     const { data: bill, error } = await supabase.from('bills').insert({
       source_id: await sourceId(), period: ym, title: `加工中心開帳 ${ym}（${s.cycle.label}）｜${s.store_name}`,
       description: `加工中心開帳系統（依下單日期 ${s.cycle.label}）：${counted.length} 張單（${s.order_amount}）${credits.length ? `＋沖回 ${credits.length} 張（${s.credit_amount}）` : ''}＋追加 ${s.extras.length} 筆（${s.extra_amount}）`,
@@ -330,12 +332,21 @@ async function reopen(ym, store, actor, reason) {
   }
   const { data: cr } = await supabase.from('proc_billed_orders').select('order_number, credit_ym').eq('month_store_id', ms.id).not('credit_ym', 'is', null).limit(3);
   if (cr && cr.length) throw Object.assign(new Error(`這一期有單已經在 ${cr[0].credit_ym} 期沖回（${cr.map((x) => x.order_number).join('、')}），要先重新開帳 ${cr[0].credit_ym} 期`), { status: 409 });
-  if (ms.bill_id) await supabase.from('bills').update({ status: 'void', notes: `加工中心重新開帳作廢：${actor}｜${reason}` }).eq('id', ms.bill_id);
+  if (ms.bill_id) {
+    await supabase.from('bills').update({ status: 'void', notes: `加工中心重新開帳作廢：${actor}｜${reason}` }).eq('id', ms.bill_id);
+    await releaseRef(`PROC-${ym}-${store}`);
+  }
   await supabase.from('proc_billed_orders').update({ credit_ym: null, credit_month_store_id: null }).eq('credit_month_store_id', ms.id);
   await supabase.from('proc_billed_orders').delete().eq('month_store_id', ms.id);
   await supabase.from('proc_month_store').update({ voided_at: new Date().toISOString(), voided_by: actor, void_reason: String(reason).trim() }).eq('id', ms.id);
   clearCache();
   return { ok: true };
+}
+
+// 作廢的加工中心帳單把 source_ref 改成 <原 ref>-void-<時間>，下次開帳才不會撞 unique 索引（2026-11-02 文化店重開帳送不出去）
+async function releaseRef(ref) {
+  const { data } = await supabase.from('bills').select('id').eq('source_ref', ref).eq('status', 'void');
+  for (const b of data || []) await supabase.from('bills').update({ source_ref: `${ref}-void-${Date.now()}-${String(b.id).slice(0, 6)}` }).eq('id', b.id);
 }
 
 function clearCache() { cache.clear(); cfgCache = null; }
