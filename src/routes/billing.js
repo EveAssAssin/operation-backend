@@ -358,9 +358,14 @@ router.post('/ad-sync-v2', async (req, res) => {
     log(`departments map: ${Object.keys(storeNameMap).length} entries`);
 
     // Step 3: 展開 rows（新資料結構：stores[].campaigns[]）
+    let campaignsCount = 0;
     const rows = [];
     for (const store of stores) {
-      const erpid = storeNameMap[store.store_name] || `ad-store-${store.store_id}`;
+      // 愛民系列沿用原門市 erpid：先直查，查不到再剝掉「愛民」前綴
+      const rawName  = store.store_name || '';
+      const baseName = rawName.startsWith('愛民') ? rawName.slice(2) : rawName;
+      const erpid    = storeNameMap[rawName] || storeNameMap[baseName] || `ad-store-${store.store_id}`;
+      campaignsCount += (store.campaigns || []).length;
       for (const camp of (store.campaigns || [])) {
         const isActual = camp.actual_spend_share != null;
         const amount = Number(isActual ? camp.actual_spend_share : camp.budget_share) || 0;
@@ -421,6 +426,7 @@ router.post('/ad-sync-v2', async (req, res) => {
     result.summary = {
       msg: '同步完成',
       stores: stores.length,
+      campaigns: campaignsCount,
       expanded_rows: rows.length,
       fallback_count: fallbackCount,
       rows_in_db: rowsInDb,
