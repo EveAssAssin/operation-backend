@@ -365,8 +365,38 @@ router.post('/ad-sync-v2', async (req, res) => {
       const rawName  = store.store_name || '';
       const baseName = rawName.startsWith('愛民') ? rawName.slice(2) : rawName;
       const erpid    = storeNameMap[rawName] || storeNameMap[baseName] || `ad-store-${store.store_id}`;
-      campaignsCount += (store.campaigns || []).length;
-      for (const camp of (store.campaigns || [])) {
+      const camps = store.campaigns || [];
+      campaignsCount += camps.length;
+
+      // 沒 campaigns 但有 actual_spend / budget → 補一筆 store-level（愛民系列屬此情形）
+      if (camps.length === 0) {
+        const actual = Number(store.actual_spend) || 0;
+        const budget = Number(store.budget) || 0;
+        const amount = actual > 0 ? actual : budget;
+        if (amount > 0) {
+          // store_id 可能為 null（愛民）→ 用 rawName 當 key 保唯一
+          const safeKey = store.store_id ?? `name-${rawName}`;
+          rows.push({
+            order_id:         `ad-store-${safeKey}-${month}`,
+            source_type:      'ad_budget',
+            store_erpid:      erpid,
+            amount,
+            signed_at:        `${month}-28T23:59:59+08:00`,
+            billing_month:    month,
+            billing_category: '企劃部',
+            items: [{
+              item_name:   `${rawName} 廣告費`,
+              description: `Meta: ${Number(store.meta_spend)||0} / Google: ${Number(store.google_spend)||0} / GPT: ${Number(store.gpt_spend)||0} / Additional: ${Number(store.additional_spend)||0}`,
+              amount,
+              status:      'completed',
+            }],
+            remark: `${rawName} 月度廣告費（無 campaign 明細）${actual > 0 ? '' : '【預算分攤】'}`,
+            updated_at: new Date().toISOString(),
+          });
+        }
+      }
+
+      for (const camp of camps) {
         const isActual = camp.actual_spend_share != null;
         const amount = Number(isActual ? camp.actual_spend_share : camp.budget_share) || 0;
         rows.push({
