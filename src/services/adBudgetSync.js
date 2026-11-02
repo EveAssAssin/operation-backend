@@ -4,13 +4,16 @@
 //
 // API 結構（新版：以「門市」為主）：
 //   {
-//     month, total_budget, total_actual_spend, total_meta_spend, total_google_spend, total_additional_spend, total_diff,
+//     month, month_label, settled, settled_at,
+//     total_budget, total_actual_spend,
+//     total_meta_spend, total_google_spend, total_gpt_spend, total_additional_spend, total_diff,
 //     stores: [
 //       {
-//         store_id, store_name,
+//         store_id, store_name, is_aimin,
 //         budget, actual_spend,
-//         meta_spend, google_spend, additional_spend,
+//         meta_spend, google_spend, gpt_spend, additional_spend,
 //         diff,
+//         total_reach, total_response, total_link_clicks,
 //         campaigns: [
 //           { id, name, platform, budget_share, actual_spend_share, start_date, end_date }
 //         ]
@@ -74,9 +77,13 @@ async function syncAdBudget(_ignoredMonth) {
   // 3. 展成 billing_orders
   const rows = [];
   for (const s of stores) {
-    const store_erpid = storeNameMap[s.store_name] || `ad-store-${s.store_id}`;
-    if (!storeNameMap[s.store_name]) {
-      unmapped.push({ store_id: s.store_id, store_name: s.store_name });
+    // 愛民系列（愛民XX）沿用原本門市 id：剝掉「愛民」前綴後比對 departments
+    const rawName    = s.store_name || '';
+    const baseName   = rawName.startsWith('愛民') ? rawName.slice(2) : rawName;
+    const matchedErpid = storeNameMap[rawName] || storeNameMap[baseName] || null;
+    const store_erpid  = matchedErpid || `ad-store-${s.store_id}`;
+    if (!matchedErpid) {
+      unmapped.push({ store_id: s.store_id, store_name: rawName });
     }
 
     // 金額優先用 actual_spend；為 0 或 null 時 fallback 用 budget
@@ -87,6 +94,7 @@ async function syncAdBudget(_ignoredMonth) {
 
     const meta       = Number(s.meta_spend) || 0;
     const google     = Number(s.google_spend) || 0;
+    const gpt        = Number(s.gpt_spend) || 0;
     const additional = Number(s.additional_spend) || 0;
     const diff       = Number(s.diff) || 0;
 
@@ -127,9 +135,17 @@ async function syncAdBudget(_ignoredMonth) {
         budget, actual_spend: actual,
         meta_spend:      meta,
         google_spend:    google,
+        gpt_spend:       gpt,
         additional_spend: additional,
         diff,
         use_actual:      useActual,
+        is_aimin:        !!s.is_aimin,
+        month_label:     s.month_label || null,
+        total_reach:        s.total_reach ?? null,
+        total_response:     s.total_response ?? null,
+        total_link_clicks:  s.total_link_clicks ?? null,
+        settled:         resp.data?.settled ?? null,
+        settled_at:      resp.data?.settled_at ?? null,
         campaigns:       s.campaigns || [],
       },
       updated_at: new Date().toISOString(),
@@ -153,10 +169,13 @@ async function syncAdBudget(_ignoredMonth) {
     month,
     meta_total:       resp.data?.total_meta_spend,
     google_total:     resp.data?.total_google_spend,
+    gpt_total:        resp.data?.total_gpt_spend,
     additional_total: resp.data?.total_additional_spend,
     total_actual:     resp.data?.total_actual_spend,
     total_budget:     resp.data?.total_budget,
     total_diff:       resp.data?.total_diff,
+    settled:          resp.data?.settled ?? null,
+    settled_at:       resp.data?.settled_at ?? null,
     unmapped,
   };
 }
