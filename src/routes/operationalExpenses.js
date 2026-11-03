@@ -10,6 +10,7 @@ const { authenticate } = require('../middleware/auth');
 const svc      = require('../services/operationalExpenseService');
 const reportSvc  = require('../services/opexReportService');
 const anomalySvc = require('../services/opexAnomalyService');
+const scanSvc    = require('../services/billScanService');
 const XLSX       = require('xlsx');
 
 router.use(authenticate);
@@ -109,6 +110,34 @@ router.get('/facts/:fact_id/allocated-months', async (req, res) => {
 });
 
 // ══════════════════════════════════════════════════════════
+
+// ══════════════════════════════════════════════════════════
+// (4b) 掃碼入帳（靜態 path）
+// ══════════════════════════════════════════════════════════
+router.post('/scan/resolve', async (req, res) => {
+  try {
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    ok(res, await scanSvc.resolve(items));
+  } catch (e) { fail(res, e); }
+});
+
+router.post('/scan/commit', async (req, res) => {
+  try {
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    if (!items.length) return bad(res, '沒有帳單');
+    ok(res, await scanSvc.commit(items, req.user?.member_id || null));
+  } catch (e) { fail(res, e); }
+});
+
+router.get('/scan/bindings', async (req, res) => {
+  try { ok(res, await scanSvc.listBindings()); }
+  catch (e) { fail(res, e); }
+});
+
+router.delete('/scan/bindings/:id', async (req, res) => {
+  try { ok(res, await scanSvc.deleteBinding(req.params.id)); }
+  catch (e) { fail(res, e); }
+});
 
 // ══════════════════════════════════════════════════════════
 // (5) 動態 /:id 路由（放最後）
