@@ -94,11 +94,12 @@ async function attach(lines) {
     }
     return m;
   };
-  const [bm, mm, subs, am] = await Promise.all([pick('bills', billIds), pick('ledger_manual_entries', manIds), all(), pickAlloc(billIds)]);
+  const fixIds = [...new Set(lines.filter((l) => l.source === 'fixed').map((l) => String(l.ref_id)))];
+  const [bm, mm, subs, am, fm] = await Promise.all([pick('bills', billIds), pick('ledger_manual_entries', manIds), all(), pickAlloc(billIds), pick('store_fixed_items', fixIds)]);
   const byIdMap = Object.fromEntries(subs.map((s) => [s.id, s]));
   const defs = Object.fromEntries(subs.filter((s) => s.is_default).map((s) => [s.ledger_code, s]));
   for (const l of lines) {
-    const sid = l.source === 'bill' ? (am[`${l.ref_id}|${l.store_erpid || l.store}|${l.ledger_code || l.code}`] || bm[l.ref_id]) : String(l.source || '').startsWith('manual_') ? mm[l.ref_id] : null;
+    const sid = l.source === 'bill' ? (am[`${l.ref_id}|${l.store_erpid || l.store}|${l.ledger_code || l.code}`] || bm[l.ref_id]) : String(l.source || '').startsWith('manual_') ? mm[l.ref_id] : l.source === 'fixed' ? fm[l.ref_id] : null;
     const s = sid && byIdMap[sid];
     const d = defs[l.ledger_code || l.code];
     l.subject_id = s ? s.id : d ? d.id : null;

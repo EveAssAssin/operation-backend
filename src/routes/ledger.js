@@ -346,14 +346,49 @@ router.get('/fixed', async (req, res) => {
     res.json({ success: true, data });
   } catch (e) { fail(res, e); }
 });
+// 每月固定費用：行銷基金／折舊（盈餘分配前扣）或任何支出會計科目（2026-11：設定起訖後每月自動列入月報）
+const FIXED_SPECIAL = ['marketing_fund', 'depreciation'];
+async function fixedTarget(b) {
+  if (b.subject_id) {
+    const s = await LS.mustGet(b.subject_id);
+    if (!(await LS.needsSubject(s.ledger_code))) throw new Error('只能選支出的會計科目');
+    return { ledger_code: s.ledger_code, subject_id: s.id };
+  }
+  if (FIXED_SPECIAL.includes(b.ledger_code)) return { ledger_code: b.ledger_code, subject_id: null };
+  throw new Error('請選行銷基金／折舊，或選一個會計科目');
+}
 router.post('/fixed', canEdit, async (req, res) => {
   try {
     const b = req.body || {};
-    if (!b.store || !['marketing_fund', 'depreciation'].includes(b.ledger_code)) return bad(res, '缺門市或科目（行銷基金／折舊）');
+    if (!b.store) return bad(res, '缺門市');
+    let t; try { t = await fixedTarget(b); } catch (e) { return bad(res, e.message); }
     if (!YM.test(String(b.from_ym || '')) || (b.to_ym && !YM.test(String(b.to_ym)))) return bad(res, '起訖月份要是 YYYY-MM');
-    const amount = Number(b.amount); if (!Number.isFinite(amount)) return bad(res, '金額不對');
-    const { data, error } = await supabase.from('store_fixed_items').insert({ store_erpid: String(b.store), ledger_code: b.ledger_code, amount, from_ym: b.from_ym, to_ym: b.to_ym || null, note: b.note || null, created_by: who(req) }).select().single();
+    if (b.to_ym && b.to_ym < b.from_ym) return bad(res, '結束月份不能早於開始月份');
+    const amount = Number(b.amount); if (!Number.isFinite(amount) || amount === 0) return bad(res, '金額不對');
+    const { data, error } = await supabase.from('store_fixed_items').insert({ store_erpid: String(b.store), ...t, amount, from_ym: b.from_ym, to_ym: b.to_ym || null, note: b.note || null, created_by: who(req) }).select().single();
     if (error) throw error;
+    MR.clearBookCache && MR.clearBookCache();
+    res.json({ success: true, data });
+  } catch (e) { fail(res, e); }
+});
+router.patch('/fixed/:id', canEdit, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const { data: cur } = await supabase.from('store_fixed_items').select('*').eq('id', req.params.id).maybeSingle();
+    if (!cur) return bad(res, '找不到這筆', 404);
+    const up = {};
+    if (b.amount !== undefined) { const a = Number(b.amount); if (!Number.isFinite(a) || a === 0) return bad(res, '金額不對'); up.amount = a; }
+    if (b.from_ym !== undefined) { if (!YM.test(String(b.from_ym))) return bad(res, '開始月份要是 YYYY-MM'); up.from_ym = b.from_ym; }
+    if (b.to_ym !== undefined) { if (b.to_ym && !YM.test(String(b.to_ym))) return bad(res, '結束月份要是 YYYY-MM'); up.to_ym = b.to_ym || null; }
+    if (b.note !== undefined) up.note = b.note || null;
+    if (b.subject_id !== undefined || b.ledger_code !== undefined) {
+      try { Object.assign(up, await fixedTarget({ subject_id: b.subject_id, ledger_code: b.ledger_code })); } catch (e) { return bad(res, e.message); }
+    }
+    const from = up.from_ym || cur.from_ym, to = up.to_ym !== undefined ? up.to_ym : cur.to_ym;
+    if (to && to < from) return bad(res, '結束月份不能早於開始月份');
+    const { data, error } = await supabase.from('store_fixed_items').update(up).eq('id', cur.id).select().single();
+    if (error) throw error;
+    MR.clearBookCache && MR.clearBookCache();
     res.json({ success: true, data });
   } catch (e) { fail(res, e); }
 });
