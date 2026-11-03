@@ -28,7 +28,7 @@ function guessFacts(key, facts) {
   for (const f of facts) {
     for (const v of Object.values(f.data || {})) {
       const d = digitsOf(v);
-      if (d.length >= 7 && kd.includes(d)) { hits.push({ id: f.id, category_id: f.category_id }); break; }
+      if (d.length >= 7 && kd.includes(d)) { hits.push({ id: f.id, category_id: f.category_id, store_name: f.store_name, data: f.data }); break; }
     }
   }
   return hits;
@@ -88,7 +88,7 @@ async function resolve(items = []) {
     }
     if (!b) {
       if (!allFacts) {
-        const { data } = await supabase.from('entity_facts').select('id, category_id, data');
+        const { data } = await supabase.from('entity_facts').select('id, category_id, store_name, data');
         allFacts = data || [];
       }
       r.guesses = guessFacts(it.key, allFacts);
@@ -110,6 +110,15 @@ async function commit(items = [], actor) {
       const amount = Number(it.amount);
       if (!amount || amount <= 0) throw new Error('金額需大於 0');
       if (!it.fact_id) throw new Error('未選擇對應的帳號/電號');
+
+      // 分帳：沒給就整筆掛帳單年月；有給（雙月帳單分兩個月）要加總等於金額
+      let allocs = [{ year_month: it.bill_ym, amount }];
+      if (Array.isArray(it.allocations) && it.allocations.length) {
+        allocs = it.allocations.map(a => ({ year_month: String(a.year_month || ''), amount: Number(a.amount) || 0 }));
+        if (allocs.some(a => !YM_RE.test(a.year_month) || a.amount <= 0)) throw new Error('分帳月份或金額有誤');
+        const sum = allocs.reduce((s, a) => s + a.amount, 0);
+        if (Math.abs(sum - amount) > 0.5) throw new Error(`分帳合計 ${sum} 不等於金額 ${amount}`);
+      }
 
       const { data: fact, error: fErr } = await supabase
         .from('entity_facts').select('id, category_id, store_erpid, store_name').eq('id', it.fact_id).single();
@@ -146,12 +155,9 @@ async function commit(items = [], actor) {
         .select('id').single();
       if (eErr) throw new Error(eErr.message);
 
-      const { error: aErr } = await supabase.from('operational_expense_allocations').insert({
-        operational_expense_id: exp.id,
-        store_erpid: storeErpid,
-        year_month:  it.bill_ym,
-        amount,
-      });
+      const { error: aErr } = await supabase.from('operational_expense_allocations').insert(
+        allocs.map(a => ({ operational_expense_id: exp.id, store_erpid: storeErpid, year_month: a.year_month, amount: a.amount }))
+      );
       if (aErr) {
         await supabase.from('operational_expenses').delete().eq('id', exp.id);
         throw new Error('分帳寫入失敗：' + aErr.message);
