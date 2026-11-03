@@ -36,7 +36,7 @@ router.use(authorize('operation_accounting', 'operation_lead', 'super_admin', 'd
 router.get('/', async (req, res) => {
   try {
     const [{ data: src, error }, { data: acc }, { data: banks }] = await Promise.all([
-      supabase.from('billing_sources').select('id, name, code, tax_id, contact_name, contact_phone, contact_email, notes, is_active, created_at, allowed_subject_ids').eq('source_type', 'vendor').order('is_active', { ascending: false }).order('name'),
+      supabase.from('billing_sources').select('id, name, code, tax_id, contact_name, contact_phone, contact_email, notes, is_active, created_at, allowed_subject_ids, sort_order').eq('source_type', 'vendor').order('is_active', { ascending: false }).order('sort_order', { ascending: true, nullsFirst: false }).order('name'),
       supabase.from('vendor_accounts').select('id, source_id, username, is_active, last_login_at'),
       supabase.from('vendor_bank_accounts').select('*').order('is_default', { ascending: false }).order('created_at'),
     ]);
@@ -47,6 +47,20 @@ router.get('/', async (req, res) => {
       banks: (banks || []).filter((b) => b.source_id === s.id),
     })));
   } catch (e) { res.status(500).json({ success: false, message: e.message }); }
+});
+
+// ── 排序：PUT /order { ids: [依序的廠商 id] } → sort_order = 1,2,3… ──
+router.put('/order', authorize('operation_accounting', 'operation_lead', 'super_admin', 'dept_head'), async (req, res) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String) : [];
+    if (!ids.length) throw new Error('沒有排序資料');
+    if (ids.length > 2000) throw new Error('太多筆');
+    for (let i = 0; i < ids.length; i++) {
+      const { error } = await supabase.from('billing_sources').update({ sort_order: i + 1 }).eq('id', ids[i]).eq('source_type', 'vendor');
+      if (error) throw error;
+    }
+    ok(res, { count: ids.length });
+  } catch (e) { bad(res, e); }
 });
 
 // ── 新建（一次建好：廠商＋帳號＋出款資訊）──
