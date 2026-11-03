@@ -127,7 +127,7 @@ async function commit(items = [], actor) {
         : prevMonthRange(it.bill_ym);
 
       const noteParts = ['掃碼入帳'];
-      if (it.due_date) noteParts.push(`繳費期限 ${it.due_date}`);
+      if (it.due_date) noteParts.push(`代收期限 ${it.due_date}`);
       if (it.notes) noteParts.push(String(it.notes).trim());
 
       const { data: exp, error: eErr } = await supabase
