@@ -57,20 +57,24 @@ async function resolve(items = []) {
     for (const s of data || []) scanMap[`${s.barcode_key}|${s.bill_ym}`] = s;
   }
 
-  // 重複：該 fact 該月已有分帳（手動輸入的也會擋）
-  const factIds = [...new Set(Object.values(bindMap).map(b => b.fact_id).filter(Boolean))];
-  const allocMap = {};
+  // 每個帳號已入帳到哪個月（掛帳接下一個月）＋疑似重複（同金額已入帳過）
+  //   會計習慣：這張帳單接在這個帳號「最後入帳月份」的下一個月，不看條碼上的年月
+  const addYm = (ym, k) => { const [y, m] = ym.split('-').map(Number); return new Date(Date.UTC(y, m - 1 + k, 1)).toISOString().slice(0, 7); };
+  const factIds = [...new Set([
+    ...Object.values(bindMap).map(b => b.fact_id),
+    ...items.map(i => i.fact_id),
+  ].filter(Boolean).map(String))];
+  const histMap = {};   // fact_id → [{ expense_id, total, months[] }]
   if (factIds.length) {
     const { data, error } = await supabase
       .from('operational_expenses')
-      .select('id, fact_id, total_amount, allocations:operational_expense_allocations(year_month, amount)')
+      .select('id, fact_id, total_amount, allocations:operational_expense_allocations(year_month)')
       .in('fact_id', factIds);
     if (error) throw new Error(error.message);
     for (const e of data || []) {
-      for (const a of e.allocations || []) {
-        const k = `${e.fact_id}|${a.year_month}`;
-        (allocMap[k] = allocMap[k] || []).push({ expense_id: e.id, amount: Number(a.amount) });
-      }
+      (histMap[String(e.fact_id)] = histMap[String(e.fact_id)] || []).push({
+        expense_id: e.id, total: Number(e.total_amount), months: (e.allocations || []).map(a => a.year_month).filter(Boolean).sort(),
+      });
     }
   }
 
@@ -79,12 +83,21 @@ async function resolve(items = []) {
   const out = [];
   for (const it of items) {
     const b = bindMap[it.key] || null;
-    const r = { key: it.key, bill_ym: it.bill_ym, binding: b, duplicate: null, guesses: [] };
+    const r = { key: it.key, bill_ym: it.bill_ym, binding: b, duplicate: null, guesses: [], last_ym: null, next_ym: null };
     const sc = scanMap[`${it.key}|${it.bill_ym}`];
     if (sc) r.duplicate = { type: 'scanned', amount: Number(sc.amount), expense_id: sc.expense_id, at: sc.created_at };
-    else if (b?.fact_id && allocMap[`${b.fact_id}|${it.bill_ym}`]) {
-      const a = allocMap[`${b.fact_id}|${it.bill_ym}`];
-      r.duplicate = { type: 'allocated', amount: a.reduce((s, x) => s + x.amount, 0), expense_id: a[0].expense_id };
+    const factId = it.fact_id ? String(it.fact_id) : (b?.fact_id ? String(b.fact_id) : null);
+    if (factId) {
+      const hist = histMap[factId] || [];
+      const months = hist.flatMap(h => h.months).sort();
+      if (months.length) { r.last_ym = months[months.length - 1]; r.next_ym = addYm(r.last_ym, 1); }
+      // 疑似重複：最近 6 個月內有同金額的費用（例：之前手動輸入過這張）
+      const amt = Number(it.amount);
+      if (!r.duplicate && amt > 0 && r.last_ym) {
+        const since = addYm(r.last_ym, -5);
+        const same = hist.find(h => Math.abs(h.total - amt) < 0.5 && h.months.some(m => m >= since));
+        if (same) r.duplicate = { type: 'similar', amount: same.total, expense_id: same.expense_id, months: same.months };
+      }
     }
     if (!b) {
       if (!allFacts) {
