@@ -75,6 +75,7 @@ app.use('/api/billing', authenticate, require('./routes/billing'));
 
 // AI Hub 跨系統訊息中樞（API Key 驗證，供所有 Cowork AI 使用）
 app.use('/api/hub', require('./routes/hub'));
+app.use('/api/external', require('./routes/payrollExternal'));   // lohas-payroll 問角色（x-payroll-key，2026-11-03）
 
 // 開帳系統 v2（需登入）
 app.use('/api/billing-v2', authenticate, require('./routes/billingV2'));
