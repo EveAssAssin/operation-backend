@@ -44,7 +44,14 @@ async function closed(store, ym) {
 }
 
 router.get('/accounts', async (req, res) => {
-  try { res.json({ success: true, data: await MR.accounts() }); } catch (e) { fail(res, e); }
+  try {
+    if (req.query.all === '1') {   // 含停用（會計科目頁管理格子用）
+      const { data, error } = await supabase.from('ledger_accounts').select('*').order('sort_order');
+      if (error) throw error;
+      return res.json({ success: true, data: data || [] });
+    }
+    res.json({ success: true, data: await MR.accounts() });
+  } catch (e) { fail(res, e); }
 });
 
 async function rpc(fn, req, res) {
@@ -574,6 +581,52 @@ router.post('/accounts', canEdit, async (req, res) => {
     res.json({ success: true, data });
   } catch (e) { fail(res, e); }
 });
+// 月報格子被哪些資料用到（停用／刪除前檢查）
+async function accountUsage(code) {
+  const cnt = async (table, col, extra) => {
+    let q = supabase.from(table).select('*', { count: 'exact', head: true }).eq(col, code);
+    if (extra) q = extra(q);
+    const { count } = await q; return count || 0;
+  };
+  const subIds = ((await supabase.from('ledger_subjects').select('id').eq('ledger_code', code)).data || []).map((x) => x.id);
+  const sc = async (table) => {
+    if (!subIds.length) return 0;
+    const { count } = await supabase.from(table).select('*', { count: 'exact', head: true }).in('subject_id', subIds); return count || 0;
+  };
+  const parts = {
+    帳單分攤: await cnt('bill_allocations', 'ledger_code'), 帳單: await cnt('bills', 'ledger_code'),
+    手填調帳: await cnt('ledger_manual_entries', 'ledger_code', (q) => q.is('void_at', null)),
+    固定費用: await cnt('store_fixed_items', 'ledger_code'), 固定支出: await cnt('recurring_expenses', 'ledger_code'),
+    來源單位: await cnt('billing_sources', 'ledger_code'), 廠商科目: await cnt('accounting_categories', 'ledger_code'),
+    營運費用分類: await cnt('entity_fact_categories', 'ledger_code'), 舊月報: await cnt('ledger_history', 'ledger_code'),
+    廠商請款: await cnt('vendor_payment_requests', 'ledger_code') + await sc('vendor_payment_allocations'),
+  };
+  if (subIds.length) {
+    const { data: vs } = await supabase.from('billing_sources').select('id').overlaps('allowed_subject_ids', subIds);
+    parts['廠商指定科目'] = (vs || []).length;
+  }
+  const list = Object.entries(parts).filter(([, n]) => n);
+  return { total: list.reduce((a, [, n]) => a + n, 0), text: list.map(([k, n]) => `${k} ${n} 筆`).join('、'), parts, subIds };
+}
+// 刪除月報格子：只有自己新增的（x_ 開頭）、而且完全沒被用過的才能刪（例：建錯的）
+router.delete('/accounts/:code', canEdit, async (req, res) => {
+  try {
+    const code = String(req.params.code);
+    const { data: a } = await supabase.from('ledger_accounts').select('code, name').eq('code', code).maybeSingle();
+    if (!a) return bad(res, '找不到這個月報格子', 404);
+    if (!code.startsWith('x_')) return bad(res, '系統內建的月報格子不能刪除，可以改名或停用');
+    const u = await accountUsage(code);
+    if (u.total) return bad(res, `「${a.name}」已經有資料在用（${u.text}），不能刪除`);
+    if (u.subIds.length) { const { error: e1 } = await supabase.from('ledger_subjects').delete().in('id', u.subIds); if (e1) throw e1; }
+    const { error } = await supabase.from('ledger_accounts').delete().eq('code', code);
+    if (error) throw error;
+    LS.clear();
+    res.json({ success: true, data: { deleted: code, name: a.name } });
+  } catch (e) { fail(res, e); }
+});
+router.get('/accounts/:code/usage', async (req, res) => {
+  try { const u = await accountUsage(String(req.params.code)); res.json({ success: true, data: { total: u.total, text: u.text } }); } catch (e) { fail(res, e); }
+});
 router.patch('/accounts/:code', canEdit, async (req, res) => {
   try {
     const b = req.body || {}, up = {};
@@ -583,8 +636,8 @@ router.patch('/accounts/:code', canEdit, async (req, res) => {
     if (b.sort_order !== undefined) up.sort_order = Number(b.sort_order) || 0;
     if (b.group_code !== undefined) { if (!GROUPS.includes(b.group_code)) return bad(res, '區不對'); up.group_code = b.group_code; }
     if (up.is_active === false) {
-      const { count } = await supabase.from('bill_allocations').select('id', { count: 'exact', head: true }).eq('ledger_code', req.params.code);
-      if (count) return bad(res, `還有 ${count} 筆帳指定這個科目，先改掉再停用`);
+      const u = await accountUsage(req.params.code);
+      if (u.total) return bad(res, `這個月報格子還有帳在用（${u.text}），停用後月報會看不到這些帳；請先把這些帳改到別的格子`);
     }
     const { error } = await supabase.from('ledger_accounts').update(up).eq('code', req.params.code);
     if (error) throw error; res.json({ success: true });
@@ -888,6 +941,26 @@ router.post('/subjects', canEdit, async (req, res) => {
 });
 router.patch('/subjects/:id', canEdit, async (req, res) => {
   try { res.json({ success: true, data: await LS.patch(req.params.id, req.body || {}) }); } catch (e) { bad(res, e.message); }
+});
+// 刪除會計科目：只有沒被任何帳用過的才能刪（例：打錯字剛建的）；預設科目不能刪
+router.delete('/subjects/:id', canEdit, async (req, res) => {
+  try {
+    const sj = await LS.byId(String(req.params.id));
+    if (!sj) return bad(res, '找不到這個科目', 404);
+    if (sj.is_default) return bad(res, '預設科目不能刪除');
+    const id = sj.id;
+    const cnt = async (t) => { const { count } = await supabase.from(t).select('*', { count: 'exact', head: true }).eq('subject_id', id); return count || 0; };
+    const parts = { 帳單: await cnt('bills'), 帳單分攤: await cnt('bill_allocations'), 手填調帳分攤零用金: await cnt('ledger_manual_entries'),
+      固定費用: await cnt('store_fixed_items'), 廠商請款: (await cnt('vendor_payment_requests')) + (await cnt('vendor_payment_allocations')) };
+    const { data: vs } = await supabase.from('billing_sources').select('id').contains('allowed_subject_ids', [id]);
+    parts['廠商指定科目'] = (vs || []).length;
+    const used = Object.entries(parts).filter(([, n]) => n);
+    if (used.length) return bad(res, `「${sj.name}」已經有資料在用（${used.map(([k, n]) => `${k} ${n} 筆`).join('、')}），不能刪除，請改用停用`);
+    const { error } = await supabase.from('ledger_subjects').delete().eq('id', id);
+    if (error) throw error;
+    LS.clear();
+    res.json({ success: true, data: { deleted: id } });
+  } catch (e) { fail(res, e); }
 });
 router.patch('/manual/:id/subject', canEdit, async (req, res) => {
   try {
