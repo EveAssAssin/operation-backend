@@ -16,14 +16,14 @@ const { authenticate, authorize } = require('../middleware/auth');
 router.use(authenticate);
 
 // 營運部系統的有效角色
-const VALID_ROLES = ['super_admin', 'operation_lead', 'operation_staff', 'operation_accounting', 'operation_hr'];
+const VALID_ROLES = ['super_admin', 'operation_lead', 'operation_staff', 'operation_accounting', 'operation_hr', 'pr_staff'];
 
 // 各角色可以授予的角色範圍
 //   super_admin：可授予全部
 //   operation_lead：可授予基層三種（staff / accounting / hr）
 function getAllowedRoles(requesterRole) {
   if (requesterRole === 'super_admin') return VALID_ROLES;
-  if (requesterRole === 'operation_lead') return ['operation_staff', 'operation_accounting', 'operation_hr'];
+  if (requesterRole === 'operation_lead') return ['operation_staff', 'operation_accounting', 'operation_hr', 'pr_staff'];
   return [];
 }
 

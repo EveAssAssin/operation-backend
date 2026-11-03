@@ -21,6 +21,18 @@ const ok = (res, data) => res.json({ success: true, data });
 const bad = (res, e) => res.status(400).json({ success: false, message: (e && e.message) || String(e) });
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024, files: 10 } });
 
+// 開帳可選的門市／部門（不用人員管理權限）
+router.get('/stores', view, async (req, res) => { try { ok(res, await require('../services/vendorPaymentService').listTargets()); } catch (e) { bad(res, e); } });
+// 開帳可選的會計科目（支出科目；不用月報權限）
+router.get('/subjects', view, async (req, res) => {
+  try {
+    const supabase = require('../config/supabase');
+    const { data: accs } = await supabase.from('ledger_accounts').select('code').eq('kind', 'expense');
+    const exp = new Set((accs || []).map((a) => a.code));
+    const all = await require('../services/ledgerSubjects').all();
+    ok(res, all.filter((s) => s.is_active && exp.has(s.ledger_code)).map((s) => ({ id: s.id, name: s.name, ledger_code: s.ledger_code, ledger_name: s.ledger_name })));
+  } catch (e) { bad(res, e); }
+});
 router.get('/funds', view, async (req, res) => { try { ok(res, await svc.listFunds({ all: req.query.all === '1' })); } catch (e) { bad(res, e); } });
 router.post('/funds', edit, async (req, res) => { try { ok(res, await svc.saveFund(null, req.body || {}, who(req))); } catch (e) { bad(res, e); } });
 router.patch('/funds/:id', edit, async (req, res) => { try { ok(res, await svc.saveFund(req.params.id, req.body || {}, who(req))); } catch (e) { bad(res, e); } });

@@ -2,6 +2,7 @@
 // 營運部系統角色與權限定義
 
 const ROLES = {
+  pr_staff:             0,   // 公關部：只開零用金（靠 module 權限）
   operation_staff:      1,   // 營運部員工（未分類）
   operation_accounting: 1,   // 營運部會計（與 staff 同層級，靠 module 權限區分）
   operation_hr:         1,   // 營運部人事（與 staff 同層級，靠 module 權限區分）
