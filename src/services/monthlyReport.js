@@ -18,7 +18,7 @@ const RATIO_TARGET = { 人事: 23, 包裝: 10, 鏡片: 15, 鏡框: 12, 營運費
 const DIVIDEND_CODES = ['marketing_fund', 'depreciation'];
 const SOURCE_NAME = {
   bill: '開帳單', billing_order: '部門開帳', opex: '營運費用', recurring: '固定支出', fixed: '固定金額',
-  manual_value: '手填', manual_adjust: '調帳', manual_amort: '分攤', erp_cost: 'ERP 費用單', aimin_expense: '愛民支出', planning_bill: '企劃部開帳', storehouse: '倉庫開帳', contract: '合約', basic: '基本資料', check: '支票', card_fee: '刷卡費率', lefthand_salary: '左手薪資',
+  manual_value: '手填', manual_adjust: '調帳', manual_amort: '分攤', erp_cost: 'ERP 費用單', aimin_expense: '愛民支出', aimin_frame: '愛民鏡框進貨', planning_bill: '企劃部開帳', storehouse: '倉庫開帳', contract: '合約', basic: '基本資料', check: '支票', card_fee: '刷卡費率', lefthand_salary: '左手薪資',
 };
 
 const MARKET_BASE = process.env.MARKET_BACKEND_URL || 'https://market-backend-0544.onrender.com';
@@ -434,6 +434,26 @@ async function build(ym, store, opts = {}) {
       ref_id: `sh-${l.src}-${l.id}`,
       ref_title: `倉庫｜${l.date} ${what}：${items}${l.src === 'ship' && l.cost ? `（總部成本 ${r0(l.cost)}）` : ''}${l.stamped ? '［倉庫已標開帳］' : ''}`,
     });
+  }
+  // 愛民鏡框進貨（2026-11-03）：IMING 採購單（公司總倉→門市，200／支）→ 總部出貨（鏡框）frame_hq
+  //   期間＝上月 26～本月 25（跟倉庫開帳一樣，IMING report_store_month.frame_purchases，不含已取消、看建立時間）
+  //   這一格有手填值、或倉庫已有這家這個月的鏡框開帳（開帳大平台匯入 manual_frame，～2026-09）→ 不重算
+  if (am && Array.isArray(am.frame_purchases) && am.frame_purchases.length) {
+    const fcode = 'frame_hq';
+    const hasManual = (byCode[fcode] || []).some((x) => x.source === 'manual_value');
+    const hasSheet = ((sh.byStore || {})[store] || []).some((l) => l.src === 'manual_frame');
+    if (hasSheet && am.frame_purchases.some((x) => Number(x.amount) > 0)) warnings.push('總部出貨（鏡框）：倉庫已有這個月的鏡框開帳（開帳大平台），愛民系統的採購單先不重算');
+    if (!hasManual && !hasSheet) {
+      for (const x of am.frame_purchases) {
+        if (!(Number(x.amount) > 0)) continue; // 期初建檔的 0 元單不算
+        const items = (x.items || []).map((i) => `${i.name}×${i.qty}${Number(i.unit_cost) ? `@${r0(i.unit_cost)}` : ''}`).join('、');
+        (byCode[fcode] = byCode[fcode] || []).push({
+          store_erpid: store, ledger_code: fcode, amount: Number(x.amount) || 0, fee_ym: ym, source: 'aimin_frame',
+          ref_id: `aimin-po-${x.id}`,
+          ref_title: `${x.supplier || '公司總倉'}｜${x.date ? String(x.date).slice(0, 10) : ''} 愛民採購 ${x.no || ''}${x.status === 'received' ? '' : `（${x.status === 'in_transit' ? '運送中' : x.status}）`}：${items}`,
+        });
+      }
+    }
   }
   const planIssues = (plan.issues || []).filter((i) => i.store === store || (i.e && i.e.lines.some((l) => ((plan.byStore || {})[store] || []).some((x) => x.expense_id === l.expense_id))));
 
