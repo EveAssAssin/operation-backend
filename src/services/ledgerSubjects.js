@@ -85,11 +85,20 @@ async function attach(lines) {
     }
     return m;
   };
-  const [bm, mm, subs] = await Promise.all([pick('bills', billIds), pick('ledger_manual_entries', manIds), all()]);
+  // 帳單裡每一列（門市）自己有科目的（廠商指定科目）：bill|門市|格子 → 科目
+  const pickAlloc = async (ids) => {
+    const m = {};
+    for (let i = 0; i < ids.length; i += 300) {
+      const { data } = await supabase.from('bill_allocations').select('bill_id, store_erpid, ledger_code, subject_id').in('bill_id', ids.slice(i, i + 300)).not('subject_id', 'is', null);
+      for (const r of data || []) m[`${r.bill_id}|${r.store_erpid}|${r.ledger_code}`] = r.subject_id;
+    }
+    return m;
+  };
+  const [bm, mm, subs, am] = await Promise.all([pick('bills', billIds), pick('ledger_manual_entries', manIds), all(), pickAlloc(billIds)]);
   const byIdMap = Object.fromEntries(subs.map((s) => [s.id, s]));
   const defs = Object.fromEntries(subs.filter((s) => s.is_default).map((s) => [s.ledger_code, s]));
   for (const l of lines) {
-    const sid = l.source === 'bill' ? bm[l.ref_id] : String(l.source || '').startsWith('manual_') ? mm[l.ref_id] : null;
+    const sid = l.source === 'bill' ? (am[`${l.ref_id}|${l.store_erpid || l.store}|${l.ledger_code || l.code}`] || bm[l.ref_id]) : String(l.source || '').startsWith('manual_') ? mm[l.ref_id] : null;
     const s = sid && byIdMap[sid];
     const d = defs[l.ledger_code || l.code];
     l.subject_id = s ? s.id : d ? d.id : null;

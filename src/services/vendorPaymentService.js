@@ -122,6 +122,7 @@ async function getRequest(id) {
     .select('*').eq('request_id', id).order('seq', { ascending: true });
   data.allocations = allocs || [];
   data.alloc_total = Math.round((allocs || []).reduce((a, x) => a + Number(x.amount || 0), 0) * 100) / 100;
+  data.allowed_subjects = await allowedSubjects(data.source_id);
 
   // 發票
   const { data: invoices } = await supabase.from('vendor_invoices')
@@ -466,7 +467,14 @@ async function approveRequest(id, actorSystemId, acct, actorName) {
   // 會計科目一定要選（這次帶的或之前存過的）
   if (!(c && c.subject_id)) {
     const { data: cur } = await supabase.from('vendor_payment_requests').select('subject_id').eq('id', id).maybeSingle();
-    if (!cur || !cur.subject_id) throw new Error('請先選會計科目再通過（之後才能歸類分析）');
+    if (!cur || !cur.subject_id) {
+      // 廠商每一列都選了科目（廠商檔案有指定科目）→ 不用再選整張的科目，用金額最大那一列的科目當代表
+      const { data: als } = await supabase.from('vendor_payment_allocations').select('subject_id, amount').eq('request_id', id);
+      if (!als || !als.length || als.some((a) => !a.subject_id)) throw new Error('請先選會計科目再通過（之後才能歸類分析）');
+      const top = [...als].sort((a, b) => Number(b.amount) - Number(a.amount))[0];
+      const sj = await require('./ledgerSubjects').byId(top.subject_id);
+      await supabase.from('vendor_payment_requests').update({ subject_id: top.subject_id, ledger_code: sj ? sj.ledger_code : null }).eq('id', id);
+    }
   }
   const { data, error } = await supabase.from('vendor_payment_requests')
     .update({
@@ -647,6 +655,17 @@ const FILE_BUCKET = 'vendor-files';
 const r2 = (n) => Math.round(Number(n) * 100) / 100;
 
 /** 可選的門市／部門（門市在前；部門名稱是純數字的不列） */
+/** 這家廠商可用的會計科目（廠商檔案裡指定的；空陣列＝沒限制） */
+async function allowedSubjects(source_id) {
+  if (!source_id) return [];
+  const { data } = await supabase.from('billing_sources').select('allowed_subject_ids').eq('id', source_id).maybeSingle();
+  const ids = (data && data.allowed_subject_ids) || [];
+  if (!ids.length) return [];
+  const all = await require('./ledgerSubjects').all();
+  return ids.map((id) => all.find((s) => s.id === id)).filter((s) => s && s.is_active)
+    .map((s) => ({ id: s.id, name: s.name, ledger_code: s.ledger_code, ledger_name: s.ledger_name }));
+}
+
 async function listTargets() {
   const { data } = await supabase.from('departments').select('store_erpid, store_name, report_kind, is_active').eq('is_active', true);
   return (data || []).filter((d) => d.report_kind === 'store' || !/^\d+$/.test(String(d.store_name || '')))
@@ -671,6 +690,22 @@ async function saveAllocations(request_id, rows, { actorType, actorId, actorName
   if (!Array.isArray(rows) || !rows.length) throw new Error('至少要一列');
   if (rows.length > 300) throw new Error('一張請款最多 300 列');
   const targets = new Map((await listTargets()).map((t) => [String(t.store_erpid), t]));
+  const allowed = await allowedSubjects(req.source_id);
+  const allowedIds = new Set(allowed.map((s) => s.id));
+  const LS = require('./ledgerSubjects');
+  const subjOf = async (x, i) => {
+    const sid = x.subject_id ? String(x.subject_id) : null;
+    if (actorType === 'vendor') {
+      if (!allowed.length) return null;                       // 沒指定科目的廠商：不用選，會計通過時再選
+      if (!sid) throw new Error(`第 ${i + 1} 列請選科目`);
+      if (!allowedIds.has(sid)) throw new Error(`第 ${i + 1} 列的科目不在可用清單內`);
+      return sid;
+    }
+    if (!sid) return null;
+    return (await LS.mustGet(sid)).id;                       // 會計：任何啟用中的科目
+  };
+  const subjIds = [];
+  for (let i = 0; i < rows.length; i++) subjIds.push(await subjOf(rows[i] || {}, i));
   const clean = rows.map((x, i) => {
     const name = String(x.item_name || '').trim().slice(0, 100);
     const store = String(x.store_erpid || '');
@@ -678,18 +713,18 @@ async function saveAllocations(request_id, rows, { actorType, actorId, actorName
     if (!name) throw new Error(`第 ${i + 1} 列沒有項目名稱`);
     if (!targets.has(store)) throw new Error(`第 ${i + 1} 列門市不對`);
     if (!Number.isFinite(amt) || amt === 0) throw new Error(`第 ${i + 1} 列金額不對`);
-    return { id: x.id || null, item_name: name, store_erpid: store, store_name: targets.get(store).store_name, amount: r2(amt), note: x.note ? String(x.note).slice(0, 200) : null };
+    return { id: x.id || null, item_name: name, store_erpid: store, store_name: targets.get(store).store_name, amount: r2(amt), note: x.note ? String(x.note).slice(0, 200) : null, subject_id: subjIds[i] };
   });
   const { data: before } = await supabase.from('vendor_payment_allocations').select('*').eq('request_id', request_id);
   const old = new Map((before || []).map((b) => [b.id, b]));
   const now = new Date().toISOString();
   const ins = clean.map((c, i) => {
     const o = c.id ? old.get(c.id) : null;
-    const row = { request_id, seq: i + 1, item_name: c.item_name, store_erpid: c.store_erpid, store_name: c.store_name, amount: c.amount, note: c.note };
+    const row = { request_id, seq: i + 1, item_name: c.item_name, store_erpid: c.store_erpid, store_name: c.store_name, amount: c.amount, note: c.note, subject_id: c.subject_id };
     if (actorType === 'vendor') { row.vendor_amount = c.amount; row.vendor_store = c.store_erpid; }
     else {
       row.vendor_amount = o ? o.vendor_amount : null; row.vendor_store = o ? o.vendor_store : null;
-      const changed = !o || Number(o.amount) !== c.amount || o.store_erpid !== c.store_erpid || o.item_name !== c.item_name;
+      const changed = !o || Number(o.amount) !== c.amount || o.store_erpid !== c.store_erpid || o.item_name !== c.item_name || (o.subject_id || null) !== (c.subject_id || null);
       row.adjusted_by = changed ? (actorName || actorId || '會計') : (o.adjusted_by || null);
       row.adjusted_at = changed ? now : (o.adjusted_at || null);
     }
@@ -748,12 +783,16 @@ async function billFromAllocations(row) {
   if (!row || row.linked_bill_id) return row && row.linked_bill_id;
   const { data: al } = await supabase.from('vendor_payment_allocations').select('*').eq('request_id', row.id).order('seq');
   if (!al || !al.length) return null;
+  // 每個「門市 × 科目」一列；列有科目時月報格子跟著科目（2026-11 廠商指定科目）
+  const subs = await require('./ledgerSubjects').all();
   const byStore = new Map();
   for (const a of al) {
-    const cur = byStore.get(a.store_erpid) || { store_erpid: a.store_erpid, store_name: a.store_name, amount: 0, names: [] };
+    const k = `${a.store_erpid}|${a.subject_id || ''}`;
+    const sj = a.subject_id ? subs.find((s) => s.id === a.subject_id) : null;
+    const cur = byStore.get(k) || { store_erpid: a.store_erpid, store_name: a.store_name, subject_id: sj ? sj.id : null, ledger_code: sj ? sj.ledger_code : null, amount: 0, names: [] };
     cur.amount = r2(cur.amount + Number(a.amount));
     cur.names.push(`${a.item_name} ${Number(a.amount).toLocaleString()}`);
-    byStore.set(a.store_erpid, cur);
+    byStore.set(k, cur);
   }
   const total = r2(al.reduce((s, a) => s + Number(a.amount), 0));
   const items = al.map((a, i) => ({ seq_no: i + 1, product_spec: a.item_name, quantity: 1, unit_price: Number(a.amount), total: Number(a.amount), store_erpid: a.store_erpid, store_name: a.store_name }));
@@ -766,16 +805,17 @@ async function billFromAllocations(row) {
   if (error) { console.error('[vendorPayment] 付款後建帳單失敗：', error.message); return null; }
   const { error: aErr } = await supabase.from('bill_allocations').insert([...byStore.values()].map((x) => ({
     bill_id: bill.id, store_erpid: x.store_erpid, store_name: x.store_name, allocated_amount: x.amount,
+    subject_id: x.subject_id, ledger_code: x.ledger_code,
     allocation_note: `請款 ${row.request_no}：${x.names.join('、')}`.slice(0, 500),
   })));
   if (aErr) console.error('[vendorPayment] 付款後建分攤失敗：', aErr.message);
   await supabase.from('vendor_payment_requests').update({ linked_bill_id: bill.id }).eq('id', row.id);
-  console.log(`[vendorPayment] ✅ ${row.request_no} 付款 → 帳單 ${bill.bill_no}，${byStore.size} 個門市`);
+  console.log(`[vendorPayment] ✅ ${row.request_no} 付款 → 帳單 ${bill.bill_no}，${byStore.size} 列（門市×科目）`);
   return bill.id;
 }
 
 module.exports = {
-  listTargets, saveAllocations, uploadRequestFile, signFiles, removeStoredFile, billFromAllocations,
+  listTargets, allowedSubjects, saveAllocations, uploadRequestFile, signFiles, removeStoredFile, billFromAllocations,
   // 銀行帳號
   listBankAccounts, createBankAccount, updateBankAccount, deleteBankAccount,
   // 請款單

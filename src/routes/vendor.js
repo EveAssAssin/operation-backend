@@ -146,6 +146,30 @@ router.get('/me', authenticateVendor, async (req, res) => {
   });
 });
 
+/**
+ * POST /api/vendor/change-password { old_password, new_password }
+ * 廠商自己改密碼（要先輸入目前的密碼）
+ */
+router.post('/change-password', authenticateVendor, async (req, res) => {
+  try {
+    const { old_password, new_password } = req.body || {};
+    if (!old_password || !new_password) return res.status(400).json({ success: false, message: '請輸入目前密碼與新密碼' });
+    if (String(new_password).length < 6) return res.status(400).json({ success: false, message: '新密碼至少 6 個字元' });
+    if (old_password === new_password) return res.status(400).json({ success: false, message: '新密碼不能跟目前密碼一樣' });
+    const { data: acc } = await supabase.from('vendor_accounts').select('id, password_hash').eq('id', req.vendor.id).maybeSingle();
+    if (!acc || !(await bcrypt.compare(String(old_password), acc.password_hash))) {
+      return res.status(400).json({ success: false, message: '目前密碼不正確' });
+    }
+    const { error } = await supabase.from('vendor_accounts')
+      .update({ password_hash: await bcrypt.hash(String(new_password), 10), updated_at: new Date().toISOString() })
+      .eq('id', acc.id);
+    if (error) throw new Error(error.message);
+    res.json({ success: true, data: { ok: true } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // ============================================================
 // 廠商帳單（只能看自己的，只能建立 / 修改草稿）
 // ============================================================
@@ -430,6 +454,8 @@ router.post('/requests/:id/upload', authenticateVendor, upload.single('file'), a
   } catch (e) { res.status(400).json({ success: false, message: e.message }); }
 });
 // 分配門市：項目名稱／金額／門市（請款總額＝合計）
+// 可用的會計科目（樂活在廠商檔案指定的；空＝不用選）
+router.get('/subjects', authenticateVendor, async (req, res) => { try { vpOk(res, await vpSvc.allowedSubjects(req.vendor.source_id)); } catch (e) { vpFail(res, e); } });
 router.get('/targets', authenticateVendor, async (req, res) => { try { vpOk(res, await vpSvc.listTargets()); } catch (e) { vpFail(res, e); } });
 router.put('/requests/:id/allocations', authenticateVendor, async (req, res) => {
   try {

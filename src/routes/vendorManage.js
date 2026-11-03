@@ -36,7 +36,7 @@ router.use(authorize('operation_accounting', 'operation_lead', 'super_admin', 'd
 router.get('/', async (req, res) => {
   try {
     const [{ data: src, error }, { data: acc }, { data: banks }] = await Promise.all([
-      supabase.from('billing_sources').select('id, name, code, tax_id, contact_name, contact_phone, contact_email, notes, is_active, created_at').eq('source_type', 'vendor').order('is_active', { ascending: false }).order('name'),
+      supabase.from('billing_sources').select('id, name, code, tax_id, contact_name, contact_phone, contact_email, notes, is_active, created_at, allowed_subject_ids').eq('source_type', 'vendor').order('is_active', { ascending: false }).order('name'),
       supabase.from('vendor_accounts').select('id, source_id, username, is_active, last_login_at'),
       supabase.from('vendor_bank_accounts').select('*').order('is_default', { ascending: false }).order('created_at'),
     ]);
@@ -97,6 +97,16 @@ router.patch('/:id', authorize('operation_accounting', 'operation_lead', 'super_
     for (const k of ['name', 'code', 'contact_name', 'contact_phone', 'contact_email', 'notes']) if (b[k] !== undefined) patch[k] = String(b[k] || '').trim() || null;
     if (b.tax_id !== undefined) { const t = digits(b.tax_id); if (t && t.length !== 8) throw new Error('統一編號要 8 碼'); patch.tax_id = t || null; }
     if (b.is_active !== undefined) patch.is_active = !!b.is_active;
+    // 指定科目：廠商分配請款時每一列只能選這些（空＝不限，由會計通過時選）
+    if (b.allowed_subject_ids !== undefined) {
+      const ids = [...new Set((Array.isArray(b.allowed_subject_ids) ? b.allowed_subject_ids : []).map(String).filter(Boolean))];
+      const LS = require('../services/ledgerSubjects');
+      for (const id of ids) {
+        const s = await LS.byId(id);
+        if (!s || !s.is_active) throw new Error('有科目不存在或已停用');
+      }
+      patch.allowed_subject_ids = ids;
+    }
     if (patch.name === null) throw new Error('廠商名稱不能空白');
     const { data, error } = await supabase.from('billing_sources').update(patch).eq('id', req.params.id).eq('source_type', 'vendor').select('*').single();
     if (error) throw error;

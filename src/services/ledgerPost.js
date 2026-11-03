@@ -63,7 +63,7 @@ async function applyToBill(billId, acct) {
     const sj = await require('./ledgerSubjects').byId(acct.subject_id);
     if (sj) { acct.ledger_code = acct.ledger_code || sj.ledger_code; await supabase.from('bills').update({ subject_id: sj.id, ledger_code: sj.ledger_code }).eq('id', billId); }
   }
-  const { data: als } = await supabase.from('bill_allocations').select('id, store_erpid, allocated_amount').eq('bill_id', billId);
+  const { data: als } = await supabase.from('bill_allocations').select('id, store_erpid, allocated_amount, subject_id, ledger_code').eq('bill_id', billId);
   if (!als || !als.length) return { done: 0 };
   const cut = await cutoffDay();
   const want = acct.report_ym && YM.test(acct.report_ym) ? acct.report_ym : reportYmFor(acct.fee_ym, tpeDate(acct.received_at), cut);
@@ -74,7 +74,8 @@ async function applyToBill(billId, acct) {
   for (const a of als) {
     const ym = await openYm(a.store_erpid, want, isC);
     if (ym !== want) notes.push(`${a.store_erpid} ${want} 已關帳 → 改列 ${ym}`);
-    await supabase.from('bill_allocations').update({ report_ym: ym, fee_ym: acct.fee_ym || null, ledger_code: acct.ledger_code || null, updated_at: new Date().toISOString() }).eq('id', a.id);
+    // 列自己有科目（廠商指定科目）→ 保留列的月報格子
+    await supabase.from('bill_allocations').update({ report_ym: ym, fee_ym: acct.fee_ym || null, ledger_code: a.subject_id ? a.ledger_code : (acct.ledger_code || null), updated_at: new Date().toISOString() }).eq('id', a.id);
     if (n > 1) {
       const rows = (await plan(a.store_erpid, a.allocated_amount, ym, n, isC)).map((r) => ({ ...r, allocation_id: a.id, created_by: acct.by || null, shifted_from: ym !== want ? want : null }));
       await supabase.from('bill_alloc_schedule').delete().eq('allocation_id', a.id);

@@ -880,6 +880,8 @@ router.patch('/bill/:id/subject', canEdit, async (req, res) => {
       }
       await supabase.from('bill_allocations').update({ ledger_code: null, updated_at: new Date().toISOString() }).eq('bill_id', bill.id);
     }
+    // 整張改成同一個科目：清掉各列自己的科目（廠商指定科目）
+    await supabase.from('bill_allocations').update({ subject_id: null }).eq('bill_id', bill.id).not('subject_id', 'is', null);
     const { error } = await supabase.from('bills').update({ subject_id: s.id, ledger_code: s.ledger_code, updated_at: new Date().toISOString() }).eq('id', bill.id);
     if (error) throw error;
     MR.clearBookCache && MR.clearBookCache();
