@@ -8,7 +8,7 @@
 const supabase = require('../config/supabase');
 
 const BUCKET = 'ledger-vouchers';
-const REF_TYPES = ['bill', 'manual', 'amort', 'opex', 'recurring', 'billing_order', 'fixed', 'contract'];
+const REF_TYPES = ['bill', 'manual', 'amort', 'opex', 'recurring', 'billing_order', 'fixed', 'contract', 'petty'];
 const MAX_BYTES = 20 * 1024 * 1024;
 const SIGN_SEC = 3600;
 
@@ -28,6 +28,7 @@ function refOf(line, amortGroupOf) {
     case 'fixed': return { type: 'fixed', id };
     case 'manual_value': case 'manual_adjust': return { type: 'manual', id };
     case 'manual_amort': return amortGroupOf && amortGroupOf[id] ? { type: 'amort', id: amortGroupOf[id] } : null;
+    case 'manual_petty': return amortGroupOf && amortGroupOf['petty:' + id] ? { type: 'petty', id: amortGroupOf['petty:' + id] } : null;
     case 'contract': return id.startsWith('ct-') ? { type: 'contract', id: id.slice(3) } : null;
     default: return null;
   }
@@ -118,6 +119,12 @@ async function decorateReport(rep, user) {
   }
   const lines = rows.flatMap((r) => r.lines);
   const ag = await amortGroups(lines.filter((l) => l.source === 'manual_amort').map((l) => String(l.ref_id)));
+  // 零用金開帳的列：憑證掛在零用金那一筆
+  const pIds = lines.filter((l) => l.source === 'manual_petty').map((l) => String(l.ref_id));
+  if (pIds.length) {
+    const { data: pe } = await supabase.from('ledger_manual_entries').select('id, petty_txn_id').in('id', pIds);
+    for (const r of pe || []) if (r.petty_txn_id) ag['petty:' + r.id] = r.petty_txn_id;
+  }
   const refs = lines.map((l) => refOf(l, ag));
   const files = await filesFor(refs);
   let missing = 0, total = 0;
