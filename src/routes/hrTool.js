@@ -22,7 +22,7 @@ const LAYOFF_SITES = {
 const LAYOFF_DEFAULT = { name: '勞動部勞動力發展署 資遣通報系統', url: 'https://layoff.ejob.gov.tw/' };
 const LINKS = {
   li: { name: '勞保局 e化服務系統（投保單位）', url: 'https://edesk.bli.gov.tw/', note: '要單位憑證＋自然人憑證。勞保、就保、職保、勞退同一張退保申報；離職日前 10 天內可以預辦。' },
-  nhi: { name: '健保署 多憑證網路承保作業', url: 'https://eservice.nhi.gov.tw/', note: '健保退保另外辦（不在勞保局那張）。' },
+  nhi: { name: '健保署 多憑證網路承保作業', url: 'https://www.nhi.gov.tw/', note: '健保退保另外辦（不在勞保局那張）。從健保署首頁 > 網路櫃檯 > 承保網路櫃檯 > 投保單位 進入（直接開 eservice.nhi.gov.tw 首頁會 403，芽芽回報 #92）。' },
 };
 function cityOf(store) {
   const t = String((store && (store.city || store.address)) || '').replace(/台/g, '臺');
