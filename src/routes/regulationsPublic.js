@@ -73,6 +73,7 @@ router.post('/propose/versions/:vid/preview', editLimit, who, can, own, async (r
 router.post('/propose/versions/:vid/submit', editLimit, who, can, own, async (req, res) => { try { ok(res, await reg.submitDraft(req.params.vid, U(req))); } catch (e) { pfail(res, e); } });
 router.post('/propose/versions/:vid/discard', editLimit, who, can, own, async (req, res) => { try { ok(res, await reg.discardDraft(req.params.vid)); } catch (e) { pfail(res, e); } });
 router.post('/propose/versions/:vid/assist', editLimit, who, can, own, async (req, res) => { try { ok(res, await AI.assist(req.params.vid, req.body || {}, U(req))); } catch (e) { pfail(res, e); } });
+router.post('/propose/versions/:vid/assist/clarify', editLimit, who, can, own, async (req, res) => { try { ok(res, await AI.assistClarify(req.params.vid, req.body || {})); } catch (e) { pfail(res, e); } });
 router.post('/propose/versions/:vid/assist/choose', editLimit, who, can, own, async (req, res) => { try { ok(res, await AI.chooseOption(req.params.vid, Number(req.body?.log_index), req.body?.key)); } catch (e) { pfail(res, e); } });
 router.post('/propose/versions/:vid/related/draft', editLimit, who, can, own, async (req, res) => { try { ok(res, await AI.draftRelated(req.params.vid, req.body || {})); } catch (e) { pfail(res, e); } });
 router.post('/propose/:id/related-apply', editLimit, who, can, async (req, res) => {
@@ -94,6 +95,7 @@ const RefGen = require('../services/regulationRefGen');
 router.get('/propose/ref-list', who, can, async (req, res) => {
   try { ok(res, (await reg.listRegulations({ q: req.query.q, limit: 40 })).map(r => ({ id: r.id, title: r.title, category: r.category }))); } catch (e) { pfail(res, e); }
 });
+router.post('/propose/ref-generate/clarify', editLimit, who, can, async (req, res) => { try { ok(res, await RefGen.clarify(req.body || {})); } catch (e) { pfail(res, e); } });
 router.post('/propose/ref-generate', editLimit, who, can, (req, res) => { try { ok(res, RefGen.start(`app:${req.emp.app_number}`, req.body || {})); } catch (e) { pfail(res, e); } });
 router.get('/propose/ref-generate/:job', who, (req, res) => { try { ok(res, RefGen.get(`app:${req.emp.app_number}`, req.params.job)); } catch (e) { fail(res, e, 404); } });
 router.get('/propose/import-docx/:job', who, (req, res) => { try { ok(res, Docx.get(`app:${req.emp.app_number}`, req.params.job)); } catch (e) { fail(res, e, 404); } });

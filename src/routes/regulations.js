@@ -101,6 +101,7 @@ router.post('/import-docx', edit, uploadDocx.single('file'), async (req, res) =>
 });
 // 參考既有規範＋新需求 → AI 產生新規範（背景工作，結果回給編輯器）
 const RefGen = require('../services/regulationRefGen');
+router.post('/ref-generate/clarify', edit, async (req, res) => { try { ok(res, await RefGen.clarify(req.body || {})); } catch (e) { fail(res, e); } });
 router.post('/ref-generate', edit, (req, res) => { try { ok(res, RefGen.start(`u:${req.user?.id}`, req.body || {})); } catch (e) { fail(res, e); } });
 router.get('/ref-generate/:job', view, (req, res) => { try { ok(res, RefGen.get(`u:${req.user?.id}`, req.params.job)); } catch (e) { fail(res, e, 404); } });
 router.get('/import-docx/:job', view, (req, res) => { try { ok(res, Docx.get(`u:${req.user?.id}`, req.params.job)); } catch (e) { fail(res, e, 404); } });
@@ -109,6 +110,7 @@ router.get('/import-docx/:job', view, (req, res) => { try { ok(res, Docx.get(`u:
 router.post('/versions/:vid/assist', edit, async (req, res) => {
   try { ok(res, await AI.assist(req.params.vid, req.body || {}, req.user)); } catch (e) { fail(res, e); }
 });
+router.post('/versions/:vid/assist/clarify', edit, async (req, res) => { try { ok(res, await AI.assistClarify(req.params.vid, req.body || {})); } catch (e) { fail(res, e); } });
 router.post('/versions/:vid/assist/choose', edit, async (req, res) => {
   try { ok(res, await AI.chooseOption(req.params.vid, Number(req.body?.log_index), req.body?.key)); } catch (e) { fail(res, e); }
 });

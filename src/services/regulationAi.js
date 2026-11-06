@@ -441,4 +441,41 @@ ${OPS_SPEC}
   return { source_title: reg0.title, regs: out };
 }
 
-module.exports = { draftRelated, metaSuggest, runMetaSuggest, getMetaStatus, enabled, hashDoc, assist, chooseOption, check, resolveIssue, ensureChecked, auditRegulation, runAudit, getAuditStatus, tryOps };
+
+// ════════════════════════════════════════════════════════════
+// 先確認方向（2026-11）：編輯助理在給方案前，需求不清楚就先問（清楚就直接 ready）
+// ════════════════════════════════════════════════════════════
+const CLARIFY_RULES = `在動手寫之前先確認方向，避免寫錯方向浪費時間。
+只輸出 JSON：
+{"understanding":"用 1～3 句白話說你理解要做什麼",
+ "plan":["打算怎麼寫／會改哪些地方（大綱，最多 8 點）"],
+ "questions":[{"q":"問題（一句話）","why":"不問清楚會影響什麼（一句話）","options":["常見答案A","常見答案B"]}],
+ "ready":true 或 false}
+規則：
+- 只問「會影響方向或內容對錯」的關鍵問題，最多 4 題；能從規範內容或常識合理推斷的不要問。
+- 日期、金額、數量這類之後可以留「（請填）」補的，不要問。
+- options 給 2～4 個最可能的答案讓人直接點（沒有合適的可給空陣列）。
+- 需求已經夠清楚：questions 給 []、ready 給 true。`;
+async function assistClarify(versionId, { message, doc: liveDoc } = {}) {
+  const v = must(await supabase.from('regulation_versions').select('id, doc, status').eq('id', versionId).maybeSingle(), '讀取版本失敗');
+  if (!v) throw new Error('找不到這個版本');
+  const doc = liveDoc && liveDoc.sections ? liveDoc : v.doc;
+  const msg = String(message || '').trim();
+  if (!msg) return { ready: true, understanding: '', plan: [], questions: [] };
+  const system = `你是眼鏡連鎖公司的規範編輯助理，使用者要你修改下面這份規範。
+小範圍、意思明確的修改（例如改時間、改字、加一條清楚的規定）直接 ready，不要為了問而問。
+${CLARIFY_RULES}`;
+  const out = parseJson(await claude({ model: MODEL_FAST, maxTokens: 1200, timeout: 45000, system,
+    content: [{ type: 'text', text: ['# 規範（草稿）', D.docToPrompt(doc, 16000), '', '# 使用者的需求', msg].join('\n') }] }));
+  return normClarify(out);
+}
+function normClarify(out) {
+  const questions = (Array.isArray(out.questions) ? out.questions : []).slice(0, 4).map(q => ({
+    q: String(q.q || '').trim(), why: String(q.why || '').trim(),
+    options: (Array.isArray(q.options) ? q.options : []).map(String).filter(Boolean).slice(0, 4),
+  })).filter(q => q.q);
+  return { ready: !questions.length && out.ready !== false, understanding: String(out.understanding || '').trim(),
+    plan: (Array.isArray(out.plan) ? out.plan : []).map(String).filter(Boolean).slice(0, 8), questions };
+}
+
+module.exports = { assistClarify, normClarify, CLARIFY_RULES, draftRelated, metaSuggest, runMetaSuggest, getMetaStatus, enabled, hashDoc, assist, chooseOption, check, resolveIssue, ensureChecked, auditRegulation, runAudit, getAuditStatus, tryOps };

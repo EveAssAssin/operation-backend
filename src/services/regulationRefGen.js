@@ -21,6 +21,7 @@ const SYSTEM = `你是眼鏡連鎖公司（樂活眼鏡）的企劃／規範撰�
 - 參考裡值得保留的執行細節、常見錯誤提醒、分工方式可以沿用（改寫成符合新需求）。
 - 繁體中文、公司內部規範語氣、一條只講一件事、句子完整；每一條都可能被引用扣分，所以要明確、可判斷有沒有做到。
 - 原本有扣分（pen）的規定，只有在新規範仍然適用時才保留扣分。
+- 新需求裡如果有「確認過的方向／大綱」與「補充回答」，一定要照那個大綱與回答寫，不要自行改方向。
 只輸出 JSON：
 {"title":"新規範名稱","summary":"一句話說明（30 字內）","scenario":"什麼時候會用到",
  "sections":[{"title":"大項標題","items":[條文]}],
@@ -92,4 +93,33 @@ function get(owner, id) {
   return { status: j.status, result: j.result || null, error: j.error || null };
 }
 
-module.exports = { start, get, generate };
+
+// ── 先確認方向：理解＋打算的大綱＋關鍵問題（產生要好幾分鐘，先讓人確認不會寫錯方向）──
+async function clarify({ reference_ids, requirement, title }) {
+  if (!process.env.ANTHROPIC_API_KEY) throw new Error('AI 功能未啟用：Render 要設 ANTHROPIC_API_KEY');
+  const { normClarify, CLARIFY_RULES } = require('./regulationAi');
+  const ids = [...new Set((Array.isArray(reference_ids) ? reference_ids : [reference_ids]).map(Number).filter(Boolean))].slice(0, MAX_REFS);
+  if (!ids.length) throw new Error('請至少選一份參考規範');
+  const need = String(requirement || '').trim();
+  if (need.length < 5) throw new Error('請寫這次的新需求（至少一句話）');
+  const refs = [];
+  for (const id of ids) refs.push(await loadDoc(id));
+  const per = Math.floor(30000 / refs.length);
+  const system = `你是眼鏡連鎖公司（樂活眼鏡）的企劃／規範撰寫助理。使用者要你「沿用參考規範的架構與邏輯，依新需求寫一份新規範」。
+plan 請寫成「新規範的大綱」：每一點＝一個大項＋這一項打算寫什麼（例：「二、活動內容：買框送鏡片升級的條件、可搭配的優惠」），並標出哪些大項是沿用參考、哪些是新加的。
+${CLARIFY_RULES}`;
+  const content = [
+    title ? `新規範名稱（暫定）：${title}` : '',
+    ...refs.map((r, i) => `=== 參考規範 ${i + 1}：#${r.id}《${r.title}》 ===\n${D.docToPrompt(r.doc, per)}`),
+    `=== 這次的新需求 ===\n${need}`,
+  ].filter(Boolean).join('\n\n');
+  const res = await axios.post('https://api.anthropic.com/v1/messages', {
+    model: MODEL, max_tokens: 2500, system, messages: [{ role: 'user', content }],
+  }, { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 120000 });
+  const raw = (res.data.content || []).map(c => c.text || '').join('').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  let j;
+  try { j = JSON.parse(raw); } catch { const a = raw.indexOf('{'), b = raw.lastIndexOf('}'); j = JSON.parse(raw.slice(a, b + 1)); }
+  return { ...normClarify(j), references: refs.map(r => ({ id: r.id, title: r.title })) };
+}
+
+module.exports = { start, get, generate, clarify };
