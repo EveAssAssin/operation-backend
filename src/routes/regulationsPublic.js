@@ -89,6 +89,13 @@ router.post('/propose/import-docx', editLimit, who, can, uploadDocx.single('file
     ok(res, Docx.start(`app:${req.emp.app_number}`, req.file.buffer, { title: req.body?.title }));
   } catch (e) { pfail(res, e); }
 });
+// 參考既有規範＋新需求 → AI 產生新規範；參考清單搜尋（只列上線中的規範名稱）
+const RefGen = require('../services/regulationRefGen');
+router.get('/propose/ref-list', who, can, async (req, res) => {
+  try { ok(res, (await reg.listRegulations({ q: req.query.q, limit: 40 })).map(r => ({ id: r.id, title: r.title, category: r.category }))); } catch (e) { pfail(res, e); }
+});
+router.post('/propose/ref-generate', editLimit, who, can, (req, res) => { try { ok(res, RefGen.start(`app:${req.emp.app_number}`, req.body || {})); } catch (e) { pfail(res, e); } });
+router.get('/propose/ref-generate/:job', who, (req, res) => { try { ok(res, RefGen.get(`app:${req.emp.app_number}`, req.params.job)); } catch (e) { fail(res, e, 404); } });
 router.get('/propose/import-docx/:job', who, (req, res) => { try { ok(res, Docx.get(`app:${req.emp.app_number}`, req.params.job)); } catch (e) { fail(res, e, 404); } });
 // app_number 放 query（multipart 的 body 在 multer 之前讀不到）
 router.post('/propose/upload', editLimit, who, can, upload.single('file'), async (req, res) => {

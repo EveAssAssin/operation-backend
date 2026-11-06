@@ -99,6 +99,10 @@ router.post('/import-docx', edit, uploadDocx.single('file'), async (req, res) =>
     ok(res, Docx.start(`u:${req.user?.id}`, req.file.buffer, { title: req.body?.title }));
   } catch (e) { fail(res, e); }
 });
+// 參考既有規範＋新需求 → AI 產生新規範（背景工作，結果回給編輯器）
+const RefGen = require('../services/regulationRefGen');
+router.post('/ref-generate', edit, (req, res) => { try { ok(res, RefGen.start(`u:${req.user?.id}`, req.body || {})); } catch (e) { fail(res, e); } });
+router.get('/ref-generate/:job', view, (req, res) => { try { ok(res, RefGen.get(`u:${req.user?.id}`, req.params.job)); } catch (e) { fail(res, e, 404); } });
 router.get('/import-docx/:job', view, (req, res) => { try { ok(res, Docx.get(`u:${req.user?.id}`, req.params.job)); } catch (e) { fail(res, e, 404); } });
 
 // ── AI：編輯助理、監督檢查 ──
