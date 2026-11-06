@@ -608,6 +608,19 @@ async function accountUsage(code) {
   const list = Object.entries(parts).filter(([, n]) => n);
   return { total: list.reduce((a, [, n]) => a + n, 0), text: list.map(([k, n]) => `${k} ${n} 筆`).join('、'), parts, subIds };
 }
+// 停用被擋時告訴會計「去哪裡改」（芽芽回報 #123：只寫「固定費用 1 筆」，會計不知道是哪一家、在哪裡改）
+async function usageHint(code, parts) {
+  const out = [];
+  if (parts['固定費用']) {
+    const { data: fx } = await supabase.from('store_fixed_items').select('store_erpid, from_ym, to_ym').eq('ledger_code', code);
+    const ids = [...new Set((fx || []).map((x) => x.store_erpid))];
+    const { data: ds } = ids.length ? await supabase.from('departments').select('store_erpid, store_name').in('store_erpid', ids) : { data: [] };
+    const nm = Object.fromEntries((ds || []).map((d) => [d.store_erpid, d.store_name]));
+    out.push(`固定費用在「門市基礎設定 → ${(fx || []).map((x) => `${nm[x.store_erpid] || x.store_erpid}（${x.from_ym}～${x.to_ym || '不限'}）`).join('、')} → 每月固定費用」，把科目改成別的格子底下的科目`);
+  }
+  if (parts['舊月報']) out.push('舊月報是已關帳月份的歷史數字，這一格會一直有資料，所以不能停用；不想再用可以改名或不再選它');
+  return out.length ? `。${out.join('；')}` : '';
+}
 // 刪除月報格子：只有自己新增的（x_ 開頭）、而且完全沒被用過的才能刪（例：建錯的）
 router.delete('/accounts/:code', canEdit, async (req, res) => {
   try {
@@ -637,7 +650,7 @@ router.patch('/accounts/:code', canEdit, async (req, res) => {
     if (b.group_code !== undefined) { if (!GROUPS.includes(b.group_code)) return bad(res, '區不對'); up.group_code = b.group_code; }
     if (up.is_active === false) {
       const u = await accountUsage(req.params.code);
-      if (u.total) return bad(res, `這個月報格子還有帳在用（${u.text}），停用後月報會看不到這些帳；請先把這些帳改到別的格子`);
+      if (u.total) return bad(res, `這個月報格子還有帳在用（${u.text}），停用後月報會看不到這些帳；請先把這些帳改到別的格子` + await usageHint(req.params.code, u.parts));
     }
     const { error } = await supabase.from('ledger_accounts').update(up).eq('code', req.params.code);
     if (error) throw error; res.json({ success: true });

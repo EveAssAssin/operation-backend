@@ -83,7 +83,9 @@ async function ownVersion(emp, vid) {
 
 async function startEdit(emp, regId) {
   await mustCan(emp);
-  const { open_draft } = await svc.getRegulation(regId);
+  const { open_draft: od } = await svc.getRegulation(regId);
+  // getRegulation 的版本清單沒有 created_by_id → 一定要讀完整版本再比，否則連「自己的草稿」也被擋（芽芽回報 #124）
+  const open_draft = od ? await svc.getVersion(od.id) : null;
   if (open_draft && String(open_draft.created_by_id || '') !== `app:${emp.app_number}`) {
     throw new Error(open_draft.status === 'pending' ? '這份規範已有修改在送審中，審核完成前不能再提' : `這份規範 ${open_draft.created_by_name || '其他人'} 正在修改中，請等他送審完成`);
   }
