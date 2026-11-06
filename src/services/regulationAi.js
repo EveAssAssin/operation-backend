@@ -348,4 +348,97 @@ async function runMetaSuggest({ limit = 600 } = {}) {
   }
 }
 
-module.exports = { metaSuggest, runMetaSuggest, getMetaStatus, enabled, hashDoc, assist, chooseOption, check, resolveIssue, ensureChecked, auditRegulation, runAudit, getAuditStatus, tryOps };
+
+// ════════════════════════════════════════════════════════════
+// 跨規範一起修改（2026-11）：把 other_regs 的「建議怎麼改」轉成每份規範可直接套用的修改指令
+//   回傳每份規範的 ops（附原文 old），前端可逐條微調文字，再逐份或全部存草稿／送審
+// ════════════════════════════════════════════════════════════
+const OPEN_ST = ['draft', 'returned', 'pending'];
+async function loadTargetReg(regId) {
+  const reg = (await supabase.from('regulations').select('id, title, current_version, status').eq('id', regId).maybeSingle()).data;
+  if (!reg) return { error: '找不到這份規範' };
+  const vs = must(await supabase.from('regulation_versions').select('id, version, status, doc, created_by_id, created_by_name')
+    .eq('regulation_id', regId).in('status', OPEN_ST).order('version', { ascending: false }).limit(1), '讀取版本失敗');
+  const open = vs[0] || null;
+  if (open?.status === 'pending') return { reg, error: '這份規範已有修改在送審中，審核完成前不能再改' };
+  let doc = open?.doc;
+  if (!doc) {
+    const cur = must(await supabase.from('regulation_versions').select('doc').eq('regulation_id', regId).eq('version', reg.current_version).maybeSingle(), '讀取現行版失敗');
+    doc = cur?.doc || { sections: [] };
+  }
+  return { reg, doc, open_draft: open ? { id: open.id, by: open.created_by_name || null, by_id: open.created_by_id || null } : null };
+}
+const withOld = (doc, ops) => ops.map(o => {
+  const r = o.code ? D.locate(doc, o.code) : null;
+  return { ...o, old: r?.node?.text ?? null };
+});
+
+async function draftRelated(versionId, { items, doc: liveDoc } = {}) {
+  const v = must(await supabase.from('regulation_versions').select('id, regulation_id, doc').eq('id', versionId).maybeSingle(), '讀取版本失敗');
+  if (!v) throw new Error('找不到這個版本');
+  const srcDoc = liveDoc && liveDoc.sections ? liveDoc : v.doc;
+
+  // 依規範分組（代碼前綴＝規範編號）
+  const groups = new Map();
+  for (const it of (Array.isArray(items) ? items : []).slice(0, 15)) {
+    const code = String(it?.code || '').trim();
+    const regId = Number(code.split('-')[0]);
+    if (!regId || regId === Number(v.regulation_id)) continue;
+    if (!groups.has(regId)) groups.set(regId, { regulation_id: regId, title: it.title || '', items: [] });
+    groups.get(regId).items.push({ code, suggestion: String(it.suggestion || '') });
+  }
+  if (!groups.size) throw new Error('沒有其他規範需要一起修改');
+
+  const regs = [];
+  for (const g of groups.values()) {
+    const t = await loadTargetReg(g.regulation_id);
+    regs.push({ ...g, title: t.reg?.title || g.title, error: t.error || null, doc: t.doc || null, open_draft: t.open_draft || null });
+  }
+  const workable = regs.filter(r => !r.error);
+
+  // 來源規範這次改了什麼（給 AI 當背景）
+  const reg0 = must(await supabase.from('regulations').select('id, title, current_version').eq('id', v.regulation_id).single(), '讀取規範失敗');
+  let oldDoc = { sections: [] };
+  if (reg0.current_version > 0) {
+    const cur = must(await supabase.from('regulation_versions').select('doc').eq('regulation_id', reg0.id).eq('version', reg0.current_version).maybeSingle(), '讀取現行版失敗');
+    oldDoc = cur?.doc || oldDoc;
+  }
+  const diff = D.diffDocs(oldDoc, srcDoc);
+  const changeText = diff.changes.filter(c => c.kind !== 'move').slice(0, 25)
+    .map(c => `[${c.code}] ${c.kind === 'add' ? '新增' : c.kind === 'del' ? '刪除' : '修改'}\n  原：${c.old || '—'}\n  新：${c.new || '—'}`).join('\n');
+
+  let aiOut = { regs: [] };
+  if (workable.length) {
+    const per = Math.max(3000, Math.floor(24000 / workable.length));
+    const system = `你是眼鏡連鎖公司的規範編輯。另一份規範剛被修改，下列幾份規範需要「跟著改」以保持一致。
+請針對每一份規範，依「建議」產生可直接套用的修改指令，只改需要改的條文，其他不要動。
+每份另外寫一句 change_note（給審核人看，說明是配合哪份規範修改、改了什麼，40 字內）。
+${STYLE}
+${OPS_SPEC}
+只輸出 JSON：{"regs":[{"regulation_id":<編號>,"change_note":"…","ops":[…]}]}`;
+    const content = [{ type: 'text', text: [
+      `# 來源規範《${reg0.title}》這次的修改`, changeText || '（只有欄位變動）',
+      ...workable.map(r => [
+        '', `# 要跟著改的規範 #${r.regulation_id}《${r.title}》`,
+        '## 建議', ...r.items.map(i => `- [${i.code}] ${i.suggestion}`),
+        '## 目前全文', D.docToPrompt(r.doc, per),
+      ].join('\n')),
+    ].join('\n') }];
+    try { aiOut = parseJson(await claude({ system, content, maxTokens: 6000, timeout: 110000 })); }
+    catch (e) { console.warn('[RegAI] draftRelated AI 失敗：', e.message); }
+  }
+
+  const out = regs.map(r => {
+    const base = { regulation_id: r.regulation_id, title: r.title, items: r.items, open_draft: r.open_draft ? { by: r.open_draft.by } : null, error: r.error };
+    if (r.error) return { ...base, ops: [], change_note: '' };
+    const a = (aiOut.regs || []).find(x => Number(x.regulation_id) === Number(r.regulation_id));
+    const tried = a?.ops?.length ? tryOps(r.doc, a.ops) : { error: 'AI 沒有產生修改' };
+    if (!tried.error) return { ...base, ops: withOld(r.doc, tried.ops), change_note: a.change_note || `配合《${reg0.title}》修改` };
+    // 套不上：先放原文讓使用者直接改
+    const fallback = r.items.map(i => ({ op: 'replace_text', code: i.code, text: D.locate(r.doc, i.code)?.node?.text || '' })).filter(o => D.locate(r.doc, o.code));
+    return { ...base, ai_failed: true, ops: withOld(r.doc, fallback), change_note: `配合《${reg0.title}》修改` };
+  });
+  return { source_title: reg0.title, regs: out };
+}
+
+module.exports = { draftRelated, metaSuggest, runMetaSuggest, getMetaStatus, enabled, hashDoc, assist, chooseOption, check, resolveIssue, ensureChecked, auditRegulation, runAudit, getAuditStatus, tryOps };

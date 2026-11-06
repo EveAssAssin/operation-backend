@@ -793,7 +793,34 @@ async function notifyAuditSummary(result) {
 ${FRONTEND}/regulations?tab=audit`);
 }
 
+
+/**
+ * 跨規範一起修改：把（使用者微調過的）修改指令套進該規範的草稿；submit=true 時接著送審
+ *   draft 由 route 決定怎麼取得（後台 createDraft／App 提出 P.startEdit，含權限檢查）
+ *   送審若被 AI 檢查擋下，草稿仍保留，回 status='drafted' + message
+ */
+async function applyRelatedEdit(draft, { ops, change_note, submit } = {}, user) {
+  const clean = (Array.isArray(ops) ? ops : []).map(({ old, on, ...o }) => o);
+  if (!clean.length) throw new Error('沒有要修改的內容');
+  for (const o of clean) {
+    if (['replace_text', 'add_clause', 'add_note'].includes(o.op) && !String(o.text || '').trim()) throw new Error(`條文 ${o.code || ''} 的內容不能是空的`);
+  }
+  let doc;
+  try { doc = D.applyOps(draft.doc, clean); } catch (e) { throw new Error(`套用失敗：${e.message}（這份規範可能剛被別人改過，請重新產生）`); }
+  const note = String(change_note || '').trim();
+  const merged = draft.change_note && note && !draft.change_note.includes(note) ? `${draft.change_note}；${note}` : (note || draft.change_note || '');
+  const saved = await saveDraft(draft.id, { doc, change_note: merged }, user);
+  if (!submit) return { status: 'drafted', version_id: saved.id };
+  try {
+    const s = await submitDraft(saved.id, user);
+    return { status: 'submitted', version_id: s.id };
+  } catch (e) {
+    return { status: 'drafted', version_id: saved.id, message: e.message };
+  }
+}
+
 module.exports = {
+  applyRelatedEdit,
   listFindings, ignoreFinding, draftFromFinding, draftAllMeta, getMetaDraftStatus, notifyAuditSummary,
   MAP_ROLES, getReviewer, setReviewer, isReviewer,
   importFromMap, getImportStatus, reparseIfNeeded,

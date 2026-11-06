@@ -74,6 +74,10 @@ router.post('/propose/versions/:vid/submit', editLimit, who, can, own, async (re
 router.post('/propose/versions/:vid/discard', editLimit, who, can, own, async (req, res) => { try { ok(res, await reg.discardDraft(req.params.vid)); } catch (e) { pfail(res, e); } });
 router.post('/propose/versions/:vid/assist', editLimit, who, can, own, async (req, res) => { try { ok(res, await AI.assist(req.params.vid, req.body || {}, U(req))); } catch (e) { pfail(res, e); } });
 router.post('/propose/versions/:vid/assist/choose', editLimit, who, can, own, async (req, res) => { try { ok(res, await AI.chooseOption(req.params.vid, Number(req.body?.log_index), req.body?.key)); } catch (e) { pfail(res, e); } });
+router.post('/propose/versions/:vid/related/draft', editLimit, who, can, own, async (req, res) => { try { ok(res, await AI.draftRelated(req.params.vid, req.body || {})); } catch (e) { pfail(res, e); } });
+router.post('/propose/:id/related-apply', editLimit, who, can, async (req, res) => {
+  try { const draft = await P.startEdit(req.emp, req.params.id); ok(res, await reg.applyRelatedEdit(draft, req.body || {}, U(req))); } catch (e) { pfail(res, e); }
+});
 router.post('/propose/versions/:vid/ai-check', editLimit, who, can, own, async (req, res) => { try { ok(res, await AI.check(req.params.vid)); } catch (e) { pfail(res, e); } });
 router.post('/propose/versions/:vid/ai-check/:iid/resolve', editLimit, who, can, own, async (req, res) => { try { ok(res, await AI.resolveIssue(req.params.vid, req.params.iid, req.body || {}, U(req))); } catch (e) { pfail(res, e); } });
 // 上傳 Word → AI 轉成系統格式（背景工作，結果回給編輯器）
