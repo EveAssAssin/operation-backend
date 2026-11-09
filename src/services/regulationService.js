@@ -831,7 +831,7 @@ async function applyRelatedEdit(draft, { ops, change_note, submit } = {}, user) 
   }
 }
 
-module.exports = {
+module.exports = { reviewLink,
   applyRelatedEdit,
   listFindings, ignoreFinding, draftFromFinding, draftAllMeta, getMetaDraftStatus, notifyAuditSummary,
   MAP_ROLES, getReviewer, setReviewer, isReviewer,

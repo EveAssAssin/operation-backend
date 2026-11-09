@@ -183,6 +183,14 @@ router.post('/deductions/:id/reject', edit, async (req, res) => {
 router.get('/reviews/list', view, async (req, res) => { try { ok(res, await svc.listReviews(req.query.status === 'done' ? 'done' : 'pending')); } catch (e) { fail(res, e, 500); } });
 router.post('/reviews/approve-low', edit, async (req, res) => { try { ok(res, await svc.approveAllLow(req.user)); } catch (e) { fail(res, e); } });
 router.get('/reviews/:vid', view, async (req, res) => { try { ok(res, await svc.getReview(req.params.vid)); } catch (e) { fail(res, e, 404); } });
+// 手機審核連結（給審核人自己用；同推播連結，24 小時）2026-11-09
+router.post('/reviews/:vid/mobile-link', view, async (req, res) => {
+  try {
+    const rv = await svc.getReviewer();
+    if (!svc.isReviewer(req.user, rv)) return fail(res, new Error('只有指定的審核人可以產生'), 403);
+    ok(res, { url: svc.reviewLink(rv, 'v', Number(req.params.vid)) });
+  } catch (e) { fail(res, e); }
+});
 router.post('/reviews/:vid/approve', edit, async (req, res) => {
   try { ok(res, await svc.approve(req.params.vid, req.user, { doc: req.body?.doc, notifyStaff: !!req.body?.notify_staff, notice: req.body?.notice })); } catch (e) { fail(res, e); }
 });
