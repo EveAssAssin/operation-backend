@@ -35,15 +35,32 @@ function releaseAt(lastAt, expireHours = DEF.expire_hours) {
   return new Date(at3 >= t.getTime() ? at3 : at3 + 864e5);
 }
 
+const next03After = (t) => { const x = tpe(t); const at3 = Date.UTC(x.getUTCFullYear(), x.getUTCMonth(), x.getUTCDate(), 3, 0, 0) - TZ; return new Date(at3 > new Date(t).getTime() ? at3 : at3 + 864e5); };
+/** 實際預計清除時間：還沒提醒過的要等下一次提醒（白天立刻、晚上等隔天 09:00）之後的 03:00 */
+function releaseFor(v, c = DEF, now = new Date()) {
+  let rel = releaseAt(v.updated_at || v.created_at, c.expire_hours);
+  const reminded = v.last_reminded_at && new Date(v.last_reminded_at) >= new Date(v.updated_at || v.created_at);
+  if (!reminded) {
+    const h = tpeHour(now);
+    let nextRemind = now;
+    if (h < 9 || h >= 21) { const x = tpe(now); nextRemind = new Date(Date.UTC(x.getUTCFullYear(), x.getUTCMonth(), x.getUTCDate() + (h >= 21 ? 1 : 0), 9, 0, 0) - TZ); }
+    const idleAt = new Date(new Date(v.updated_at || v.created_at).getTime() + c.remind_idle_hours * 3600e3);
+    if (idleAt > nextRemind) nextRemind = idleAt;
+    const after = next03After(nextRemind);
+    if (after > rel) rel = after;
+  } else if (rel <= now) rel = next03After(now);
+  return rel;
+}
+
 /** 這份規範現在被誰鎖住（沒有＝null） */
 async function lockOf(regId, c = null) {
   const { data } = await supabase.from('regulation_versions')
-    .select('id, version, status, created_by_id, created_by_name, created_at, updated_at, submitted_at')
+    .select('id, version, status, created_by_id, created_by_name, created_at, updated_at, submitted_at, last_reminded_at')
     .eq('regulation_id', Number(regId)).in('status', ['draft', 'returned', 'pending']).order('version', { ascending: false }).limit(1);
   const v = data && data[0];
   if (!v) return null;
   c = c || await cfg();
-  const rel = v.status === 'pending' ? null : releaseAt(v.updated_at || v.created_at, c.expire_hours);
+  const rel = v.status === 'pending' ? null : releaseFor(v, c);
   return {
     version_id: v.id, status: v.status, by_id: v.created_by_id || null, by_name: String(v.created_by_name || '其他人').replace(/（App）|（企劃 AI）/g, ''),
     started_at: v.created_at, last_at: v.updated_at || v.created_at, submitted_at: v.submitted_at, release_at: rel ? rel.toISOString() : null,
@@ -77,7 +94,7 @@ const titleOf = (v) => v.doc?.title || v.title || `規範 ${v.regulation_id}`;
 /** 提醒一份草稿的作者（會寫 last_reminded_at） */
 async function remindOne(v, kind, c, { dry = false } = {}) {
   const app = await authorApp(v);
-  const rel = releaseAt(v.updated_at || v.created_at, c.expire_hours);
+  const rel = releaseFor({ ...v, last_reminded_at: new Date().toISOString() }, c);   // 這次就是提醒
   const head = kind === 'blocked' ? `⚠️ 你的規範修改「${titleOf(v)}」送審沒有成功，還在草稿` : `⏰ 你的規範修改「${titleOf(v)}」還在草稿，還沒送審`;
   const why = v.blocked_reason?.message ? `\n原因：${String(v.blocked_reason.message).slice(0, 160)}` : (v.status === 'returned' && v.review_note ? `\n退回原因：${String(v.review_note).slice(0, 160)}` : '');
   const msg = `${head}${why}\n下一步：點連結打開草稿 → 依上方說明修改 → 按「送審」；不改了請按「放棄草稿」。\n草稿期間別人不能改這份規範；沒有繼續動作的話 ${fmt(rel)} 會自動清除。\n${linkFor(v, app || '')}`;
@@ -190,4 +207,4 @@ async function touch(versionId) {
   await supabase.from('regulation_versions').update({ updated_at: new Date().toISOString() }).eq('id', Number(versionId)).in('status', OPEN);
 }
 
-module.exports = { cfg, releaseAt, lockOf, lockedError, onBlocked, remindDrafts, cleanupDrafts, restore, wantEdit, touch, fmt };
+module.exports = { cfg, releaseAt, releaseFor, lockOf, lockedError, onBlocked, remindDrafts, cleanupDrafts, restore, wantEdit, touch, fmt };

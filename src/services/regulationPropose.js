@@ -93,11 +93,11 @@ async function createNew(emp, body) { await mustCan(emp); return svc.createNewRe
 
 async function mine(emp) {
   const { data, error } = await supabase.from('regulation_versions')
-    .select('id, regulation_id, version, status, change_note, review_note, reviewed_by_name, reviewed_at, submitted_at, updated_at, created_at, blocked_at, blocked_reason, expired_at, expire_reason, title:doc->>title')
+    .select('id, regulation_id, version, status, change_note, review_note, reviewed_by_name, reviewed_at, submitted_at, updated_at, created_at, blocked_at, blocked_reason, expired_at, expire_reason, last_reminded_at, title:doc->>title')
     .eq('created_by_id', `app:${emp.app_number}`).order('updated_at', { ascending: false, nullsFirst: false }).limit(50);
   if (error) throw new Error('讀取失敗：' + error.message);
   const Care = require('./regulationDraftCare'); const c = await Care.cfg();
-  return data.map((v) => (['draft', 'returned'].includes(v.status) ? { ...v, release_at: Care.releaseAt(v.updated_at || v.created_at, c.expire_hours).toISOString() } : v));
+  return data.map((v) => (['draft', 'returned'].includes(v.status) ? { ...v, release_at: Care.releaseFor(v, c).toISOString() } : v));
 }
 
 module.exports = { lefthandTitles, getRule, setRule, check, mustCan, userOf, ownVersion, startEdit, createNew, mine };

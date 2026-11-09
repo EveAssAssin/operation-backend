@@ -74,7 +74,7 @@ router.get('/propose/:id/lock', who, async (req, res) => {
   } catch (e) { pfail(res, e); }
 });
 router.post('/propose/:id/want-edit', editLimit, who, can, async (req, res) => { try { ok(res, await Care.wantEdit(req.params.id, req.emp)); } catch (e) { pfail(res, e); } });
-router.get('/propose/versions/:vid', who, own, (req, res) => ok(res, req.ver));
+router.get('/propose/versions/:vid', who, own, async (req, res) => { const v = req.ver; const c = await Care.cfg(); ok(res, ['draft', 'returned'].includes(v.status) ? { ...v, release_at: Care.releaseFor(v, c).toISOString() } : v); });
 router.put('/propose/versions/:vid', editLimit, who, can, own, async (req, res) => { try { ok(res, await reg.saveDraft(req.params.vid, req.body || {}, U(req))); } catch (e) { pfail(res, e); } });
 router.post('/propose/versions/:vid/preview', editLimit, who, can, own, async (req, res) => {
   try {
