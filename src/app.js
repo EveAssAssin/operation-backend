@@ -178,6 +178,7 @@ app.use('/api/payment-batch', authenticate, require('./routes/paymentBatch'));
 app.use('/api/internal/regulations', require('./routes/regulationsInternal'));
 // 人員「查規範」（不需登入，用 APP 編號確認身分）
 app.use('/api/regulations-public', require('./routes/regulationsPublic'));
+app.use('/api/regulations-review', require('./routes/regulationsReview'));   // 推播連結審核（票券，不需登入）2026-11-09
 // 規範系統（主檔、版本、送審審核、引用條文扣分）
 app.use('/api/regulations', authenticate, require('./routes/regulations'));
 app.use('/api/petty-cash', authenticate, require('./routes/pettyCash'));

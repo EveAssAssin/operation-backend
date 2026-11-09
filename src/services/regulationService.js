@@ -512,6 +512,12 @@ async function submitDraft(versionId, user) {
   return saved;
 }
 
+/** 給審核人的推播連結：帶 24 小時審核票券，點開直接進審核頁（不用登入）；沒設密鑰才退回後台連結 */
+function reviewLink(reviewer, scope, versionId = 0) {
+  const t = require('./reviewTicket').issue({ scope, versionId, appNumber: reviewer?.app_number });
+  if (!t) return scope === 'v' ? `${FRONTEND}/regulations?tab=review&v=${versionId}` : `${FRONTEND}/regulations?tab=review`;
+  return `${FRONTEND}/rules/review?t=${t}${scope === 'v' ? `&v=${versionId}` : ''}`;
+}
 async function notifyReviewer(v, reg) {
   const reviewer = await getReviewer();
   if (!reviewer?.app_number) { console.warn('[Regulation] 尚未設定審核人，略過推播'); return; }
@@ -521,7 +527,7 @@ async function notifyReviewer(v, reg) {
     `送審人：${v.created_by_name || '—'}　風險：${v.review?.risk || '—'}`,
     ...(v.review?.summary || []).slice(0, 2).map(s => `• ${s}`),
     `目前共 ${pending.length} 件待審`,
-    `${FRONTEND}/regulations?tab=review&v=${v.id}`,
+    reviewLink(reviewer, 'v', v.id),
   ].join('\n');
   await linePush.pushToUser(reviewer.app_number, msg);
 }
@@ -783,7 +789,7 @@ async function draftAllMeta(user, { limit = 600 } = {}) {
     const reviewer = await getReviewer();
     if (reviewer?.app_number && out.submitted) {
       await linePush.pushToUser(reviewer.app_number, `🤖 AI 整理：${out.submitted} 份規範的基本資料（摘要／類型／情境／關鍵字）已送審，都是低風險，可以按「低風險全部通過」。
-${FRONTEND}/regulations?tab=review`).catch(() => {});
+${reviewLink(reviewer, 'p')}`).catch(() => {});
     }
     return out;
   } catch (e) {
