@@ -3,6 +3,7 @@
 // force redeploy 2026-07-07 (adbudget v2 sync)
 
 require('dotenv').config();
+require('./utils/anthropicSafe'); // 送 Claude 前洗掉孤立代理（2026-11-10）
 
 const express    = require('express');
 const cors       = require('cors');
