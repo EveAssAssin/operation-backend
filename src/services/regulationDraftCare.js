@@ -99,9 +99,14 @@ async function remindOne(v, kind, c, { dry = false } = {}) {
   const why = v.blocked_reason?.message ? `\n原因：${String(v.blocked_reason.message).slice(0, 160)}` : (v.status === 'returned' && v.review_note ? `\n退回原因：${String(v.review_note).slice(0, 160)}` : '');
   const msg = `${head}${why}\n下一步：點連結打開草稿 → 依上方說明修改 → 按「送審」；不改了請按「放棄草稿」。\n草稿期間別人不能改這份規範；沒有繼續動作的話 ${fmt(rel)} 會自動清除。\n${linkFor(v, app || '')}`;
   if (dry) return { id: v.id, app, kind, would: true };
-  const r = await push(app, msg, c);
-  // 真的推出去（或根本找不到作者）才記「已提醒」；測試名單外／推播失敗不記 → 不會因此被清除
-  if (r.sent || r.why === 'no_app') await supabase.from('regulation_versions').update({ last_reminded_at: new Date().toISOString(), remind_count: (v.remind_count || 0) + 1 }).eq('id', v.id);
+  let r;
+  if (app) r = await push(app, msg, c);
+  else {   // 找不到作者的 App 編號（後台帳號沒對到員工）→ 改通知規範審核人，請他處理
+    const rv = await require('./regulationService').getReviewer();
+    r = rv?.app_number ? await push(rv.app_number, `（找不到作者 ${v.created_by_name || ''} 的 App 編號，改通知你）\n${msg}`, c) : { sent: false, why: 'no_app' };
+  }
+  // 真的推出去才記「已提醒」；測試名單外／推播失敗不記 → 不會因此被清除
+  if (r.sent) await supabase.from('regulation_versions').update({ last_reminded_at: new Date().toISOString(), remind_count: (v.remind_count || 0) + 1 }).eq('id', v.id);
   return { id: v.id, app, kind, ...r };
 }
 
