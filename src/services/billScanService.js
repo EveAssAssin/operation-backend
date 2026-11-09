@@ -78,6 +78,38 @@ async function resolve(items = []) {
     }
   }
 
+  // 同一個帳單帳戶（data.account_id 相同）的其他帳號：例 遠傳 72357909 底下有十甲／永和／潭子三支金雞，
+  //   帳單是同一個帳戶出的；這支自己還沒入帳過時，掛帳月份接「同帳戶」最後入帳月份（會計 2026-11-09 芽芽回報 #163）
+  const factInfo = {};   // fact_id → { category_id, account_id, store_name }
+  const sibMonths = {};  // fact_id → { months[], names[] }
+  if (factIds.length) {
+    const { data: fs } = await supabase.from('entity_facts').select('id, category_id, store_name, data').in('id', factIds);
+    for (const f of fs || []) factInfo[String(f.id)] = { category_id: f.category_id, store_name: f.store_name, account_id: digitsOf(f.data && f.data.account_id) };
+    const cats = [...new Set(Object.values(factInfo).filter(f => f.account_id).map(f => f.category_id))];
+    if (cats.length) {
+      const { data: all } = await supabase.from('entity_facts').select('id, category_id, store_name, data').in('category_id', cats);
+      const byAcc = {};
+      for (const f of all || []) { const a = digitsOf(f.data && f.data.account_id); if (a) (byAcc[`${f.category_id}|${a}`] = byAcc[`${f.category_id}|${a}`] || []).push(f); }
+      const sibIds = new Set(); const sibOf = {};
+      for (const [fid, fi] of Object.entries(factInfo)) {
+        if (!fi.account_id) continue;
+        const sibs = (byAcc[`${fi.category_id}|${fi.account_id}`] || []).filter(f => String(f.id) !== fid);
+        sibOf[fid] = sibs; sibs.forEach(f => sibIds.add(String(f.id)));
+      }
+      if (sibIds.size) {
+        const { data: ex } = await supabase.from('operational_expenses')
+          .select('fact_id, allocations:operational_expense_allocations(year_month)').in('fact_id', [...sibIds]);
+        const m = {};
+        for (const e of ex || []) for (const a of e.allocations || []) if (a.year_month) (m[String(e.fact_id)] = m[String(e.fact_id)] || []).push(a.year_month);
+        for (const [fid, sibs] of Object.entries(sibOf)) {
+          const months = sibs.flatMap(f => m[String(f.id)] || []).sort();
+          const names = sibs.filter(f => (m[String(f.id)] || []).length).map(f => f.store_name);
+          if (months.length) sibMonths[fid] = { months, names };
+        }
+      }
+    }
+  }
+
   // 沒綁定的：撈全部 facts 猜
   let allFacts = null;
   const out = [];
@@ -90,7 +122,13 @@ async function resolve(items = []) {
     if (factId) {
       const hist = histMap[factId] || [];
       const months = hist.flatMap(h => h.months).sort();
-      if (months.length) { r.last_ym = months[months.length - 1]; r.next_ym = addYm(r.last_ym, 1); }
+      r.allocated = [...new Set(months)];
+      if (months.length) { r.last_ym = months[months.length - 1]; r.next_ym = addYm(r.last_ym, 1); r.last_from = 'self'; }
+      else if (sibMonths[factId]) {
+        const sm = sibMonths[factId].months;
+        r.last_ym = sm[sm.length - 1]; r.next_ym = addYm(r.last_ym, 1);
+        r.last_from = 'account'; r.account_siblings = [...new Set(sibMonths[factId].names)];
+      }
       // 疑似重複：最近 6 個月內有同金額的費用（例：之前手動輸入過這張）
       const amt = Number(it.amount);
       if (!r.duplicate && amt > 0 && r.last_ym) {
@@ -144,6 +182,10 @@ async function commit(items = [], actor) {
         .from('bill_scans').select('id').eq('barcode_key', it.key).eq('bill_ym', it.bill_ym).maybeSingle();
       if (dup) throw new Error('此帳單已入帳過');
 
+      if (it.period_from || it.period_to) {
+        const D = /^\d{4}-\d{2}-\d{2}$/;
+        if (!D.test(it.period_from || '') || !D.test(it.period_to || '') || it.period_from > it.period_to) throw new Error('帳單區間有誤（起日要早於迄日）');
+      }
       const range = (it.period_from && it.period_to)
         ? { from: it.period_from, to: it.period_to }
         : prevMonthRange(it.bill_ym);
