@@ -139,7 +139,7 @@ async function remindDrafts({ mode = 'idle', dry = false, onlyIds = null, now = 
   const h = tpeHour(now);
   if (mode === 'idle' && (h < 9 || h >= 21) && !onlyIds) return { skipped: 'night' };
   const rows = await openDrafts(onlyIds);
-  const out = [];
+  const out = [], due = [];
   for (const v of rows) {
     const last = new Date(v.updated_at || v.created_at).getTime();
     if (mode === 'idle') {
@@ -148,7 +148,25 @@ async function remindDrafts({ mode = 'idle', dry = false, onlyIds = null, now = 
     } else if (mode === 'daily') {
       if (v.last_reminded_at && now.getTime() - new Date(v.last_reminded_at).getTime() < 3600e3) continue;   // 1 小時內剛提醒過就不重複
     }
-    out.push(await remindOne(v, mode, c, { dry }));
+    due.push(v);
+  }
+  // 同一個人多份草稿 → 合成一則（2026-11-09：一人 3 份就推 3 則太吵）
+  const byApp = new Map();
+  for (const v of due) { const app = (await authorApp(v)) || ''; if (!byApp.has(app)) byApp.set(app, []); byApp.get(app).push(v); }
+  for (const [app, list] of byApp) {
+    if (list.length === 1 || !app) { for (const v of list) out.push(await remindOne(v, mode, c, { dry })); continue; }
+    const lines = list.map((v, i) => {
+      const rel = releaseFor({ ...v, last_reminded_at: new Date().toISOString() }, c);
+      const why = v.blocked_reason?.message ? `（送審沒過：${String(v.blocked_reason.message).slice(0, 60)}）` : v.status === 'returned' ? '（被退回）' : '';
+      return `${i + 1}. 「${titleOf(v)}」${why}　${fmt(rel)} 自動清除\n${linkFor(v, app)}`;
+    });
+    const msg = `⏰ 你有 ${list.length} 份規範修改還在草稿，還沒送審：\n${lines.join('\n')}\n下一步：點連結打開 → 修改 → 按「送審」；不改了請按「放棄草稿」。草稿期間別人不能改這些規範。`;
+    if (dry) { for (const v of list) out.push({ id: v.id, app, kind: mode, would: true, grouped: list.length }); continue; }
+    const r = await push(app, msg, c);
+    for (const v of list) {
+      if (r.sent) await supabase.from('regulation_versions').update({ last_reminded_at: new Date().toISOString(), remind_count: (v.remind_count || 0) + 1 }).eq('id', v.id);
+      out.push({ id: v.id, app, kind: mode, grouped: list.length, ...r });
+    }
   }
   return { mode, dry, count: out.length, items: out };
 }
