@@ -175,11 +175,13 @@ async function ask(emp, question, history = []) {
     employee_erpid: emp.erpid, employee_name: emp.name, store_name: emp.store_name, question: qtext,
     answer, citations: cited, found,
   }).select('id').maybeSingle();
+  if (!found) require('./aiIssue').track({ ai: 'regulation_ask', unanswered: true, question: qtext, answer, who: emp.app_number || emp.erpid || null, ref: logged?.id ? `q:${logged.id}` : null, topic: (keywords || []).slice(0, 2).join(',') });   // AI 問題紀錄（2026-11-10）
   return { id: logged?.id || null, answer, citations, found, keywords };
 }
 
 async function feedback(emp, id, helpful) {
   must(await supabase.from('regulation_questions').update({ helpful: !!helpful }).eq('id', id).eq('employee_erpid', emp.erpid), '儲存回饋失敗');
+  if (!helpful) { const { data: q } = await supabase.from('regulation_questions').select('question, answer').eq('id', id).maybeSingle(); require('./aiIssue').track({ ai: 'regulation_ask', feedback: -1, question: q?.question, answer: q?.answer, who: emp.app_number || emp.erpid || null, ref: `q:${id}` }); }
   return { ok: true };
 }
 

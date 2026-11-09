@@ -17,9 +17,16 @@ const hashDoc = (doc) => crypto.createHash('sha1').update(JSON.stringify(doc || 
 
 async function claude({ model = MODEL_SMART, system, content, maxTokens = 3000, timeout = 90000 }) {
   if (!enabled()) throw new Error('AI 功能未啟用：請在 Render 設定 ANTHROPIC_API_KEY');
-  const res = await axios.post('https://api.anthropic.com/v1/messages', {
-    model, max_tokens: maxTokens, system, messages: [{ role: 'user', content }],
-  }, { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout });
+  let res;
+  try {
+    res = await axios.post('https://api.anthropic.com/v1/messages', {
+      model, max_tokens: maxTokens, system, messages: [{ role: 'user', content }],
+    }, { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout });
+  } catch (e) {   // AI 問題紀錄（2026-11-10）：規範 AI（協助修改／檢查／巡檢）呼叫失敗
+    const m = e.response?.data?.error?.message || e.message;
+    require('./aiIssue').track({ ai: 'regulation_ai', tool: 'claude', error: m, timed_out: e.code === 'ECONNABORTED' || /timeout/i.test(m), question: String(system || '').slice(0, 60) });
+    throw e;
+  }
   return (res.data.content || []).map(c => c.text || '').join('').trim();
 }
 function parseJson(text) {

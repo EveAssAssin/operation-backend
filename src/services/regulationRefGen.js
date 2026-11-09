@@ -83,7 +83,7 @@ function start(owner, opts) {
   jobs.set(id, { owner: String(owner), status: 'running', at: Date.now() });
   generate(opts || {})
     .then(result => jobs.set(id, { owner: String(owner), status: 'done', result, at: Date.now() }))
-    .catch(e => { const m = e.response?.data?.error?.message || e.message; console.warn('[RegRefGen] 失敗：', m); jobs.set(id, { owner: String(owner), status: 'error', error: m, at: Date.now() }); });
+    .catch(e => { const m = e.response?.data?.error?.message || e.message; console.warn('[RegRefGen] 失敗：', m); require('./aiIssue').track({ ai: 'regulation_ai', tool: 'refgen', error: m, question: String((opts && (opts.title || opts.requirement)) || '').slice(0, 200), who: String(owner) }); jobs.set(id, { owner: String(owner), status: 'error', error: m, at: Date.now() }); });
   for (const [k, v] of jobs) if (Date.now() - v.at > 3 * 3600e3) jobs.delete(k);
   return { job: id };
 }

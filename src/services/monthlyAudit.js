@@ -293,7 +293,8 @@ async function explain(ym, store) {
     model: process.env.AUDIT_AI_MODEL || 'claude-haiku-4-5', max_tokens: 700,
     system: '你是眼鏡連鎖門市的會計助理。根據提供的月報數字與系統挑出的提醒，用繁體中文寫給會計看：先一句總結，再列出最值得先查的 3 件事（每件一行，說明為什麼可疑、可能原因），最後列 2～3 個要問門市或廠商的具體問題。只根據提供的資料，不要編造數字；資料不足就說不知道。',
     messages: [{ role: 'user', content: JSON.stringify(facts) }],
-  }, { headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 30000 });
+  }, { headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout: 30000 })
+    .catch((e) => { require('./aiIssue').track({ ai: 'audit_ai', tool: 'explain', error: e.response?.data?.error?.message || e.message, timed_out: e.code === 'ECONNABORTED', question: `${store} ${ym} 月報 AI 說明` }); throw e; });   // AI 問題紀錄（2026-11-10）
   const text = (res.data.content || []).map((c) => c.text || '').join('').trim();
   return { enabled: true, text };
 }
