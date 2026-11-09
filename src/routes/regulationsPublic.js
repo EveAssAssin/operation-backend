@@ -44,9 +44,16 @@ const storage = require('../services/storageService');
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
 const editLimit = rateLimit({ windowMs: 10 * 60 * 1000, max: 120, standardHeaders: true, legacyHeaders: false,
   message: { success: false, message: '操作太頻繁，請過幾分鐘再試' } });
-const pfail = (res, e) => fail(res, e, e.status || 400);
+const pfail = (res, e) => res.status(e.status || 400).json({ success: false, message: e.message, ...(e.code ? { code: e.code } : {}), ...(e.lock ? { lock: e.lock } : {}) });
 const can = async (req, res, next) => { try { req.can = await P.mustCan(req.emp); next(); } catch (e) { pfail(res, e); } };
-const own = async (req, res, next) => { try { req.ver = await P.ownVersion(req.emp, req.params.vid); next(); } catch (e) { pfail(res, e); } };
+const Care = require('../services/regulationDraftCare');
+const own = async (req, res, next) => {
+  try {
+    req.ver = await P.ownVersion(req.emp, req.params.vid);
+    if (req.method !== 'GET') await Care.touch(req.params.vid);   // 有動作＝更新「最後動作」，提醒／自動清除依這個算
+    next();
+  } catch (e) { pfail(res, e); }
+};
 const U = (req) => P.userOf(req.emp);
 
 router.get('/propose/me', who, async (req, res) => {
@@ -59,6 +66,14 @@ router.get('/propose/me', who, async (req, res) => {
 });
 router.post('/propose/new', editLimit, who, can, async (req, res) => { try { ok(res, await P.createNew(req.emp, req.body || {})); } catch (e) { pfail(res, e); } });
 router.post('/propose/:id/draft', editLimit, who, can, async (req, res) => { try { ok(res, await P.startEdit(req.emp, req.params.id)); } catch (e) { pfail(res, e); } });
+// 編輯鎖：打開規範就先問（顯示「〇〇 正在修改」）；也想改 → 推播給鎖住的人（2026-11-09）
+router.get('/propose/:id/lock', who, async (req, res) => {
+  try {
+    const lock = await Care.lockOf(req.params.id);
+    ok(res, lock ? { ...lock, mine: String(lock.by_id || '') === `app:${req.emp.app_number}` } : null);
+  } catch (e) { pfail(res, e); }
+});
+router.post('/propose/:id/want-edit', editLimit, who, can, async (req, res) => { try { ok(res, await Care.wantEdit(req.params.id, req.emp)); } catch (e) { pfail(res, e); } });
 router.get('/propose/versions/:vid', who, own, (req, res) => ok(res, req.ver));
 router.put('/propose/versions/:vid', editLimit, who, can, own, async (req, res) => { try { ok(res, await reg.saveDraft(req.params.vid, req.body || {}, U(req))); } catch (e) { pfail(res, e); } });
 router.post('/propose/versions/:vid/preview', editLimit, who, can, own, async (req, res) => {

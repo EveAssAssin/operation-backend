@@ -46,6 +46,8 @@ const ok   = (res, data) => res.json({ success: true, data });
 const fail = (res, e, code = 400) => { console.error('[Regulations]', e.message); res.status(code).json({ success: false, message: e.message }); };
 const view = authorizeModule('regulations', 'view');
 const edit = authorizeModule('regulations', 'edit');
+// 草稿有寫入動作＝更新「最後動作」時間（提醒／自動清除依這個算，2026-11-09）
+router.use('/versions/:vid', (req, res, next) => { if (req.method !== 'GET' && /^\d+$/.test(req.params.vid)) require('../services/regulationDraftCare').touch(req.params.vid).catch(() => {}); next(); });
 
 // ── 設定 ──
 router.get('/settings', view, async (req, res) => {
@@ -202,7 +204,26 @@ router.post('/versions/:vid/preview', edit, async (req, res) => {
 });
 router.post('/versions/:vid/submit', edit, async (req, res) => { try { ok(res, await svc.submitDraft(req.params.vid, req.user)); } catch (e) { fail(res, e); } });
 router.post('/versions/:vid/discard', edit, async (req, res) => { try { ok(res, await svc.discardDraft(req.params.vid)); } catch (e) { fail(res, e); } });
-router.post('/:id/draft', edit, async (req, res) => { try { ok(res, await svc.createDraft(req.params.id, req.user)); } catch (e) { fail(res, e); } });
+// 有別人在改 → 409＋鎖資訊；super_admin 帶 takeover:true 才能進別人的草稿（2026-11-09；以前會直接進到別人的草稿）
+const Care = require('../services/regulationDraftCare');
+router.post('/:id/draft', edit, async (req, res) => {
+  try {
+    const lock = await Care.lockOf(req.params.id);
+    if (lock && lock.status !== 'pending' && String(lock.by_id || '') !== String(req.user?.id || '') && !(req.body?.takeover && req.user?.role === 'super_admin')) {
+      return res.status(409).json({ success: false, code: 'LOCKED', message: lock.text, lock });
+    }
+    ok(res, await svc.createDraft(req.params.id, req.user));
+  } catch (e) { fail(res, e); }
+});
+router.get('/:id/lock', view, async (req, res) => { try { ok(res, await Care.lockOf(req.params.id)); } catch (e) { fail(res, e); } });
+router.post('/versions/:vid/restore', edit, async (req, res) => { try { ok(res, await Care.restore(req.params.vid)); } catch (e) { res.status(e.status || 400).json({ success: false, message: e.message, lock: e.lock }); } });
+router.get('/drafts/expired', view, async (req, res) => {
+  try {
+    const { data, error } = await require('../config/supabase').from('regulation_versions').select('id, regulation_id, version, created_by_name, expired_at, expire_reason, title:doc->>title')
+      .eq('status', 'expired').order('expired_at', { ascending: false }).limit(100);
+    if (error) throw new Error(error.message); ok(res, data);
+  } catch (e) { fail(res, e, 500); }
+});
 
 // ── 查詢 ──
 router.get('/clauses', view, async (req, res) => { try { ok(res, await svc.searchClauses({ q: req.query.q, regulationId: req.query.regulation_id })); } catch (e) { fail(res, e, 500); } });
@@ -215,6 +236,13 @@ router.get('/categories', view, async (req, res) => {
   } catch (e) { fail(res, e, 500); }
 });
 router.get('/', view, async (req, res) => { try { ok(res, await svc.listRegulations(req.query)); } catch (e) { fail(res, e, 500); } });
-router.get('/:id', view, async (req, res) => { try { ok(res, await svc.getRegulation(req.params.id)); } catch (e) { fail(res, e, 404); } });
+router.get('/:id', view, async (req, res) => {
+  try {
+    const d = await svc.getRegulation(req.params.id);
+    const lock = await Care.lockOf(req.params.id);   // 誰在改、最後動作、何時自動釋放（2026-11-09）
+    ok(res, { ...d, lock, lock_mine: !!(lock && String(lock.by_id || '') === String(req.user?.id || '')) });
+  } catch (e) { fail(res, e, 404); }
+});
+router.post('/:id/want-edit', edit, async (req, res) => { try { ok(res, await Care.wantEdit(req.params.id, { app_number: `u:${req.user?.id}`, name: req.user?.name || '後台人員' })); } catch (e) { fail(res, e); } });
 
 module.exports = router;

@@ -220,6 +220,7 @@ const { startFollowUpNotifyJob }              = require('./jobs/notifyRecruitmen
 const { startAppointedUnitJobs }              = require('./jobs/syncAppointedUnits');
 const { startScheduledNotifyDispatcher }      = require('./jobs/scheduledNotifyDispatcher');
 const { startRegulationAuditJob }            = require('./jobs/regulationAudit');
+const { startRegulationDraftCareJob }        = require('./jobs/regulationDraftCare');
 const { init: initHolidays }                  = require('./services/taiwanHolidayService');
 const { runMigrations }                       = require('./lib/migrator');
 
@@ -250,6 +251,7 @@ app.use((err, req, res, next) => {
   // 2. 啟動排程任務
   startScheduledSync();
   startRegulationAuditJob();
+  startRegulationDraftCareJob();     // 規範草稿提醒（每 15 分／09:30）＋03:00 自動清除
   startLineUidScheduledSync();
   startBillingScheduledSync();
   startChiLensSyncJob();             // 每天 02:30 路奇鏡片帳單（上月＋本月）

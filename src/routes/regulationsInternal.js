@@ -66,4 +66,29 @@ router.get('/job/:id', async (req, res) => {
   } catch (e) { fail(res, e); }
 });
 
+
+// ── 規範草稿提醒／清除：手動跑（驗收用；only_ids 只處理指定版本）2026-11-09 ──
+//   POST /drafts/jobs { job: remind_idle|remind_daily|cleanup, dry, only_ids:[] }
+//   POST /drafts/notify-reviewer { version_id } → 重送一次「送審通知」給審核人（report_settings.regulation_reviewer）
+router.post('/drafts/jobs', async (req, res) => {
+  try {
+    const Care = require('../services/regulationDraftCare');
+    const b = req.body || {}; const onlyIds = Array.isArray(b.only_ids) && b.only_ids.length ? b.only_ids : null;
+    const dry = b.dry !== false;
+    if (!onlyIds && !dry) return fail(res, Object.assign(new Error('非 dry 一定要帶 only_ids'), { status: 400 }));
+    const r = b.job === 'cleanup' ? await Care.cleanupDrafts({ dry, onlyIds })
+      : await Care.remindDrafts({ mode: b.job === 'remind_daily' ? 'daily' : 'idle', dry, onlyIds });
+    ok(res, r);
+  } catch (e) { fail(res, e); }
+});
+router.post('/drafts/notify-reviewer', async (req, res) => {
+  try {
+    const supabase = require('../config/supabase');
+    const v = await reg.getVersion(Number(req.body?.version_id));
+    const { data: r } = await supabase.from('regulations').select('*').eq('id', v.regulation_id).single();
+    await reg.notifyReviewer(v, r);
+    ok(res, { sent_to: (await reg.getReviewer()).name });
+  } catch (e) { fail(res, e); }
+});
+
 module.exports = router;

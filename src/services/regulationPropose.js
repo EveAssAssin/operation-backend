@@ -83,22 +83,21 @@ async function ownVersion(emp, vid) {
 
 async function startEdit(emp, regId) {
   await mustCan(emp);
-  const { open_draft: od } = await svc.getRegulation(regId);
-  // getRegulation 的版本清單沒有 created_by_id → 一定要讀完整版本再比，否則連「自己的草稿」也被擋（芽芽回報 #124）
-  const open_draft = od ? await svc.getVersion(od.id) : null;
-  if (open_draft && String(open_draft.created_by_id || '') !== `app:${emp.app_number}`) {
-    throw new Error(open_draft.status === 'pending' ? '這份規範已有修改在送審中，審核完成前不能再提' : `這份規範 ${open_draft.created_by_name || '其他人'} 正在修改中，請等他送審完成`);
-  }
+  // 有人在改／送審中 → 回 409＋鎖資訊（誰、何時開始、最後動作、何時自動釋放），App 當下就顯示（2026-11-09）
+  const Care = require('./regulationDraftCare');
+  const lock = await Care.lockOf(regId);
+  if (lock && String(lock.by_id || '') !== `app:${emp.app_number}`) throw Care.lockedError(lock);
   return svc.createDraft(regId, userOf(emp));
 }
 async function createNew(emp, body) { await mustCan(emp); return svc.createNewRegulation(body || {}, userOf(emp)); }
 
 async function mine(emp) {
   const { data, error } = await supabase.from('regulation_versions')
-    .select('id, regulation_id, version, status, change_note, review_note, reviewed_by_name, reviewed_at, submitted_at, updated_at, created_at, title:doc->>title')
+    .select('id, regulation_id, version, status, change_note, review_note, reviewed_by_name, reviewed_at, submitted_at, updated_at, created_at, blocked_at, blocked_reason, expired_at, expire_reason, title:doc->>title')
     .eq('created_by_id', `app:${emp.app_number}`).order('updated_at', { ascending: false, nullsFirst: false }).limit(50);
   if (error) throw new Error('讀取失敗：' + error.message);
-  return data;
+  const Care = require('./regulationDraftCare'); const c = await Care.cfg();
+  return data.map((v) => (['draft', 'returned'].includes(v.status) ? { ...v, release_at: Care.releaseAt(v.updated_at || v.created_at, c.expire_hours).toISOString() } : v));
 }
 
 module.exports = { lefthandTitles, getRule, setRule, check, mustCan, userOf, ownVersion, startEdit, createNew, mine };
