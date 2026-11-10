@@ -171,6 +171,7 @@ async function check(versionId) {
 4. 缺漏：改了時間／金額卻沒寫生效日、提到的事項沒有說明怎麼做
 5. 範圍：適用對象寫得太寬或太窄（例如海外門市、辦公室人員）
 只回報真的有問題的，沒有就給空陣列；不要為了湊數挑小毛病。
+寫 title、detail 時用人看得懂的編號：本規範寫「三、2.」（必要時加幾個字點出內容，例「三、2.（簡單生活方案）」）；其他規範寫「《規範名稱》五、9.」。不要在 title、detail 裡寫方括號代碼；代碼只放在 codes 陣列。
 注意：方括號裡的條文代碼（例 [1254-6.1.1]）是永久代碼，條文移到別的章節後代碼「本來就不會變」（扣分紀錄、引用都靠它）；畫面上的編號（六、1.）由系統依位置自動重排。不要回報「代碼跟章節不符／編號錯誤」這類問題。level：會讓人照做出錯或扣分有爭議的用 "warn"，建議性質的用 "info"。
 能直接修的，給 fix（套在「正在修改的規範」上）；要改其他規範的，寫在 other_regs。
 ${STYLE}
@@ -192,9 +193,24 @@ ${OPS_SPEC}
         codes: Array.isArray(x.codes) ? x.codes.slice(0, 10) : [], fix, other_regs: (x.other_regs || []).slice(0, 5) };
     });
   }
-  const ai_checks = { at: new Date().toISOString(), doc_hash: hashDoc(v.doc), issues, resolved: {} };
+  const ai_checks = { at: new Date().toISOString(), doc_hash: hashDoc(v.doc), issues, resolved: {}, code_labels: await otherCodeLabels(issues, v.regulation_id) };
   must(await supabase.from('regulation_versions').update({ ai_checks }).eq('id', versionId), '儲存檢查結果失敗');
   return ai_checks;
+}
+
+/** 其他規範的條文代碼 → 人看得懂的「《規範名稱》五、9.」（本規範的由前端依目前內容即時換算） */
+async function otherCodeLabels(issues, regId) {
+  const txt = JSON.stringify((issues || []).map((i) => [i.title, i.detail, i.codes, i.other_regs]));
+  const codes = [...new Set((txt.match(/\d{2,}-\d+(?:\.\d+)*/g) || []))].slice(0, 80);
+  if (!codes.length) return {};
+  const { data } = await supabase.from('regulation_clauses').select('code, regulation_id, display_no, regulations(title)').in('code', codes).eq('active', true);
+  const out = {};
+  for (const c of data || []) if (c.regulation_id !== regId) out[c.code] = `《${c.regulations?.title || ''}》${c.display_no}`;
+  for (const code of codes) if (!out[code] && !(data || []).some((c) => c.code === code)) {
+    // 現行版找不到這條（被刪了、或 AI 寫錯代碼）
+    const reg = (data || []).length ? null : null; void reg;
+  }
+  return out;
 }
 
 /** 標記某個問題已處理：applied（已套用修正，doc 已存）或 ignored（要原因） */
