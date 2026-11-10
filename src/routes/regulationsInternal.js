@@ -34,13 +34,17 @@ router.post('/clarify', async (req, res) => {
 });
 
 const jobs = new Map();   // id → { owner, status, result, error, at }
+// 同時存 DB（regulation_gen_jobs）：系統重新部署後還查得到結果；跑到一半被重啟的會回「中斷了，請再按一次」
+const supabase = require('../config/supabase');
+const saveJob = (id, j) => supabase.from('regulation_gen_jobs').upsert({ id, owner: j.owner, status: j.status, result: j.result || null, error: j.error || null, updated_at: new Date().toISOString() }).then(() => null, (e) => console.warn('[regInternal] 存工作失敗', e.message));
+const setJob = (id, j) => { jobs.set(id, j); saveJob(id, j); };
 router.post('/generate', async (req, res) => {
   try {
     const { emp, user } = await who(req);
     const b = req.body || {};
     const id = crypto.randomBytes(9).toString('hex');
     const owner = `pa:${emp.app_number}`;
-    jobs.set(id, { owner, status: 'running', at: Date.now() });
+    setJob(id, { owner, status: 'running', at: Date.now() });
     (async () => {
       const g = await RefGen.generate({ reference_ids: b.reference_ids, requirement: b.requirement, title: b.title });
       const title = String(b.title || g.title || '').trim().slice(0, 120) || '未命名規範';
@@ -51,8 +55,8 @@ router.post('/generate', async (req, res) => {
       const v = await reg.saveDraft(v0.id, { doc, change_note: `企劃 AI 依企劃案產生（參考 ${refs}）` }, user);
       return { version_id: v.id, regulation_id: v.regulation_id, version: v.version, title, ai_notes: g.ai_notes, stats: g.stats, references: g.references };
     })()
-      .then((result) => jobs.set(id, { owner, status: 'done', result, at: Date.now() }))
-      .catch((e) => { const m = e.response?.data?.error?.message || e.message; console.warn('[regInternal] 產生失敗：', m); jobs.set(id, { owner, status: 'error', error: m, at: Date.now() }); });
+      .then((result) => setJob(id, { owner, status: 'done', result, at: Date.now() }))
+      .catch((e) => { const m = e.response?.data?.error?.message || e.message; console.warn('[regInternal] 產生失敗：', m); setJob(id, { owner, status: 'error', error: m, at: Date.now() }); });
     for (const [k, v] of jobs) if (Date.now() - v.at > 3 * 3600e3) jobs.delete(k);
     ok(res, { job: id });
   } catch (e) { fail(res, e); }
@@ -60,7 +64,12 @@ router.post('/generate', async (req, res) => {
 router.get('/job/:id', async (req, res) => {
   try {
     const { emp } = await who(req);
-    const j = jobs.get(String(req.params.id));
+    let j = jobs.get(String(req.params.id));
+    if (!j) {
+      const { data } = await supabase.from('regulation_gen_jobs').select('*').eq('id', String(req.params.id)).maybeSingle();
+      if (data) j = { owner: data.owner, status: data.status, result: data.result, error: data.error };
+      if (j && j.status === 'running') j = { ...j, status: 'error', error: '營運部系統中途重新啟動，這次產生中斷了，請再按一次「開始產生」' };
+    }
     if (!j || j.owner !== `pa:${emp.app_number}`) return fail(res, new Error('找不到這個產生工作（營運部系統重新啟動過的話請再按一次）'), 404);
     ok(res, { status: j.status, result: j.result || null, error: j.error || null });
   } catch (e) { fail(res, e); }
