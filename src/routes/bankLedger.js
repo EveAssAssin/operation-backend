@@ -25,6 +25,19 @@ router.get('/accounts', view, async (req, res) => { try { ok(res, await svc.list
 router.post('/accounts', edit, async (req, res) => { try { ok(res, await svc.saveAccount(null, req.body || {}, who(req))); } catch (e) { bad(res, e); } });
 router.patch('/accounts/:id', edit, async (req, res) => { try { ok(res, await svc.saveAccount(req.params.id, req.body || {}, who(req))); } catch (e) { bad(res, e); } });
 
+// 餘額核對
+router.get('/accounts/:id/verify', view, async (req, res) => { try { ok(res, await svc.verifyAccount(req.params.id)); } catch (e) { bad(res, e); } });
+
+// 網銀帳密（查看要輸入查看密碼）
+const cred = require('../services/bankCredService');
+const isBoss = (req) => ['super_admin', 'operation_lead'].includes(req.user && req.user.role);
+router.get('/cred/status', view, async (req, res) => { try { ok(res, { ...(await cred.status()), can_reset: isBoss(req) }); } catch (e) { bad(res, e); } });
+router.post('/cred/pin', edit, async (req, res) => { try { ok(res, await cred.setPin(req.body || {}, who(req), isBoss(req))); } catch (e) { bad(res, e); } });
+router.post('/cred/check', view, async (req, res) => { try { await cred.checkPin((req.body || {}).pin, who(req)); ok(res, { ok: true }); } catch (e) { bad(res, e); } });
+router.post('/accounts/:id/cred/reveal', view, async (req, res) => { try { ok(res, await cred.reveal(req.params.id, (req.body || {}).pin, who(req))); } catch (e) { bad(res, e); } });
+router.put('/accounts/:id/cred', edit, async (req, res) => { try { ok(res, await cred.save(req.params.id, (req.body || {}).pin, (req.body || {}).fields, who(req))); } catch (e) { bad(res, e); } });
+router.get('/cred/logs', edit, async (req, res) => { try { ok(res, await cred.logs(req.query.account_id)); } catch (e) { bad(res, e); } });
+
 router.post('/import', edit, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) throw new Error('請選檔案');

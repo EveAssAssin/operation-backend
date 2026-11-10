@@ -95,17 +95,31 @@ async function listAccounts() {
   const { data: accs, error } = await supabase.from('bank_accounts').select('*').order('is_active', { ascending: false }).order('sort_order', { ascending: true, nullsFirst: false }).order('bank_name').order('alias');
   if (error) throw new Error(error.message);
   const out = [];
+  const { data: imps } = await supabase.from('bank_imports').select('account_id, created_at, created_by').is('undone_at', null).order('created_at', { ascending: false }).limit(1000);
+  const lastImp = {};
+  for (const i of imps || []) if (!lastImp[i.account_id]) lastImp[i.account_id] = i;
   for (const a of accs || []) {
-    const { data: last } = await supabase.from('bank_txns').select('txn_date, balance').eq('account_id', a.id).eq('status', 'active')
-      .order('txn_date', { ascending: false }).order('ord', { ascending: false }).limit(1);
-    const { count } = await supabase.from('bank_txns').select('id', { count: 'exact', head: true }).eq('account_id', a.id).eq('status', 'active');
-    out.push({ ...a, last_date: last && last[0] ? last[0].txn_date : null, balance: last && last[0] ? Number(last[0].balance) : null, txn_count: count || 0 });
+    const v = await verifyAccount(a);
+    const { cred_enc, ...safe } = a;   // 加密帳密不回前端
+    out.push({ ...safe, has_cred: !!cred_enc, last_date: v.last_date, balance: v.reported_end, computed_balance: v.computed_end,
+      txn_count: v.count, verify: { status: v.status, mismatches: v.mismatches.length, first: v.mismatches[0] || null },
+      last_import_at: lastImp[a.id] ? lastImp[a.id].created_at : null, last_import_by: lastImp[a.id] ? lastImp[a.id].created_by : null });
   }
   return out;
 }
 async function saveAccount(id, b, by) {
   const row = {};
-  for (const k of ['bank_name', 'account_no', 'alias', 'holder', 'note']) if (b[k] !== undefined) row[k] = String(b[k] || '').trim() || null;
+  for (const k of ['bank_name', 'account_no', 'alias', 'holder', 'note', 'bank_url']) if (b[k] !== undefined) row[k] = String(b[k] || '').trim() || null;
+  if (row.bank_url && !/^https?:\/\//i.test(row.bank_url)) row.bank_url = 'https://' + row.bank_url;
+  if (b.opening_date !== undefined) {
+    if (b.opening_date && !/^\d{4}-\d{2}-\d{2}$/.test(b.opening_date)) throw new Error('期初日期格式不對');
+    row.opening_date = b.opening_date || null;
+  }
+  if (b.opening_balance !== undefined) {
+    const n = b.opening_balance === '' || b.opening_balance === null ? null : Number(String(b.opening_balance).replace(/,/g, ''));
+    if (n !== null && !Number.isFinite(n)) throw new Error('期初餘額要是數字');
+    row.opening_balance = n;
+  }
   if (b.is_active !== undefined) row.is_active = !!b.is_active;
   if (b.sort_order !== undefined) row.sort_order = b.sort_order === '' || b.sort_order === null ? null : Number(b.sort_order);
   if (!id) {
@@ -113,11 +127,13 @@ async function saveAccount(id, b, by) {
     row.alias = row.alias || `${row.bank_name}${row.account_no ? ' ' + row.account_no.slice(-4) : ''}`;
     const { data, error } = await supabase.from('bank_accounts').insert({ ...row, created_by: by }).select().single();
     if (error) throw new Error(error.message);
+    delete data.cred_enc;
     return data;
   }
   if (row.alias === null) throw new Error('名稱不能空白');
   const { data, error } = await supabase.from('bank_accounts').update({ ...row, updated_at: now() }).eq('id', id).select().single();
   if (error) throw new Error(error.message);
+  delete data.cred_enc;
   return data;
 }
 // 檔案帳號（可能遮罩 526376***1110）對系統帳戶
@@ -191,11 +207,41 @@ async function importFile({ buffer, fileName, account_id, by }) {
   if (removeIds.length) await supabase.from('bank_txns').update({ status: 'removed', removed_import_id: imp.id, updated_at: now() }).in('id', removeIds);
 
   const breaks = await balanceBreaks(acc.id, p.period_from, p.period_to);
+  const verify = await verifyAccount({ ...acc, ...(await supabase.from('bank_accounts').select('opening_date, opening_balance').eq('id', acc.id).single()).data });
   await supabase.from('bank_imports').update({
     rows_new: toInsert.length, rows_dup: dup, rows_removed: removeIds.length, rows_restored: restoreIds.length, balance_breaks: breaks,
   }).eq('id', imp.id);
   return { import_id: imp.id, account: { id: acc.id, alias: acc.alias }, bank: p.bank, period_from: p.period_from, period_to: p.period_to,
-    rows_total: p.rows.length, rows_new: toInsert.length, rows_dup: dup, rows_removed: removeIds.length, rows_restored: restoreIds.length, balance_breaks: breaks };
+    rows_total: p.rows.length, rows_new: toInsert.length, rows_dup: dup, rows_removed: removeIds.length, rows_restored: restoreIds.length, balance_breaks: breaks,
+    verify: { status: verify.status, mismatches: verify.mismatches.slice(0, 5), reported_end: verify.reported_end, computed_end: verify.computed_end, last_date: verify.last_date } };
+}
+
+// 餘額核對：期初餘額（期初日期那天開始前）＋之後每筆存入－支出 → 跟銀行檔案上的「當下餘額」逐筆比
+//   status：ok（全部對得上）／mismatch（有對不上）／no_opening（沒設期初，只能檢查前後筆接不接得起來）／empty
+async function verifyAccount(acc) {
+  const a = typeof acc === 'string' ? (await supabase.from('bank_accounts').select('*').eq('id', acc).single()).data : acc;
+  const rows = await fetchAll(() => supabase.from('bank_txns').select('id, txn_date, summary, memo, in_amt, out_amt, balance')
+    .eq('account_id', a.id).eq('status', 'active').order('txn_date').order('ord'));
+  const hasOpening = a.opening_date && a.opening_balance != null;
+  const use = hasOpening ? rows.filter((t) => t.txn_date >= a.opening_date) : rows;
+  const mismatches = [];
+  let running = hasOpening ? Number(a.opening_balance) : null;
+  for (const t of use) {
+    const delta = Number(t.in_amt) - Number(t.out_amt);
+    if (running === null) { running = t.balance != null ? Number(t.balance) : delta; continue; }   // 沒期初：第一筆當起點
+    running = r2(running + delta);
+    if (t.balance != null && Math.abs(running - Number(t.balance)) > 0.5) {
+      mismatches.push({ txn_id: t.id, date: t.txn_date, summary: t.summary, memo: t.memo, expected: running, reported: Number(t.balance), diff: r2(Number(t.balance) - running) });
+      running = Number(t.balance);   // 從銀行餘額重新接，下一處差異另外算
+    }
+  }
+  const last = rows[rows.length - 1];
+  const computedEnd = hasOpening ? r2(Number(a.opening_balance) + use.reduce((s, t) => s + Number(t.in_amt) - Number(t.out_amt), 0)) : null;
+  const status = !rows.length ? 'empty' : mismatches.length ? 'mismatch' : hasOpening ? 'ok' : 'no_opening';
+  return { status, mismatches: mismatches.slice(0, 50), count: rows.length, last_date: last ? last.txn_date : null,
+    reported_end: last && last.balance != null ? Number(last.balance) : null, computed_end: computedEnd,
+    opening_date: a.opening_date || null, opening_balance: a.opening_balance != null ? Number(a.opening_balance) : null,
+    before_opening: hasOpening ? rows.length - use.length : 0 };
 }
 
 // 餘額接不起來的地方（上一筆餘額＋存入－支出≠這筆餘額）→ 可能漏匯某段期間
@@ -360,6 +406,6 @@ async function dailySummary({ from, to }) {
 }
 
 module.exports = {
-  CATS, stores, listAccounts, saveAccount, importFile, undoImport, listImports, listTxns, updateTxn, bulkUpdate,
+  CATS, stores, listAccounts, verifyAccount, saveAccount, importFile, undoImport, listImports, listTxns, updateTxn, bulkUpdate,
   listRules, addRule, deleteRule, reapply, storeDeposits, dailySummary, storeFromText, autoCategory, accountMatches,
 };
