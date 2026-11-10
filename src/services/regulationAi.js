@@ -206,10 +206,6 @@ async function otherCodeLabels(issues, regId) {
   const { data } = await supabase.from('regulation_clauses').select('code, regulation_id, display_no, regulations(title)').in('code', codes).eq('active', true);
   const out = {};
   for (const c of data || []) if (c.regulation_id !== regId) out[c.code] = `《${c.regulations?.title || ''}》${c.display_no}`;
-  for (const code of codes) if (!out[code] && !(data || []).some((c) => c.code === code)) {
-    // 現行版找不到這條（被刪了、或 AI 寫錯代碼）
-    const reg = (data || []).length ? null : null; void reg;
-  }
   return out;
 }
 
