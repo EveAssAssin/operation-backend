@@ -183,6 +183,7 @@ app.use('/api/regulations-review', require('./routes/regulationsReview'));   // 
 // 規範系統（主檔、版本、送審審核、引用條文扣分）
 app.use('/api/regulations', authenticate, require('./routes/regulations'));
 app.use('/api/petty-cash', authenticate, require('./routes/pettyCash'));
+app.use('/api/bank-ledger', authenticate, require('./routes/bankLedger'));
 
 // ── 內部同步觸發（部署初期用，確認正常後可移除）──────
 app.post('/api/internal/sync', async (req, res) => {
