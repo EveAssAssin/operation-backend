@@ -108,6 +108,7 @@ router.post('/propose/import-docx', editLimit, who, can, uploadDocx.single('file
 });
 // 參考既有規範＋新需求 → AI 產生新規範；參考清單搜尋（只列上線中的規範名稱）
 const RefGen = require('../services/regulationRefGen');
+router.get('/propose/clauses/lookup', who, can, async (req, res) => { try { ok(res, await AI.lookupClauses(req.query.codes)); } catch (e) { pfail(res, e); } });
 router.get('/propose/ref-list', who, can, async (req, res) => {
   try { ok(res, (await reg.listRegulations({ q: req.query.q, limit: 40 })).map(r => ({ id: r.id, title: r.title, category: r.category }))); } catch (e) { pfail(res, e); }
 });

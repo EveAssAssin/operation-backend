@@ -164,6 +164,9 @@ async function check(versionId) {
   if (changes.length || diff.meta.length) {
     const changeText = changes.slice(0, 30).map(c => `[${c.code}] ${c.kind === 'add' ? '新增' : c.kind === 'del' ? '刪除' : '修改'}\n  原：${c.old || '—'}\n  新：${c.new || '—'}`).join('\n');
     const rel = await findRelated(changeText, v.regulation_id, 40);
+    // 條文裡直接寫了其他規範的代碼（例「依 1254-5.9」）→ 一定把那幾條帶給 AI，避免它誤判「條文不存在」（2026-11-10）
+    const cited = [...new Set((changeText.match(/\d{2,8}-\d+(?:\.\d+)*[a-z]?/g) || []))].filter((c) => !c.startsWith(`${v.regulation_id}-`) && !rel.clauses.some((x) => x.code === c));
+    if (cited.length) { try { const extra = await lookupClauses(cited); for (const x of extra) rel.clauses.push(x.exists ? { code: x.code, regulation_id: x.regulation_id, display_no: x.display_no, text: x.text, regulations: { title: x.title } } : { code: x.code, regulation_id: x.regulation_id, display_no: '（現行版找不到這條）', text: '', regulations: { title: x.title } }); } catch (e) { console.warn('[RegAI] 引用條文查詢失敗', e.message); } }
     const system = `你是眼鏡連鎖公司的規範監督員。有人修改了一份規範，請檢查這次修改造成的問題：
 1. 矛盾：和本規範其他條文前後不一致
 2. 衝突：和其他規範的條文說法不同（時間、金額、負責人、流程）
@@ -198,10 +201,27 @@ ${OPS_SPEC}
   return ai_checks;
 }
 
+/** 條文代碼查原文（AI 檢查卡片點代碼跳出原文用，2026-11-10）：找不到的也回規範名稱（代碼前綴＝規範 id） */
+async function lookupClauses(codesIn) {
+  const codes = [...new Set((Array.isArray(codesIn) ? codesIn : String(codesIn || '').split(',')).map((c) => String(c).trim()).filter((c) => /^\d{1,8}-[\w.]+$/.test(c)))].slice(0, 40);
+  if (!codes.length) return [];
+  const { data } = await supabase.from('regulation_clauses').select('code, regulation_id, display_no, section_title, text, notes, penalty, regulations(title)').in('code', codes).eq('active', true);
+  const by = new Map((data || []).map((c) => [c.code, c]));
+  const missingRegIds = [...new Set(codes.filter((c) => !by.has(c)).map((c) => Number(c.split('-')[0])).filter(Boolean))];
+  const { data: regs } = missingRegIds.length ? await supabase.from('regulations').select('id, title').in('id', missingRegIds) : { data: [] };
+  const regTitle = new Map((regs || []).map((r) => [r.id, r.title]));
+  return codes.map((code) => {
+    const c = by.get(code);
+    if (c) return { code, exists: true, regulation_id: c.regulation_id, title: c.regulations?.title || '', display_no: c.display_no, section_title: c.section_title, text: c.text, notes: c.notes || [], penalty: c.penalty };
+    const rid = Number(code.split('-')[0]);
+    return { code, exists: false, regulation_id: rid || null, title: regTitle.get(rid) || '' };
+  });
+}
+
 /** 其他規範的條文代碼 → 人看得懂的「《規範名稱》五、9.」（本規範的由前端依目前內容即時換算） */
 async function otherCodeLabels(issues, regId) {
   const txt = JSON.stringify((issues || []).map((i) => [i.title, i.detail, i.codes, i.other_regs]));
-  const codes = [...new Set((txt.match(/\d{2,}-\d+(?:\.\d+)*/g) || []))].slice(0, 80);
+  const codes = [...new Set((txt.match(/\d{2,}-\d+(?:\.\d+)*[a-z]?/g) || []))].slice(0, 80);
   if (!codes.length) return {};
   const { data } = await supabase.from('regulation_clauses').select('code, regulation_id, display_no, regulations(title)').in('code', codes).eq('active', true);
   const out = {};
@@ -533,4 +553,4 @@ function normClarify(out) {
     plan: (Array.isArray(out.plan) ? out.plan : []).map(String).filter(Boolean).slice(0, 8), questions };
 }
 
-module.exports = { fixIssue, assistClarify, normClarify, CLARIFY_RULES, draftRelated, metaSuggest, runMetaSuggest, getMetaStatus, enabled, hashDoc, assist, chooseOption, check, resolveIssue, ensureChecked, auditRegulation, runAudit, getAuditStatus, tryOps };
+module.exports = { lookupClauses, fixIssue, assistClarify, normClarify, CLARIFY_RULES, draftRelated, metaSuggest, runMetaSuggest, getMetaStatus, enabled, hashDoc, assist, chooseOption, check, resolveIssue, ensureChecked, auditRegulation, runAudit, getAuditStatus, tryOps };

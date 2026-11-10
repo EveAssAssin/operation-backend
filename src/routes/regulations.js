@@ -46,6 +46,7 @@ const ok   = (res, data) => res.json({ success: true, data });
 const fail = (res, e, code = 400) => { console.error('[Regulations]', e.message); res.status(code).json({ success: false, message: e.message }); };
 const view = authorizeModule('regulations', 'view');
 const edit = authorizeModule('regulations', 'edit');
+router.get('/clauses/lookup', view, async (req, res) => { try { ok(res, await AI.lookupClauses(req.query.codes)); } catch (e) { fail(res, e); } });   // 點條文代碼看原文（2026-11-10）
 // 草稿有寫入動作＝更新「最後動作」時間（提醒／自動清除依這個算，2026-11-09）
 router.use('/versions/:vid', (req, res, next) => { if (req.method !== 'GET' && /^\d+$/.test(req.params.vid)) require('../services/regulationDraftCare').touch(req.params.vid).catch(() => {}); next(); });
 
