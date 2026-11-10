@@ -210,6 +210,39 @@ async function resolveIssue(versionId, issueId, { how, reason }, user) {
   return ac;
 }
 
+/** AI 檢查的問題沒有自動修正（例「不可抗因素定義不明」——AI 不知道公司怎麼定義）→ 人補充資料，AI 照資料寫出修正（2026-11-10）
+ *  回傳更新後的 ai_checks：該 issue 的 fix 換成照補充資料寫的修正、記下 supplement；前端照原本「✓ 套用」流程套用＋存檔＋resolve */
+async function fixIssue(versionId, issueId, { info, doc: liveDoc } = {}, user) {
+  const v = must(await supabase.from('regulation_versions').select('id, regulation_id, status, doc, ai_checks').eq('id', versionId).maybeSingle(), '讀取版本失敗');
+  if (!v) throw new Error('找不到這個版本');
+  if (!['draft', 'returned'].includes(v.status)) throw new Error('只有草稿可以修改');
+  const ac = v.ai_checks; const issue = ac && (ac.issues || []).find((x) => x.id === issueId);
+  if (!issue) throw new Error('找不到這個問題，請重新執行 AI 檢查');
+  const supp = String(info || '').trim();
+  if (!supp) throw new Error('請寫要補充的內容（例：不可抗因素指天災、本人或直系親屬重大傷病住院…）');
+  const doc = liveDoc && liveDoc.sections ? liveDoc : v.doc;
+  const system = `你是眼鏡連鎖公司的規範編輯。AI 檢查發現一個問題，負責人補充了資料，請把補充的資料寫進規範，解決這個問題。
+- 只改解決這個問題需要的條文；可以修改既有條文、在相關條文後新增一條或加「註」。
+- 補充資料是口語，要改寫成規範條文語氣；不要加入補充資料沒有的內容，不確定的不要自己編。
+- 如果同一個用語在多條出現，定義寫一次（放在最先出現的條文或新增一條定義），其他條文維持用詞一致。
+${STYLE}
+${OPS_SPEC}
+只輸出 JSON：{"label":"按鈕文字（15 字內）","ops":[…],"note":"一句話說明怎麼改"}`;
+  const content = [{ type: 'text', text: [
+    '# 正在修改的規範（目前內容）', D.docToPrompt(doc, 26000),
+    '', '# AI 檢查發現的問題', `[${issue.kind}] ${issue.title}`, issue.detail, `相關條文：${(issue.codes || []).join('、') || '—'}`,
+    '', '# 負責人補充的資料', supp,
+  ].join('\n') }];
+  const out = parseJson(await claude({ system, content, maxTokens: 3000 }));
+  const t = tryOps(doc, out.ops || []);
+  if (t.error) throw new Error(`AI 寫的修正套不上去（${t.error}），請換個說法再試一次，或直接在左邊編輯器修改`);
+  if (!t.ops.length) throw new Error('AI 沒有產生修正，請把補充資料寫具體一點');
+  issue.fix = { label: String(out.label || '套用補充後的修正').slice(0, 20), ops: t.ops, preview: t.preview, from_supplement: true, note: out.note || null };
+  issue.supplement = { text: supp.slice(0, 1000), by: user?.name || null, at: new Date().toISOString() };
+  must(await supabase.from('regulation_versions').update({ ai_checks: ac }).eq('id', versionId), '儲存失敗');
+  return ac;
+}
+
 /** 送審前：檢查結果過期就重跑；回傳還沒處理的警告 */
 async function ensureChecked(versionId) {
   if (!enabled()) return { skipped: true, unresolved: [] };
@@ -485,4 +518,4 @@ function normClarify(out) {
     plan: (Array.isArray(out.plan) ? out.plan : []).map(String).filter(Boolean).slice(0, 8), questions };
 }
 
-module.exports = { assistClarify, normClarify, CLARIFY_RULES, draftRelated, metaSuggest, runMetaSuggest, getMetaStatus, enabled, hashDoc, assist, chooseOption, check, resolveIssue, ensureChecked, auditRegulation, runAudit, getAuditStatus, tryOps };
+module.exports = { fixIssue, assistClarify, normClarify, CLARIFY_RULES, draftRelated, metaSuggest, runMetaSuggest, getMetaStatus, enabled, hashDoc, assist, chooseOption, check, resolveIssue, ensureChecked, auditRegulation, runAudit, getAuditStatus, tryOps };

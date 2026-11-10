@@ -122,6 +122,7 @@ router.post('/:id/related-apply', edit, async (req, res) => {
   try { const draft = await svc.createDraft(req.params.id, req.user); ok(res, await svc.applyRelatedEdit(draft, req.body || {}, req.user)); } catch (e) { fail(res, e); }
 });
 router.post('/versions/:vid/ai-check', edit, async (req, res) => { try { ok(res, await AI.check(req.params.vid)); } catch (e) { fail(res, e); } });
+router.post('/versions/:vid/ai-check/:iid/fix', edit, async (req, res) => { try { ok(res, await AI.fixIssue(req.params.vid, req.params.iid, req.body || {}, req.user)); } catch (e) { fail(res, e); } });   // 補充資料→AI 寫修正（2026-11-10）
 router.post('/versions/:vid/ai-check/:iid/resolve', edit, async (req, res) => {
   try { ok(res, await AI.resolveIssue(req.params.vid, req.params.iid, req.body || {}, req.user)); } catch (e) { fail(res, e); }
 });
