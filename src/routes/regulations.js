@@ -43,7 +43,7 @@ const storage = require('../services/storageService');
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024 } });
 
 const ok   = (res, data) => res.json({ success: true, data });
-const fail = (res, e, code = 400) => { console.error('[Regulations]', e.message); res.status(code).json({ success: false, message: e.message }); };
+const fail = (res, e, code = 400) => { if (e.code !== 'AI_CHECKING') console.error('[Regulations]', e.message); res.status(code).json({ success: false, message: e.message, ...(e.code ? { code: e.code } : {}) }); };   // code：AI_CHECKING／AI_UNRESOLVED 給前端判斷（2026-11-11）
 const view = authorizeModule('regulations', 'view');
 const edit = authorizeModule('regulations', 'edit');
 router.get('/clauses/lookup', view, async (req, res) => { try { ok(res, await AI.lookupClauses(req.query.codes)); } catch (e) { fail(res, e); } });   // 點條文代碼看原文（2026-11-10）

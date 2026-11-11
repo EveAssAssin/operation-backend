@@ -185,7 +185,8 @@ ${OPS_SPEC}
       '', '# 這次的修改', changeText || '（只有標題、摘要等欄位變動）', diff.meta.length ? `欄位變動：${JSON.stringify(diff.meta).slice(0, 1500)}` : '',
       '', '# 其他規範中可能相關的條文', relatedToPrompt(rel) || '（沒有找到）',
     ].join('\n') }];
-    const out = parseJson(await claude({ system, content, maxTokens: 4000 }));
+    // 大份規範（全文 26k 字＋相關條文）Sonnet 寫 4000 tokens 常要 60～100 秒：預設 90 秒會逾時（2026-11-11 980／981 送審全卡在這）
+    const out = parseJson(await claude({ system, content, maxTokens: 4000, timeout: 170000 }));
     issues = (out.issues || []).slice(0, 12).map((x, i) => {
       let fix = null;
       if (x.fix && Array.isArray(x.fix.ops) && x.fix.ops.length) {
@@ -279,18 +280,56 @@ ${OPS_SPEC}
 }
 
 /** 送審前：檢查結果過期就重跑；回傳還沒處理的警告 */
-async function ensureChecked(versionId) {
+/** 重跑 AI 檢查＋沿用舊的「已忽略」（同標題） */
+async function freshCheck(versionId, prev) {
+  const prevIgnored = new Map(Object.entries(prev?.resolved || {}).filter(([, r]) => r.how === 'ignored')
+    .map(([id, r]) => [(prev.issues || []).find(i => i.id === id)?.title, r]).filter(([t]) => t));
+  const ac = await check(versionId);
+  let changed = false;
+  ac.issues.forEach(i => { if (prevIgnored.has(i.title)) { ac.resolved[i.id] = prevIgnored.get(i.title); changed = true; } });
+  if (changed) await supabase.from('regulation_versions').update({ ai_checks: ac }).eq('id', versionId);
+  return ac;
+}
+
+// 送審時的 AI 檢查改背景跑（2026-11-11 Louis「寫規範的 AI 一直網路超時」）：
+//   以前送審請求裡同步等 AI 檢查（大份規範 60～100 秒），前端 60 秒就放棄 → 畫面「網路連線異常」、伺服器那邊 90 秒又逾時、什麼都沒存。
+//   現在：檢查過期 → 背景開跑、立刻回 AI_CHECKING；前端每幾秒查一次，檢查好了自動再送審。失敗 → 下一次送審回 AI_CHECK_FAILED 講原因。
+//   同一份草稿＋同一個內容只會有一個背景檢查（重新部署會中斷 → 下次送審自動重跑）。
+const _bg = new Map();
+function bgCheck(versionId, hash, prev) {
+  const k = String(versionId); const cur = _bg.get(k);
+  if (cur && cur.hash === hash && !cur.done) return cur;
+  const job = { hash, started: Date.now(), done: false, error: null };
+  _bg.set(k, job);
+  freshCheck(versionId, prev).then(
+    () => console.log(`[RegAI] 背景 AI 檢查完成 v${k}（${Math.round((Date.now() - job.started) / 1000)} 秒）`),
+    (e) => { job.error = e.message; console.warn(`[RegAI] 背景 AI 檢查失敗 v${k}（${Math.round((Date.now() - job.started) / 1000)} 秒）：`, e.message); },
+  ).finally(() => { job.done = true; });
+  return job;
+}
+function checkStatus(versionId) {
+  const j = _bg.get(String(versionId));
+  return j ? { running: !j.done, error: j.error, seconds: Math.round((Date.now() - j.started) / 1000) } : null;
+}
+
+async function ensureChecked(versionId, { wait = true } = {}) {
   if (!enabled()) return { skipped: true, unresolved: [] };
   const v = must(await supabase.from('regulation_versions').select('doc, ai_checks').eq('id', versionId).maybeSingle(), '讀取版本失敗');
   let ac = v.ai_checks;
-  if (!ac || ac.doc_hash !== hashDoc(v.doc)) {
-    // 保留舊的處理紀錄：同標題的問題沿用「已忽略」
-    const prevIgnored = new Map(Object.entries(ac?.resolved || {}).filter(([, r]) => r.how === 'ignored')
-      .map(([id, r]) => [(ac.issues || []).find(i => i.id === id)?.title, r]).filter(([t]) => t));
-    ac = await check(versionId);
-    let changed = false;
-    ac.issues.forEach(i => { if (prevIgnored.has(i.title)) { ac.resolved[i.id] = prevIgnored.get(i.title); changed = true; } });
-    if (changed) await supabase.from('regulation_versions').update({ ai_checks: ac }).eq('id', versionId);
+  const h = hashDoc(v.doc);
+  if (!ac || ac.doc_hash !== h) {
+    if (wait) ac = await freshCheck(versionId, ac);
+    else {
+      const k = String(versionId); const j = _bg.get(k);
+      if (j && j.done && j.hash === h && j.error) {
+        _bg.delete(k);   // 講一次原因；下一次送審重新跑
+        const e = new Error(`AI 檢查沒有完成（${/timeout|ECONNABORTED/i.test(j.error) ? 'AI 回覆太慢、逾時' : j.error}）。草稿已保留，請再按一次送審重試；一直失敗請回報。`);
+        e.code = 'AI_CHECK_FAILED'; throw e;
+      }
+      const job = bgCheck(versionId, h, ac);
+      const e = new Error(`AI 正在檢查這份草稿（已 ${Math.round((Date.now() - job.started) / 1000)} 秒，大份規範約 1～2 分鐘）。檢查好會自動送審，請先不要關閉畫面。`);
+      e.code = 'AI_CHECKING'; throw e;
+    }
   }
   const unresolved = (ac.issues || []).filter(i => i.level === 'warn' && !ac.resolved?.[i.id]);
   return { ai_checks: ac, unresolved };
@@ -553,4 +592,4 @@ function normClarify(out) {
     plan: (Array.isArray(out.plan) ? out.plan : []).map(String).filter(Boolean).slice(0, 8), questions };
 }
 
-module.exports = { lookupClauses, fixIssue, assistClarify, normClarify, CLARIFY_RULES, draftRelated, metaSuggest, runMetaSuggest, getMetaStatus, enabled, hashDoc, assist, chooseOption, check, resolveIssue, ensureChecked, auditRegulation, runAudit, getAuditStatus, tryOps };
+module.exports = { lookupClauses, fixIssue, assistClarify, normClarify, CLARIFY_RULES, draftRelated, metaSuggest, runMetaSuggest, getMetaStatus, enabled, hashDoc, assist, chooseOption, check, resolveIssue, ensureChecked, checkStatus, auditRegulation, runAudit, getAuditStatus, tryOps };

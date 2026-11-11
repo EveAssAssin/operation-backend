@@ -485,7 +485,8 @@ async function submitDraft(versionId, user) {
   const reg = must(await supabase.from('regulations').select('*').eq('id', v.regulation_id).single(), '讀取規範失敗');
   let oldDoc = { sections: [] };
   if (reg.current_version > 0) oldDoc = (await getVersionByNo(reg.id, reg.current_version)).doc;
-  const review = await analyze(reg.id, oldDoc, v.doc);
+  // AI 摘要（aiReview）放到最後、真的要送出時才跑：AI 檢查背景進行時前端會重送好幾次，不要每次都等 AI 摘要（2026-11-11）
+  const review = await analyze(reg.id, oldDoc, v.doc, { withAi: false });
   if (!review.diff.changes.length && !review.diff.meta.length) throw new Error('沒有任何修改，不需要送審');
   // 被擋下：記原因＋提醒作者（2026-11-09：以前只回一行錯誤，人員不知道下一步，草稿就一直卡著）
   const blocked = async (e) => { try { await require('./regulationDraftCare').onBlocked(versionId, e); } catch (x) { console.warn('[Regulation] 記錄被擋失敗', x.message); } throw e; };
@@ -496,7 +497,7 @@ async function submitDraft(versionId, user) {
   }
   // AI 監督檢查：結果過期就重跑；還有沒處理的警告 → 不能送審
   if (AI.enabled()) {
-    const chk = await AI.ensureChecked(versionId);
+    const chk = await AI.ensureChecked(versionId, { wait: false });   // 過期＝背景檢查、丟 AI_CHECKING（前端輪詢後自動重送）
     if (chk.unresolved.length) {
       const e = new Error(`AI 檢查還有 ${chk.unresolved.length} 個問題沒處理（修正，或忽略並寫原因）：${chk.unresolved.map(i => i.title).join('；')}`);
       e.code = 'AI_UNRESOLVED'; e.issues = chk.unresolved.map(i => ({ title: i.title, detail: String(i.detail || '').slice(0, 300) })); await blocked(e);
@@ -504,6 +505,8 @@ async function submitDraft(versionId, user) {
     const ac = chk.ai_checks;
     review.ai_checks = { at: ac.at, issues: (ac.issues || []).map(i => ({ id: i.id, level: i.level, kind: i.kind, title: i.title, detail: i.detail, codes: i.codes, other_regs: i.other_regs, resolved: ac.resolved?.[i.id] || null })) };
   }
+  const ai = await aiReview(v.doc.title, review.diff, D.riskOf(review.diff));
+  if (ai) { if (ai.summary?.length) review.summary = ai.summary; review.notes = ai.notes || []; review.ai = true; }
   const saved = must(await supabase.from('regulation_versions').update({
     status: 'pending', submitted_at: nowIso(), review, review_note: null, updated_at: nowIso(),
     created_by_name: v.created_by_name || user?.name || null, blocked_at: null, blocked_reason: null,
