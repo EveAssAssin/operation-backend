@@ -3,7 +3,7 @@
 //   GET  /me                 → { scope, version_id, reviewer, expires_at }
 //   GET  /list               → 待審清單（票券範圍 v＝只回那一份）
 //   GET  /:vid               → 審核詳情（同後台 /api/regulations/reviews/:vid）
-//   POST /:vid/approve       { notify_staff, notice }   （不開放修改內容；要改內容請到後台）
+//   POST /:vid/approve       { doc?, notify_staff, notice }   （2026-11-12 Louis：推播連結也能「修改後通過」，同後台 approve）
 //   POST /:vid/return        { reason }
 //   POST /approve-low        低風險全部通過（只有範圍 p 的票券）
 const express = require('express');
@@ -34,7 +34,16 @@ const allow = (req, vid) => {
   throw Object.assign(new Error('這個連結只能審核原本那一份'), { status: 403, code: 'SCOPE' });
 };
 
-router.get('/me', (req, res) => ok(res, { scope: req.ticket.s, version_id: req.ticket.v || null, reviewer: { name: req.user.name }, expires_at: new Date(req.ticket.e * 1000).toISOString() }));
+router.get('/me', async (req, res) => {
+  // roles／categories：審核人「✏️ 修改內容」用的編輯器選項（同後台 /settings、/categories）
+  let categories = [];
+  try {
+    const { data } = await require('../config/supabase').from('regulations').select('category').eq('status', 'active');
+    const m = {}; (data || []).forEach(r => { const k = r.category || '（未分類）'; m[k] = (m[k] || 0) + 1; });
+    categories = Object.entries(m).map(([name, count]) => ({ name, count })).sort((a, b) => a.name.localeCompare(b.name, 'zh-Hant'));
+  } catch (e) { /* 拿不到分類也能審 */ }
+  ok(res, { scope: req.ticket.s, version_id: req.ticket.v || null, reviewer: { name: req.user.name }, expires_at: new Date(req.ticket.e * 1000).toISOString(), roles: svc.MAP_ROLES, categories });
+});
 router.get('/list', async (req, res) => {
   try {
     const rows = await svc.listReviews('pending');
@@ -48,7 +57,7 @@ router.get('/:vid', async (req, res) => {
   try { if (!/^\d+$/.test(req.params.vid)) return fail(res, new Error('版本錯誤'), 400); allow(req, req.params.vid); ok(res, await svc.getReview(req.params.vid)); } catch (e) { fail(res, e, 404); }
 });
 router.post('/:vid/approve', async (req, res) => {
-  try { allow(req, req.params.vid); ok(res, await svc.approve(req.params.vid, req.user, { notifyStaff: !!req.body?.notify_staff, notice: req.body?.notice })); } catch (e) { fail(res, e); }
+  try { allow(req, req.params.vid); ok(res, await svc.approve(req.params.vid, req.user, { doc: req.body?.doc, notifyStaff: !!req.body?.notify_staff, notice: req.body?.notice })); } catch (e) { fail(res, e); }
 });
 router.post('/:vid/return', async (req, res) => {
   try { allow(req, req.params.vid); ok(res, await svc.returnVersion(req.params.vid, req.user, req.body?.reason)); } catch (e) { fail(res, e); }
