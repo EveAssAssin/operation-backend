@@ -8,6 +8,7 @@ const axios    = require('axios');
 const crypto   = require('crypto');
 const supabase = require('../config/supabase');
 const D = require('./regulationDoc');
+const Core = require('./regulationCheckCore');
 
 const MODEL_SMART = process.env.REGULATION_AI_MODEL || 'claude-sonnet-4-5';
 const MODEL_FAST  = process.env.REGULATION_AI_FAST_MODEL || 'claude-haiku-4-5';
@@ -15,12 +16,13 @@ const enabled = () => !!process.env.ANTHROPIC_API_KEY;
 const must = (r, msg) => { if (r.error) throw new Error(`${msg}：${r.error.message}`); return r.data; };
 const hashDoc = (doc) => crypto.createHash('sha1').update(JSON.stringify(doc || {})).digest('hex');
 
-async function claude({ model = MODEL_SMART, system, content, maxTokens = 3000, timeout = 90000 }) {
+async function claude({ model = MODEL_SMART, system, content, maxTokens = 3000, timeout = 90000, temperature }) {
   if (!enabled()) throw new Error('AI 功能未啟用：請在 Render 設定 ANTHROPIC_API_KEY');
   let res;
   try {
     res = await axios.post('https://api.anthropic.com/v1/messages', {
       model, max_tokens: maxTokens, system, messages: [{ role: 'user', content }],
+      ...(temperature === undefined ? {} : { temperature }),   // 監督檢查用 0：同樣內容給同樣結果（2026-11-12）
     }, { headers: { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }, timeout });
   } catch (e) {   // AI 問題紀錄（2026-11-10）：規範 AI（協助修改／檢查／巡檢）呼叫失敗
     const m = e.response?.data?.error?.message || e.message;
@@ -158,23 +160,24 @@ async function check(versionId) {
     const cur = must(await supabase.from('regulation_versions').select('doc').eq('regulation_id', reg.id).eq('version', reg.current_version).maybeSingle(), '讀取現行版失敗');
     oldDoc = cur?.doc || oldDoc;
   }
-  const diff = D.diffDocs(oldDoc, v.doc);
-  const changes = diff.changes.filter(c => c.kind !== 'move');
-  let issues = [];
-  if (changes.length || diff.meta.length) {
+  // 會收斂的檢查（2026-11-12，regulationCheckCore）：只審上次檢查後變動的條文、問題用 kind＋條文代碼當身分、同條文合併、第 3 輪起只擋矛盾／衝突／缺漏
+  const ask = async ({ changes, meta, kept, full }) => {
     const changeText = changes.slice(0, 30).map(c => `[${c.code}] ${c.kind === 'add' ? '新增' : c.kind === 'del' ? '刪除' : '修改'}\n  原：${c.old || '—'}\n  新：${c.new || '—'}`).join('\n');
-    const rel = await findRelated(changeText, v.regulation_id, 40);
+    const rel = await findRelated(changeText || JSON.stringify(meta).slice(0, 1500), v.regulation_id, 40);
     // 條文裡直接寫了其他規範的代碼（例「依 1254-5.9」）→ 一定把那幾條帶給 AI，避免它誤判「條文不存在」（2026-11-10）
     const cited = [...new Set((changeText.match(/\d{2,8}-\d+(?:\.\d+)*[a-z]?/g) || []))].filter((c) => !c.startsWith(`${v.regulation_id}-`) && !rel.clauses.some((x) => x.code === c));
     if (cited.length) { try { const extra = await lookupClauses(cited); for (const x of extra) rel.clauses.push(x.exists ? { code: x.code, regulation_id: x.regulation_id, display_no: x.display_no, text: x.text, regulations: { title: x.title } } : { code: x.code, regulation_id: x.regulation_id, display_no: '（現行版找不到這條）', text: '', regulations: { title: x.title } }); } catch (e) { console.warn('[RegAI] 引用條文查詢失敗', e.message); } }
-    const system = `你是眼鏡連鎖公司的規範監督員。有人修改了一份規範，請檢查這次修改造成的問題：
+    const system = `你是眼鏡連鎖公司的規範監督員。有人修改了一份規範，請檢查「這次修改」造成的問題：
 1. 矛盾：和本規範其他條文前後不一致
 2. 衝突：和其他規範的條文說法不同（時間、金額、負責人、流程）
 3. 模糊：用語無法判斷有沒有做到（例如「通常」「盡量」「適當」）——因為每一條都可能被引用扣分
-4. 缺漏：改了時間／金額卻沒寫生效日、提到的事項沒有說明怎麼做
+4. 缺漏：改了時間／金額卻沒寫生效日、提到的事項沒有說明怎麼做、引用的條文不存在或引錯
 5. 範圍：適用對象寫得太寬或太窄（例如海外門市、辦公室人員）
-只回報真的有問題的，沒有就給空陣列；不要為了湊數挑小毛病。
-寫 title、detail 時用人看得懂的編號：本規範寫「三、2.」（必要時加幾個字點出內容，例「三、2.（簡單生活方案）」）；其他規範寫「《規範名稱》五、9.」。不要在 title、detail 裡寫方括號代碼；代碼只放在 codes 陣列。
+只回報真的有問題的，沒有就給空陣列；不要為了湊數挑小毛病，用詞偏好、換句話說、補修改日期這類不要報。
+${full ? '' : '只檢查「這次的修改」列出的條文；全文只是參考，沒有列在這次修改裡的條文不要回報問題。'}
+「已經提出過的問題」不要重複回報，也不要換個說法再報一次。
+同一條文只回報一個問題；有好幾種改法時，合併成一個 issue、只給一個最好的 fix。
+寫 title、detail 時用人看得懂的編號：本規範寫「三、2.」（必要時加幾個字點出內容，例「三、2.（簡單生活方案）」）；其他規範寫「《規範名稱》五、9.」。不要在 title、detail 裡寫方括號代碼；代碼只放在 codes 陣列（本規範相關條文代碼一定要放）。
 注意：方括號裡的條文代碼（例 [1254-6.1.1]）是永久代碼，條文移到別的章節後代碼「本來就不會變」（扣分紀錄、引用都靠它）；畫面上的編號（六、1.）由系統依位置自動重排。不要回報「代碼跟章節不符／編號錯誤」這類問題。level：會讓人照做出錯或扣分有爭議的用 "warn"，建議性質的用 "info"。
 能直接修的，給 fix（套在「正在修改的規範」上）；要改其他規範的，寫在 other_regs。
 ${STYLE}
@@ -182,24 +185,20 @@ ${OPS_SPEC}
 只輸出 JSON：{"issues":[{"level":"warn","kind":"矛盾|衝突|模糊|缺漏|範圍|其他","title":"一句話標題","detail":"說明","codes":["相關條文代碼"],"fix":{"label":"按鈕上的文字（15 字內）","ops":[…]} 或 null,"other_regs":[{"code":"…","title":"…","suggestion":"…"}]}]}`;
     const content = [{ type: 'text', text: [
       '# 正在修改的規範（修改後全文）', D.docToPrompt(v.doc, 26000),
-      '', '# 這次的修改', changeText || '（只有標題、摘要等欄位變動）', diff.meta.length ? `欄位變動：${JSON.stringify(diff.meta).slice(0, 1500)}` : '',
+      '', `# 這次的修改${full ? '' : '（上次檢查之後又改的條文）'}`, changeText || '（只有標題、摘要等欄位變動）', meta.length ? `欄位變動：${JSON.stringify(meta).slice(0, 1500)}` : '',
+      '', '# 已經提出過的問題（不要重複）', kept.length ? kept.map(i => `- [${i.kind}] ${i.title}（${(i.codes || []).join('、')}）`).join('\n') : '（無）',
       '', '# 其他規範中可能相關的條文', relatedToPrompt(rel) || '（沒有找到）',
     ].join('\n') }];
     // 大份規範（全文 26k 字＋相關條文）Sonnet 寫 4000 tokens 常要 60～100 秒：預設 90 秒會逾時（2026-11-11 980／981 送審全卡在這）
-    const out = parseJson(await claude({ system, content, maxTokens: 4000, timeout: 170000 }));
-    issues = (out.issues || []).slice(0, 12).map((x, i) => {
-      let fix = null;
-      if (x.fix && Array.isArray(x.fix.ops) && x.fix.ops.length) {
-        const t = tryOps(v.doc, x.fix.ops);
-        if (!t.error) fix = { label: x.fix.label || '套用修正', ops: t.ops, preview: t.preview };
-      }
-      return { id: `i${i + 1}`, level: x.level === 'warn' ? 'warn' : 'info', kind: x.kind || '其他', title: x.title || '', detail: x.detail || '',
-        codes: Array.isArray(x.codes) ? x.codes.slice(0, 10) : [], fix, other_regs: (x.other_regs || []).slice(0, 5) };
-    });
-  }
-  const ai_checks = { at: new Date().toISOString(), doc_hash: hashDoc(v.doc), issues, resolved: {}, code_labels: await otherCodeLabels(issues, v.regulation_id) };
-  must(await supabase.from('regulation_versions').update({ ai_checks }).eq('id', versionId), '儲存檢查結果失敗');
-  return ai_checks;
+    const out = parseJson(await claude({ system, content, maxTokens: 4000, timeout: 170000, temperature: 0 }));
+    return out.issues || [];
+  };
+  const ac = await Core.runRound({ prev: v.ai_checks, oldDoc, doc: v.doc, regId: v.regulation_id, ask, validateFix: (ops) => tryOps(v.doc, ops) });
+  ac.doc_hash = hashDoc(v.doc);
+  ac.code_labels = await otherCodeLabels(ac.issues, v.regulation_id);
+  must(await supabase.from('regulation_versions').update({ ai_checks: ac }).eq('id', versionId), '儲存檢查結果失敗');
+  console.log(`[RegAI] 檢查 v${versionId} 第 ${ac.round} 輪：${ac.checked.full ? '完整' : `增量 ${ac.checked.codes.length} 條`}、保留 ${ac.checked.kept}、新 ${ac.checked.fresh}`);
+  return ac;
 }
 
 /** 條文代碼查原文（AI 檢查卡片點代碼跳出原文用，2026-11-10）：找不到的也回規範名稱（代碼前綴＝規範 id） */
@@ -239,7 +238,7 @@ async function resolveIssue(versionId, issueId, { how, reason }, user) {
   ac.resolved = ac.resolved || {};
   if (how === 'reopen') delete ac.resolved[issueId];
   else ac.resolved[issueId] = { how: how === 'applied' ? 'applied' : 'ignored', reason: String(reason || '').trim() || null, by: user?.name || null, at: new Date().toISOString() };
-  if (how === 'applied') ac.doc_hash = hashDoc(v.doc);  // 套用 AI 自己的修正後，不需要重跑整個檢查
+  if (how === 'applied') { ac.doc_hash = hashDoc(v.doc); if (ac.clause_hash) { ac.clause_hash = Core.clauseHashes(v.doc); ac.meta_hash = Core.metaHash(v.doc); } }  // 套用 AI 自己的修正後，不需要重跑；修過的條文當作已檢查（不會下一輪又被挑）
   must(await supabase.from('regulation_versions').update({ ai_checks: ac }).eq('id', versionId), '儲存失敗');
   return ac;
 }
@@ -281,14 +280,8 @@ ${OPS_SPEC}
 
 /** 送審前：檢查結果過期就重跑；回傳還沒處理的警告 */
 /** 重跑 AI 檢查＋沿用舊的「已忽略」（同標題） */
-async function freshCheck(versionId, prev) {
-  const prevIgnored = new Map(Object.entries(prev?.resolved || {}).filter(([, r]) => r.how === 'ignored')
-    .map(([id, r]) => [(prev.issues || []).find(i => i.id === id)?.title, r]).filter(([t]) => t));
-  const ac = await check(versionId);
-  let changed = false;
-  ac.issues.forEach(i => { if (prevIgnored.has(i.title)) { ac.resolved[i.id] = prevIgnored.get(i.title); changed = true; } });
-  if (changed) await supabase.from('regulation_versions').update({ ai_checks: ac }).eq('id', versionId);
-  return ac;
+async function freshCheck(versionId) {
+  return check(versionId);   // 已處理（忽略／套用）的沿用改由 regulationCheckCore 依問題身分（kind＋條文代碼）帶過去（2026-11-12）
 }
 
 // 送審時的 AI 檢查改背景跑（2026-11-11 Louis「寫規範的 AI 一直網路超時」）：
@@ -331,7 +324,7 @@ async function ensureChecked(versionId, { wait = true } = {}) {
       e.code = 'AI_CHECKING'; throw e;
     }
   }
-  const unresolved = (ac.issues || []).filter(i => i.level === 'warn' && !ac.resolved?.[i.id]);
+  const unresolved = Core.blocking(ac);
   return { ai_checks: ac, unresolved };
 }
 
