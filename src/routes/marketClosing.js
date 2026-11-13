@@ -3,6 +3,7 @@
 //   GET  /api/closing/overview?ym=
 //   GET  /api/closing/submissions/:id[?refresh=1]      GET /api/closing/by-store?store=&ym=
 //   PUT  /api/closing/submissions/:id/items/:item      { check_status, check_note }
+//   PUT  /api/closing/submissions/:id/order-returns/:rid { recv: ok|issue|pending, note }（退貨袋：退單不重建要繳回的鏡框逐支清點）
 //   POST /api/closing/submissions/:id/status           { status: reviewing|approved|returned, note }
 //   POST /api/closing/submissions/:id/rating           { rating_closing, rating_expense 1～5, rating_note }（通過後；店長評核讀）
 //   PUT  /api/closing/receipts/:pay_id                 { status, review_note, photos? }
@@ -32,6 +33,7 @@ router.get('/overview', (req, res) => fwd(req, res, 'get', '/overview', { params
 router.get('/by-store', (req, res) => fwd(req, res, 'get', '/by-store', { params: { store: req.query.store, ym: req.query.ym } }));
 router.get('/submissions/:id', (req, res) => fwd(req, res, 'get', `/submissions/${req.params.id}`, { params: { refresh: req.query.refresh } }));
 router.put('/submissions/:id/items/:item', (req, res) => fwd(req, res, 'put', `/submissions/${req.params.id}/items/${req.params.item}`, { data: req.body }));
+router.put('/submissions/:id/order-returns/:rid', (req, res) => fwd(req, res, 'put', `/submissions/${req.params.id}/order-returns/${req.params.rid}`, { data: req.body }));   // 退貨袋逐支清點（2026-11-13）
 router.post('/submissions/:id/status', (req, res) => fwd(req, res, 'post', `/submissions/${req.params.id}/status`, { data: req.body }));
 router.post('/submissions/:id/rating', (req, res) => fwd(req, res, 'post', `/submissions/${req.params.id}/rating`, { data: req.body }));   // 會計評價（2026-10-21）
 router.put('/receipts/:pay_id', (req, res) => fwd(req, res, 'put', `/receipts/${req.params.pay_id}`, { data: req.body }));
