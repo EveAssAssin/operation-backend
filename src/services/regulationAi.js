@@ -74,6 +74,29 @@ async function findRelated(text, excludeRegId, limit = 30) {
   }
   return { keywords, clauses: [...seen.values()].slice(0, limit) };
 }
+/** 其他規範「正在修改中」（草稿／送審中／退回）的條文變動（2026-11-13 Louis：跨規範一起修改時，
+ *  A 規範的草稿改了聚餐費用、B 規範也跟著改；檢查 B 時只看得到 A 的現行版 → 一直報「衝突」卡住送不出去）。
+ *  回 [{ regulation_id, title, status, changes:[{code, kind, old, new}] }]；只取近 14 天有動的，最多 8 份、每份 12 條。 */
+async function pendingOthers(excludeRegId) {
+  const since = new Date(Date.now() - 14 * 86400e3).toISOString();
+  const { data: vs } = await supabase.from('regulation_versions').select('id, regulation_id, status, doc, updated_at, regulations(title, current_version)')
+    .in('status', ['draft', 'pending', 'returned']).neq('regulation_id', excludeRegId).gte('updated_at', since).order('updated_at', { ascending: false }).limit(20);
+  const out = []; const seen = new Set();
+  for (const v of vs || []) {
+    if (seen.has(v.regulation_id) || out.length >= 8) continue;
+    seen.add(v.regulation_id);
+    let oldDoc = { sections: [] };
+    const cv = v.regulations?.current_version || 0;
+    if (cv > 0) { const { data: cur } = await supabase.from('regulation_versions').select('doc').eq('regulation_id', v.regulation_id).eq('version', cv).maybeSingle(); oldDoc = cur?.doc || oldDoc; }
+    let changes = [];
+    try { changes = D.diffDocs(oldDoc, v.doc || { sections: [] }).changes.filter((c) => c.kind !== 'move'); } catch (e) { continue; }
+    if (!changes.length) continue;
+    out.push({ regulation_id: v.regulation_id, title: v.regulations?.title || v.doc?.title || '', status: v.status, changes: changes.slice(0, 12).map((c) => ({ code: c.code, kind: c.kind, old: c.old || '', new: c.new || '' })) });
+  }
+  return out;
+}
+const pendingToPrompt = (list) => list.map((r) => `《${r.title}》（${r.status === 'pending' ? '送審中' : '草稿'}）\n` + r.changes.map((c) => `  [${c.code}] ${c.kind === 'add' ? '新增' : c.kind === 'del' ? '刪除' : '修改'}：${String(c.kind === 'del' ? c.old : c.new).slice(0, 220)}`).join('\n')).join('\n');
+
 const relatedToPrompt = (rel) => rel.clauses.map(c => `[${c.code}]《${c.regulations?.title || ''}》${c.display_no}：${String(c.text).slice(0, 220)}`).join('\n');
 
 async function imageBlock(url) {
@@ -164,6 +187,7 @@ async function check(versionId) {
   const ask = async ({ changes, meta, kept, full }) => {
     const changeText = changes.slice(0, 30).map(c => `[${c.code}] ${c.kind === 'add' ? '新增' : c.kind === 'del' ? '刪除' : '修改'}\n  原：${c.old || '—'}\n  新：${c.new || '—'}`).join('\n');
     const rel = await findRelated(changeText || JSON.stringify(meta).slice(0, 1500), v.regulation_id, 40);
+    let pend = []; try { pend = await pendingOthers(v.regulation_id); } catch (e) { console.warn('[RegAI] 讀修改中的其他規範失敗：', e.message); }
     // 條文裡直接寫了其他規範的代碼（例「依 1254-5.9」）→ 一定把那幾條帶給 AI，避免它誤判「條文不存在」（2026-11-10）
     const cited = [...new Set((changeText.match(/\d{2,8}-\d+(?:\.\d+)*[a-z]?/g) || []))].filter((c) => !c.startsWith(`${v.regulation_id}-`) && !rel.clauses.some((x) => x.code === c));
     if (cited.length) { try { const extra = await lookupClauses(cited); for (const x of extra) rel.clauses.push(x.exists ? { code: x.code, regulation_id: x.regulation_id, display_no: x.display_no, text: x.text, regulations: { title: x.title } } : { code: x.code, regulation_id: x.regulation_id, display_no: '（現行版找不到這條）', text: '', regulations: { title: x.title } }); } catch (e) { console.warn('[RegAI] 引用條文查詢失敗', e.message); } }
@@ -179,6 +203,7 @@ ${full ? '' : '只檢查「這次的修改」列出的條文；全文只是參�
 同一條文只回報一個問題；有好幾種改法時，合併成一個 issue、只給一個最好的 fix。
 寫 title、detail 時用人看得懂的編號：本規範寫「三、2.」（必要時加幾個字點出內容，例「三、2.（簡單生活方案）」）；其他規範寫「《規範名稱》五、9.」。不要在 title、detail 裡寫方括號代碼；代碼只放在 codes 陣列（本規範相關條文代碼一定要放）。
 注意：方括號裡的條文代碼（例 [1254-6.1.1]）是永久代碼，條文移到別的章節後代碼「本來就不會變」（扣分紀錄、引用都靠它）；畫面上的編號（六、1.）由系統依位置自動重排。不要回報「代碼跟章節不符／編號錯誤」這類問題。level：會讓人照做出錯或扣分有爭議的用 "warn"，建議性質的用 "info"。
+其他規範如果列在「正在修改中的其他規範」，那幾條以「修改中」的新內容為準：跟新內容一致就不是衝突（它們是同一批一起改、會一起送審），不要回報；只有跟新內容也不一致才報。
 能直接修的，給 fix（套在「正在修改的規範」上）；要改其他規範的，寫在 other_regs。
 ${STYLE}
 ${OPS_SPEC}
@@ -187,13 +212,28 @@ ${OPS_SPEC}
       '# 正在修改的規範（修改後全文）', D.docToPrompt(v.doc, 26000),
       '', `# 這次的修改${full ? '' : '（上次檢查之後又改的條文）'}`, changeText || '（只有標題、摘要等欄位變動）', meta.length ? `欄位變動：${JSON.stringify(meta).slice(0, 1500)}` : '',
       '', '# 已經提出過的問題（不要重複）', kept.length ? kept.map(i => `- [${i.kind}] ${i.title}（${(i.codes || []).join('、')}）`).join('\n') : '（無）',
-      '', '# 其他規範中可能相關的條文', relatedToPrompt(rel) || '（沒有找到）',
+      '', '# 其他規範中可能相關的條文（現行版）', relatedToPrompt(rel) || '（沒有找到）',
+      '', '# 正在修改中的其他規範（草稿／送審中，會一起生效；衝突以這裡的新內容為準）', pendingToPrompt(pend) || '（沒有）',
     ].join('\n') }];
     // 大份規範（全文 26k 字＋相關條文）Sonnet 寫 4000 tokens 常要 60～100 秒：預設 90 秒會逾時（2026-11-11 980／981 送審全卡在這）
     const out = parseJson(await claude({ system, content, maxTokens: 4000, timeout: 170000, temperature: 0 }));
     return out.issues || [];
   };
-  const ac = await Core.runRound({ prev: v.ai_checks, oldDoc, doc: v.doc, regId: v.regulation_id, ask, validateFix: (ops) => tryOps(v.doc, ops) });
+  // 「衝突」的舊問題：對方規範後來有改（正在修改中，或問題提出後才發布新版）→ 不沿用，重新問（2026-11-13：跨規範一起改會互卡）
+  let staleRegs = new Set();
+  try {
+    const pend = await pendingOthers(v.regulation_id);
+    for (const r of pend) staleRegs.add(Number(r.regulation_id));
+    const prevIssues = (v.ai_checks && v.ai_checks.issues) || [];
+    const otherIds = [...new Set(prevIssues.filter((i) => i.kind === '衝突').flatMap((i) => (i.codes || []).map((c) => Number(String(c).split('-')[0]))).filter((n) => n && n !== Number(v.regulation_id)))];
+    if (otherIds.length) {
+      const { data: regs } = await supabase.from('regulations').select('id, updated_at').in('id', otherIds);
+      const firstSeen = Math.min(...prevIssues.map((i) => Date.parse(i.first_seen_at || '') || Date.now()));
+      for (const r of regs || []) if (Date.parse(r.updated_at || '') > firstSeen) staleRegs.add(Number(r.id));
+    }
+  } catch (e) { console.warn('[RegAI] 判斷衝突前提失敗：', e.message); }
+  const isStale = (i) => i.kind === '衝突' && (i.codes || []).some((c) => staleRegs.has(Number(String(c).split('-')[0])));
+  const ac = await Core.runRound({ prev: v.ai_checks, oldDoc, doc: v.doc, regId: v.regulation_id, ask, validateFix: (ops) => tryOps(v.doc, ops), isStale });
   ac.doc_hash = hashDoc(v.doc);
   ac.code_labels = await otherCodeLabels(ac.issues, v.regulation_id);
   must(await supabase.from('regulation_versions').update({ ai_checks: ac }).eq('id', versionId), '儲存檢查結果失敗');

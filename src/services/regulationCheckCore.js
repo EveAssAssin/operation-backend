@@ -85,15 +85,19 @@ function changedSince(prev, doc) {
  *   oldDoc    ：現行版；doc：草稿
  *   ask(input)：叫 AI，input＝{ changes（要檢查的 diff 項目）, meta, kept（保留的舊問題）, full }，回傳 AI 原始 issues 陣列
  *   validateFix(ops)：回 { ops, preview } 或 { error }
+ *   isStale(issue)：（選填）舊問題的前提變了（例：衝突的那份其他規範後來改了／正在改）→ 不保留、那幾條重新問 AI（2026-11-13）
  */
-async function runRound({ prev: prevIn, oldDoc, doc, regId, ask, validateFix, now = new Date().toISOString() }) {
+async function runRound({ prev: prevIn, oldDoc, doc, regId, ask, validateFix, isStale, now = new Date().toISOString() }) {
   const prev = normalizePrev(prevIn, regId);
   const diff = D.diffDocs(oldDoc || { sections: [] }, doc);
   const allChanges = diff.changes.filter(c => c.kind !== 'move');
   const changed = changedSince(prev, doc);           // null＝完整
   const metaChanged = !prev || !prev.meta_hash || prev.meta_hash !== metaHash(doc);
-  const focus = changed === null ? allChanges : allChanges.filter(c => changed.has(c.code));
-  const focusCodes = new Set(changed === null ? allChanges.map(c => c.code) : [...changed]);
+  // 前提變了的舊問題（isStale）：它涉及的本規範條文也一起重新檢查
+  const staleCodes = new Set();
+  if (prev && changed !== null && isStale) for (const i of prev.issues) if (isStale(i)) for (const c of ownCodes(i.codes, regId)) staleCodes.add(c);
+  const focus = changed === null ? allChanges : allChanges.filter(c => changed.has(c.code) || staleCodes.has(c.code));
+  const focusCodes = new Set(changed === null ? allChanges.map(c => c.code) : [...changed, ...staleCodes]);
 
   // 保留：上一輪的問題，涉及的本規範條文這次都沒再動（沒有本規範代碼的：欄位沒變才保留）
   const kept = [];
@@ -101,13 +105,13 @@ async function runRound({ prev: prevIn, oldDoc, doc, regId, ask, validateFix, no
     for (const i of prev.issues) {
       const own = ownCodes(i.codes, regId);
       const touched = own.length ? own.some(c => focusCodes.has(c)) : metaChanged;
-      if (!touched) kept.push(i);
+      if (!touched && !(isStale && isStale(i))) kept.push(i);
     }
   }
   const keptKeys = new Set(kept.map(i => i.key));
 
   let fresh = [];
-  const needAi = (changed === null ? (allChanges.length || diff.meta.length) : (focus.length || (metaChanged && diff.meta.length)));
+  const needAi = (changed === null ? (allChanges.length || diff.meta.length) : (focus.length || (metaChanged && diff.meta.length) || staleCodes.size));
   if (needAi) {
     const raw = await ask({ changes: focus, meta: metaChanged ? diff.meta : [], kept, full: changed === null });
     fresh = (raw || []).slice(0, 12).map((x) => {

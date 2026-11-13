@@ -98,3 +98,24 @@ test('舊格式 ai_checks（沒有 key／clause_hash）→ 當第一輪：完整
   assert.strictEqual(r.issues[0].is_new, false, '同身分視為之前就有');
   assert.strictEqual(r.resolved[r.issues[0].id]?.how, 'ignored', '舊格式的忽略依身分沿用');
 });
+
+test('⑦ 跨規範一起改：衝突的對方規範正在修改（isStale）→ 不沿用舊衝突、重新問 AI；AI 判定已一致就消失（2026-11-13）', async () => {
+  const d1 = mk({ '1254-1': '新 A', '1254-2': '原 B', '1254-3': '原 C' });
+  let conflict = true;
+  const calls = [];
+  const ask = async ({ changes }) => { calls.push(changes.map(c => c.code)); return conflict ? [issue('1254-1', '衝突', { codes: ['1254-1', '900-4.1'] })] : []; };
+  const r1 = await Core.runRound({ prev: null, oldDoc: published, doc: d1, regId: REG, ask, validateFix: okFix });
+  assert.strictEqual(Core.blocking(r1).length, 1, '第一次有衝突（擋送審）');
+  // 沒有 isStale：條文沒動 → 沿用舊衝突、不叫 AI（舊行為：會卡住）
+  const r2 = await Core.runRound({ prev: r1, oldDoc: published, doc: d1, regId: REG, ask, validateFix: okFix });
+  assert.strictEqual(calls.length, 1); assert.strictEqual(Core.blocking(r2).length, 1);
+  // 對方規範 900 正在改、改完已一致 → isStale 讓 1254-1 重新檢查，AI 不再回報
+  conflict = false;
+  const r3 = await Core.runRound({ prev: r1, oldDoc: published, doc: d1, regId: REG, ask, validateFix: okFix, isStale: (i) => i.kind === '衝突' && i.codes.some(c => c.startsWith('900-')) });
+  assert.deepStrictEqual(calls[1], ['1254-1'], '只重問那條');
+  assert.strictEqual(r3.issues.length, 0, '衝突消失');
+  // 對照：isStale 回 false 的不受影響
+  conflict = true;
+  const r4 = await Core.runRound({ prev: r1, oldDoc: published, doc: d1, regId: REG, ask, validateFix: okFix, isStale: () => false });
+  assert.strictEqual(calls.length, 2, 'isStale false 不叫 AI'); assert.strictEqual(Core.blocking(r4).length, 1);
+});
