@@ -214,4 +214,15 @@ async function voidVoucher(id, by) {
   return true;
 }
 
-module.exports = { meta, employee, post, unpost, voucher, getVoucher, listVouchers, voidVoucher, words };
+// 通用薪資加減項（市場部盤點扣薪等；2026-11-15）：{ source, ym, run_kind, erpid|app_number, code, name, amount(可負), note, by }
+async function payrollAdjust(b) {
+  const source = String(b.source || '');
+  if (!/^market-[a-z]+:[\w:.-]+$/.test(source)) throw new Error('source 不對');
+  return payroll('POST', '/pay-adjustments', { ym: b.ym, erpid: b.erpid || undefined, app_number: b.erpid ? undefined : b.app_number, run_kind: b.run_kind, code: b.code, name: b.name, amount: b.amount, note: b.note, source, by: b.by });
+}
+async function payrollUnadjust(source) {
+  if (!/^market-[a-z]+:[\w:.-]+$/.test(String(source || ''))) throw new Error('source 不對');
+  return payroll('DELETE', `/pay-adjustments?source=${encodeURIComponent(source)}`);
+}
+
+module.exports = { payrollAdjust, payrollUnadjust, meta, employee, post, unpost, voucher, getVoucher, listVouchers, voidVoucher, words };

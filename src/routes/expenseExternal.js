@@ -25,4 +25,7 @@ router.post('/post', w((req) => X.post(req.body || {})));
 router.post('/unpost', w((req) => X.unpost(String((req.body || {}).ref || ''), (req.body || {}).by)));
 router.post('/vouchers', w((req) => X.voucher(req.body || {})));
 router.get('/vouchers/:id', w((req) => X.getVoucher(req.params.id)));
+// 通用薪資加減項（盤點扣薪…）
+router.post('/payroll-adjust', w((req) => X.payrollAdjust(req.body || {})));
+router.post('/payroll-unadjust', w((req) => X.payrollUnadjust(String((req.body || {}).source || ''))));
 module.exports = router;
