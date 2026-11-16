@@ -57,7 +57,7 @@ async function history(store, ym, n) {
     const rows = {};
     for (const g of [...(r.snapshot.left || []), ...(r.snapshot.right || [])]) for (const x of g.rows || []) rows[x.code] = (rows[x.code] || 0) + (Number(x.amount) || 0);
     const t = r.snapshot.totals || {};
-    return { ym: r.ym, rows, income: Number(t.total_in) || 0, receipt: Number(t.receipt_total) || 0 };
+    return { ym: r.ym, rows, income: Number(t.total_in) || 0, receipt: Number(t.receipt_total) || 0, sales: Number(t.sales_total) || 0 };
   });
 }
 
@@ -82,8 +82,14 @@ async function buildStore(store, ym, day, ctx) {
   // 收入（到昨天）：月報的實收（會計還沒填就用訂單業績）＋API 支付
   const rt = rep.totals || {};
   const orderRev = m.glasses_rev + m.contact_rev;
+  // 月中帳面實收會落後（尾款取件才收）→ 會計還沒填實收時：收入＝訂單業績 × 過去幾個月「收入 ÷ 業績」（實收率），訂單不完整的店才用帳面實收
   const receipt = rt.receipt_total != null ? Number(rt.receipt_total) : (rt.book_receipt_total != null ? Number(rt.book_receipt_total) : orderRev);
-  const incomeMtd = receipt + (Number(rt.api_in) || 0) + (Number(rt.extra_in) || 0);
+  const hs = hist.reduce((x, h) => x + h.sales, 0), hi = hist.reduce((x, h) => x + h.income, 0);
+  const collect = hs > 0 ? Math.min(1.3, Math.max(0.6, hi / hs)) : 1;
+  const coverage0 = receipt > 0 ? orderRev / receipt : (orderRev > 0 ? 1 : 0);
+  let incomeBasis = 'receipt';
+  let incomeMtd = receipt + (Number(rt.api_in) || 0) + (Number(rt.extra_in) || 0);
+  if (rt.receipt_total == null && coverage0 >= 0.5 && orderRev > 0) { incomeMtd = orderRev * collect; incomeBasis = 'orders'; }
   // 月底占比：去年同月到這一天的累計業績占比
   let share = d / n, curve = 'days';
   if (ly && ly.days) {
@@ -142,7 +148,7 @@ async function buildStore(store, ym, day, ctx) {
   const notActual = sum('estimate', 'proj') + sum('forecast', 'proj');
   return {
     store, store_name: rep.store_name, ym, day, at: new Date().toISOString(), month_status: rep.status,
-    income: { coverage: Math.round(coverage * 100), mtd: r0(incomeMtd), proj: incomeProj, receipt: r0(receipt), receipt_filled: rt.receipt_total != null, orders: m.orders, glasses_rev: m.glasses_rev, contact_rev: m.contact_rev },
+    income: { basis: incomeBasis, collect: Math.round(collect * 1000) / 10, coverage: Math.round(coverage * 100), mtd: r0(incomeMtd), proj: incomeProj, receipt: r0(receipt), receipt_filled: rt.receipt_total != null, orders: m.orders, glasses_rev: m.glasses_rev, contact_rev: m.contact_rev },
     curve: { share: Math.round(share * 1000) / 1000, method: curve, day: d, days: n },
     rows,
     totals: { cost_mtd: costMtd, cost_proj: costProj, profit_mtd: r0(incomeMtd - costMtd), profit_proj: r0(incomeProj - costProj), est_pct: costProj ? Math.round((notActual / costProj) * 1000) / 10 : 0,
