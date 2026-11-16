@@ -9,6 +9,14 @@ async function run(opts) {
 }
 function startLiveReportDaily() {
   cron.schedule('30 3 * * *', () => { run().catch((e) => console.error('[liveReportDaily]', e.message)); }, { timezone: 'Asia/Taipei' });
+  // 開機 2 分鐘後：昨天的還沒算過（剛上線／03:30 那時剛好在重啟）就補算一次
+  setTimeout(async () => {
+    try {
+      const day = new Date(Date.now() + 8 * 3600e3 - 864e5).toISOString().slice(0, 10);
+      const { count } = await require('../config/supabase').from('live_reports').select('store_erpid', { count: 'exact', head: true }).eq('day', day);
+      if (!count) await run();
+    } catch (e) { console.error('[liveReportDaily@boot]', e.message); }
+  }, 120e3).unref();
   console.log('[liveReportDaily] 已排程：每天 03:30（台北）');
 }
 module.exports = { run, startLiveReportDaily, isRunning: () => running };
