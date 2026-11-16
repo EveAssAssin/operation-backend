@@ -16,7 +16,7 @@ const enabled = () => !!process.env.ANTHROPIC_API_KEY;
 const must = (r, msg) => { if (r.error) throw new Error(`${msg}：${r.error.message}`); return r.data; };
 const hashDoc = (doc) => crypto.createHash('sha1').update(JSON.stringify(doc || {})).digest('hex');
 
-async function claude({ model = MODEL_SMART, system, content, maxTokens = 3000, timeout = 90000, temperature }) {
+async function claude({ model = MODEL_SMART, system, content, maxTokens = 3000, timeout = 90000, temperature, meta = false }) {
   if (!enabled()) throw new Error('AI 功能未啟用：請在 Render 設定 ANTHROPIC_API_KEY');
   let res;
   try {
@@ -29,7 +29,20 @@ async function claude({ model = MODEL_SMART, system, content, maxTokens = 3000, 
     require('./aiIssue').track({ ai: 'regulation_ai', tool: 'claude', error: m, timed_out: e.code === 'ECONNABORTED' || /timeout/i.test(m), question: String(system || '').slice(0, 60) });
     throw e;
   }
-  return (res.data.content || []).map(c => c.text || '').join('').trim();
+  const text = (res.data.content || []).map(c => c.text || '').join('').trim();
+  return meta ? { text, stop: res.data.stop_reason || '' } : text;
+}
+/** 回覆被 max_tokens 截斷時（11-16 #234：編輯助理 65 秒後「格式不正確」＝3 個方案寫太長被切斷），
+ *  把 options 裡最後一個完整的方案之前的部分補成合法 JSON，至少給使用者前面寫完的方案 */
+function salvageOptions(text) {
+  const t = String(text || '').replace(/^```(?:json)?\s*/i, '');
+  const at = []; let i = -1;
+  while ((i = t.indexOf('{"key"', i + 1)) >= 0) at.push(i);
+  for (let k = at.length - 1; k >= 1; k--) {
+    const head = t.slice(0, at[k]).replace(/[\s,]+$/, '');
+    try { const j = JSON.parse(head + ']}'); if (Array.isArray(j.options) && j.options.length) return j; } catch { /* 再往前 */ }
+  }
+  return null;
 }
 function parseJson(text) {
   const t = String(text || '').replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
@@ -137,7 +150,7 @@ async function assist(versionId, { message, image_url, doc: liveDoc }, user) {
   ].join('\n') });
 
   const system = `你是眼鏡連鎖公司的規範編輯助理。使用者會用口語說要怎麼改規範，或上傳照片。
-請先找出這次需求影響到本規範的哪些條文，再給 2～3 個不同做法的方案（例如：只改最小範圍／連同相關條文一起改／加上生效日或過渡說明）。標出你最建議的一個。
+請先找出這次需求影響到本規範的哪些條文，再給 2～3 個不同做法的方案（每個方案只放真的要改的 ops，不要重寫沒改到的條文；說明精簡）（例如：只改最小範圍／連同相關條文一起改／加上生效日或過渡說明）。標出你最建議的一個。
 如果其他規範也有條文需要跟著改，寫在 other_regs（這次不會直接改到）。
 ${STYLE}
 ${OPS_SPEC}
@@ -146,7 +159,15 @@ ${OPS_SPEC}
  "options":[{"key":"A","name":"方案名稱（10 字內）","desc":"這個方案做了什麼、適合什麼情況","recommended":true,"ops":[…],
    "other_regs":[{"code":"…","title":"規範名稱","suggestion":"建議怎麼改"}]}]}`;
 
-  const out = parseJson(await claude({ system, content, maxTokens: 5000 }));
+  // 11-16 #234：5000 tokens 不夠寫 3 個方案（長條文 replace_text 整條重寫）→ 截斷變「格式不正確」；上限拉高、被截斷就救前面完整的方案
+  const r = await claude({ system, content, maxTokens: 16000, timeout: 170000, meta: true });
+  let out;
+  try { out = parseJson(r.text); }
+  catch (e) {
+    out = r.stop === 'max_tokens' ? salvageOptions(r.text) : null;
+    console.warn('[RegAI] assist 回覆解析失敗', { stop: r.stop, len: r.text.length, salvaged: !!out, tail: r.text.slice(-120) });
+    if (!out) throw new Error(r.stop === 'max_tokens' ? 'AI 這次寫太長被截斷了，請把需求拆小一點（一次改一件事）再試' : 'AI 回覆格式不正確，請再試一次');
+  }
   const options = [];
   for (const o of (out.options || []).slice(0, 3)) {
     const t = tryOps(doc, o.ops, image_url);
@@ -625,4 +646,4 @@ function normClarify(out) {
     plan: (Array.isArray(out.plan) ? out.plan : []).map(String).filter(Boolean).slice(0, 8), questions };
 }
 
-module.exports = { lookupClauses, fixIssue, assistClarify, normClarify, CLARIFY_RULES, draftRelated, metaSuggest, runMetaSuggest, getMetaStatus, enabled, hashDoc, assist, chooseOption, check, resolveIssue, ensureChecked, checkStatus, auditRegulation, runAudit, getAuditStatus, tryOps };
+module.exports = { salvageOptions, lookupClauses, fixIssue, assistClarify, normClarify, CLARIFY_RULES, draftRelated, metaSuggest, runMetaSuggest, getMetaStatus, enabled, hashDoc, assist, chooseOption, check, resolveIssue, ensureChecked, checkStatus, auditRegulation, runAudit, getAuditStatus, tryOps };
