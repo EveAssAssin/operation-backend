@@ -137,4 +137,12 @@ router.get('/investor/report', async (req, res) => {
   res.json({ success: true, data: { closed: true, ...v, my: { shares: mine.reduce((a, h) => a + Number(h.shares), 0), amount: me ? r0(me.amount) : null } } });
 });
 
+// 即時月報（店長工具，2026-11-17）：GET /api/external/store-report/live?store=&ym=  最新一天的快照＋本月趨勢（店長、總部都能看，含淨利）
+router.get('/live', async (req, res) => {
+  const store = String(req.query.store || '').trim();
+  if (!store) return bad(res, '缺 store');
+  try { const d = await require('../services/liveReport').latest(store, YM.test(String(req.query.ym || '')) ? req.query.ym : null); res.json({ success: true, data: d }); }
+  catch (e) { bad(res, e.message, 500); }
+});
+
 module.exports = router;
