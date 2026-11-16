@@ -8,14 +8,15 @@
 //   POST /api/closing/submissions/:id/rating           { rating_closing, rating_expense 1～5, rating_note }（通過後；店長評核讀）
 //   PUT  /api/closing/receipts/:pay_id                 { status, review_note, photos? }
 //   GET/PUT /api/closing/templates   POST /api/closing/upload   GET/PUT /api/closing/settings
-// 認證：登入＋operation_staff 以上；呼叫市場部帶 x-internal-key＝MARKET_INTERNAL_KEY，操作者＝x-actor／x-actor-name
+// 認證：登入＋模組 closing（權限管理設定）；呼叫市場部帶 x-internal-key＝MARKET_INTERNAL_KEY，操作者＝x-actor／x-actor-name
 const express = require('express');
 const axios = require('axios');
 const router = express.Router();
-const { authorize } = require('../middleware/auth');
+const { authorizeModule } = require('../middleware/auth');
 
 const MARKET_BASE = process.env.MARKET_BACKEND_URL || 'https://market-backend-0544.onrender.com';
-router.use(authorize('operation_staff', 'operation_lead', 'dept_head', 'super_admin'));
+// 2026-11-17：改用獨立模組 closing（權限管理可以單獨設定；查看＝GET，其他動作要可編輯）
+router.use((req, res, next) => authorizeModule('closing', req.method === 'GET' ? 'view' : 'edit')(req, res, next));
 
 async function fwd(req, res, method, path, { params, data, timeout = 90000 } = {}) {
   const key = process.env.MARKET_INTERNAL_KEY;
