@@ -102,6 +102,19 @@ async function buildStore(store, ym, day, ctx) {
   const histAvg = (code) => (hist.length ? hist.reduce((s, h) => s + (h.rows[code] || 0), 0) / hist.length : 0);
   const histRatio = (code) => { const inc = hist.reduce((s, h) => s + h.income, 0); return inc > 0 ? hist.reduce((s, h) => s + (h.rows[code] || 0), 0) / inc : 0; };
   const raw = { frame: m.frame, lens: m.lens, lens_lab: m.lab_orders * (Number(S.lab_fee) + Number(S.ship_fee)), contact: m.contact };
+  const why = {};
+  const ratioOf = (codes) => { const inc = hist.reduce((x, h) => x + h.income, 0); return inc > 0 ? hist.reduce((x, h) => x + codes.reduce((y, cd) => y + (h.rows[cd] || 0), 0), 0) / inc : 0; };
+  const CODES = { frame: ['frame_hq', 'frame_vendor'], lens: ['lens_hq', 'lens_vendor'], lens_lab: ['lens_lab'], contact: ['contact_hq', 'contact_vendor'] };
+  // ERP 訂單不完整（愛民門市、門市對應不到）→ 這四格改用過去比例 × 本月收入
+  const coverage = receipt > 0 ? orderRev / receipt : (orderRev > 0 ? 1 : 0);
+  if (coverage < 0.5) {
+    for (const k of Object.keys(CODES)) { raw[k] = incomeMtd * ratioOf(CODES[k]); why[k] = `這家店 ERP 訂單只對到收入的 ${Math.round(coverage * 100)}%，改用過去 ${hist.length} 個月占收入 ${Math.round(ratioOf(CODES[k]) * 1000) / 10}%`; }
+  } else if (m.lens_unknown_lines > 0 && m.lens_lines > 0) {
+    // 鏡片成本表還沒填的部分：用過去比例補（依沒成本片數占比）
+    const fill = incomeMtd * ratioOf(CODES.lens) * (m.lens_unknown_lines / m.lens_lines);
+    raw.lens += fill;
+    why.lens = `${m.lens_lines} 片，其中 ${m.lens_unknown_lines} 片成本表還沒填，暫用過去比例補 ${r0(fill).toLocaleString()}`;
+  }
   const rows = [];
   for (const a of accs || []) {
     if (DIVIDEND.includes(a.code) || MERGED.includes(a.code)) continue;
@@ -111,7 +124,7 @@ async function buildStore(store, ym, day, ctx) {
       const f = F[key] || 1;
       const mtd = r0(raw[key] * f);
       rows.push({ code: a.code, key, name: KEY_NAME[key], group: a.group_code, status: 'estimate', mtd, proj: r0(mtd * scale), raw: r0(raw[key]), factor: f,
-        basis: key === 'lens_lab' ? `${m.lab_orders} 張鏡片單 ×（${S.lab_fee}＋${S.ship_fee}）` : key === 'lens' ? `${m.lens_lines} 片${m.lens_unknown_lines ? `（${m.lens_unknown_lines} 片沒有成本）` : ''}` : key === 'frame' ? `${m.frame_unknown ? `${m.frame_unknown} 支型號讀不到成本` : '型號成本'}` : `賣價 × ${Math.round(S.contact_ratio * 100)}%` });
+        basis: why[key] ? why[key] : key === 'lens_lab' ? `${m.lab_orders} 張鏡片單 ×（${S.lab_fee}＋${S.ship_fee}）` : key === 'lens' ? `${m.lens_lines} 片${m.lens_unknown_lines ? `（${m.lens_unknown_lines} 片沒有成本）` : ''}` : key === 'frame' ? `${m.frame_unknown ? `${m.frame_unknown} 支型號讀不到成本` : '型號成本'}` : `賣價 × ${Math.round(S.contact_ratio * 100)}%` });
       continue;
     }
     if ((S.ratio_codes || []).includes(a.code)) {
@@ -129,7 +142,7 @@ async function buildStore(store, ym, day, ctx) {
   const notActual = sum('estimate', 'proj') + sum('forecast', 'proj');
   return {
     store, store_name: rep.store_name, ym, day, at: new Date().toISOString(), month_status: rep.status,
-    income: { mtd: r0(incomeMtd), proj: incomeProj, receipt: r0(receipt), receipt_filled: rt.receipt_total != null, orders: m.orders, glasses_rev: m.glasses_rev, contact_rev: m.contact_rev },
+    income: { coverage: Math.round(coverage * 100), mtd: r0(incomeMtd), proj: incomeProj, receipt: r0(receipt), receipt_filled: rt.receipt_total != null, orders: m.orders, glasses_rev: m.glasses_rev, contact_rev: m.contact_rev },
     curve: { share: Math.round(share * 1000) / 1000, method: curve, day: d, days: n },
     rows,
     totals: { cost_mtd: costMtd, cost_proj: costProj, profit_mtd: r0(incomeMtd - costMtd), profit_proj: r0(incomeProj - costProj), est_pct: costProj ? Math.round((notActual / costProj) * 1000) / 10 : 0,
