@@ -11,6 +11,7 @@
 // 對應規格：outputs/operation_chi_lens_請款整合文件.md（給 chi-lens 團隊）
 
 const supabase = require('../config/supabase');
+const { insertRequest } = require('./requestNo');
 const { notifyOpsNewRequest } = require('./paymentNotifyOps');
 
 // ─────────────────────────────────────────────────
@@ -201,11 +202,7 @@ async function handleRequested(body) {
     ticket_details:            hasNewShape ? ticketDetails : null,
   };
 
-  const { data, error } = await supabase
-    .from('vendor_payment_requests')
-    .insert(insertData)
-    .select('id, request_no')
-    .single();
+  const { data, error } = await insertRequest(insertData, 'id, request_no');   // #263 單號由程式帶
   if (error) throw new Error(`vendor_payment_requests 建立失敗：${error.message}`);
 
   // 通知

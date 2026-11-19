@@ -7,6 +7,7 @@
 //   - 公司付款方資料（單例）
 
 const supabase = require('../config/supabase');
+const { insertRequest } = require('./requestNo');
 const LP = require('./ledgerPost');
 const { notifyMarketStatus } = require('./marketWebhook');
 const { notifyChiLensStatus } = require('./chiLensWebhook');
@@ -182,8 +183,7 @@ async function createRequest(payload, { actorType, actorId }) {
   if (actorType === 'vendor') insertData.created_by_vendor = actorId;
   if (actorType === 'system') insertData.created_by_system = actorId;
 
-  const { data, error } = await supabase.from('vendor_payment_requests')
-    .insert([insertData]).select().single();
+  const { data, error } = await insertRequest(insertData);   // #263 單號由程式帶（當月最大號＋1）
   if (error) throw new Error(error.message);
   return data;
 }

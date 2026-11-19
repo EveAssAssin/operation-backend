@@ -17,6 +17,7 @@
 //     → 回 { success, operation_ref }
 
 const supabase = require('../config/supabase');
+const { insertRequest } = require('./requestNo');
 const { notifyOpsNewRequest } = require('./paymentNotifyOps');
 
 // 全部外部工務師共用一筆 billing_sources；不為每個工務師建 source，避免污染
@@ -132,11 +133,7 @@ async function handleRequested(body) {
     bank_snapshot:             body.bank_info || null,
   };
 
-  const { data, error } = await supabase
-    .from('vendor_payment_requests')
-    .insert(insertData)
-    .select('id, request_no')
-    .single();
+  const { data, error } = await insertRequest(insertData, 'id, request_no');   // #263 單號由程式帶
   if (error) throw new Error(`vendor_payment_requests 建立失敗：${error.message}`);
 
   // 通知營運部主管 + 會計（fire-and-forget）
