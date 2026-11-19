@@ -44,11 +44,35 @@ function salvageOptions(text) {
   }
   return null;
 }
+/** AI 把條文原文照抄進 JSON 字串時，條文裡的半形雙引號（例：取得"晶碩專員"稱號）沒有跳脫 → 整包 JSON 壞掉
+ *  （2026-11-19 營運副理：獎金發放準則怎麼試都「格式不正確」，回覆其實是完整的）。
+ *  修法：字串裡遇到 " 時，看後面第一個非空白字元是不是 , } ] : 或結尾——是才算字串結束，不是就當成內文、補上跳脫；
+ *  順便把字串裡沒跳脫的換行／Tab 補好。只在正常解析失敗時才用。 */
+function repairJson(text) {
+  const t = String(text || ''); let out = ''; let inStr = false;
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (!inStr) { if (c === '"') inStr = true; out += c; continue; }
+    if (c === '\\') { out += c + (t[i + 1] === undefined ? '' : t[i + 1]); i++; continue; }
+    if (c === '\n') { out += '\\n'; continue; }
+    if (c === '\r') continue;
+    if (c === '\t') { out += '\\t'; continue; }
+    if (c === '"') {
+      let j = i + 1; while (j < t.length && /\s/.test(t[j])) j++;
+      if (j >= t.length || ',}]:'.includes(t[j])) { inStr = false; out += c; } else out += '\\"';
+      continue;
+    }
+    out += c;
+  }
+  return out;
+}
 function parseJson(text) {
-  const t = String(text || '').replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+  const t = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
   try { return JSON.parse(t); } catch { /* 往下 */ }
   const a = t.indexOf('{'), b = t.lastIndexOf('}');
-  if (a >= 0 && b > a) { try { return JSON.parse(t.slice(a, b + 1)); } catch { /* 往下 */ } }
+  const body = a >= 0 && b > a ? t.slice(a, b + 1) : t;
+  if (body !== t) { try { return JSON.parse(body); } catch { /* 往下 */ } }
+  try { const j = JSON.parse(repairJson(body)); console.warn('[RegAI] 回覆 JSON 有沒跳脫的引號／換行，已自動修復', { len: body.length }); return j; } catch { /* 往下 */ }
   throw new Error('AI 回覆格式不正確，請再試一次');
 }
 
@@ -65,7 +89,8 @@ const OPS_SPEC = `修改指令（ops）只能用下列格式，條文一律用�
 
 const STYLE = `寫作規則：繁體中文、公司內部規範語氣、一條只講一件事、句子完整。
 不要自己編造數字、金額、日期、門市名稱或人名；需要但使用者沒給的，寫「（請填）」。
-這家公司的每一條規範都可以被引用扣分，所以文字要明確、可判斷有沒有做到。`;
+這家公司的每一條規範都可以被引用扣分，所以文字要明確、可判斷有沒有做到。
+輸出 JSON 時，字串裡的半形雙引號一定要跳脫：原文有 " 的地方寫成 \\"（條文內容照原樣，不要因此改字）。`;
 
 /** 用 AI 抽搜尋關鍵字，再到條文索引找其他規範的相關條文 */
 async function findRelated(text, excludeRegId, limit = 30) {
@@ -646,4 +671,4 @@ function normClarify(out) {
     plan: (Array.isArray(out.plan) ? out.plan : []).map(String).filter(Boolean).slice(0, 8), questions };
 }
 
-module.exports = { salvageOptions, lookupClauses, fixIssue, assistClarify, normClarify, CLARIFY_RULES, draftRelated, metaSuggest, runMetaSuggest, getMetaStatus, enabled, hashDoc, assist, chooseOption, check, resolveIssue, ensureChecked, checkStatus, auditRegulation, runAudit, getAuditStatus, tryOps };
+module.exports = { repairJson, parseJson, salvageOptions, lookupClauses, fixIssue, assistClarify, normClarify, CLARIFY_RULES, draftRelated, metaSuggest, runMetaSuggest, getMetaStatus, enabled, hashDoc, assist, chooseOption, check, resolveIssue, ensureChecked, checkStatus, auditRegulation, runAudit, getAuditStatus, tryOps };
