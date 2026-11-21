@@ -99,20 +99,36 @@ async function holdingsOf(app) {
   const { data } = await supabase.from('store_shareholders').select('store_erpid, shares, from_ym, to_ym, erpid, name').in('erpid', erpids);
   return { erpids, rows: data || [] };
 }
+// 月報檢視者（2026-11-21 Louis：高管 28270106 要「像店長一樣」看全門市已關帳月報，只有金額、不能改）
+// 名單＝report_settings key report_viewers：["客編", …] 或 [{app, name}]；不是股東也能看所有門市，自己的分配欄位留空
+let viewerCache = { at: 0, apps: [] };
+async function isViewer(app) {
+  if (Date.now() - viewerCache.at > 60e3) {
+    const { data } = await supabase.from('report_settings').select('value').eq('key', 'report_viewers').maybeSingle();
+    const v = (data && data.value) || [];
+    viewerCache = { at: Date.now(), apps: (Array.isArray(v) ? v : []).map((x) => String(x && typeof x === 'object' ? x.app : x)) };
+  }
+  return viewerCache.apps.includes(String(app));
+}
 router.get('/investor', async (req, res) => {
   const app = String(req.query.app || '');
   if (!/^\d{4,20}$/.test(app)) return bad(res, '缺客編');
   const { rows } = await holdingsOf(app);
-  const stores = [...new Set(rows.map((r) => r.store_erpid))];
-  if (!stores.length) return res.json({ success: true, data: { name: null, stores: [] } });
+  const viewer = await isViewer(app);
+  let stores = [...new Set(rows.map((r) => r.store_erpid))];
+  if (viewer) {
+    const { data: all } = await supabase.from('store_month_reports').select('store_erpid').eq('status', 'closed').limit(5000);
+    stores = [...new Set([...stores, ...(all || []).map((x) => x.store_erpid)])];
+  }
+  if (!stores.length) return res.json({ success: true, data: { name: null, stores: [], viewer } });
   const [{ data: deps }, { data: reps }] = await Promise.all([
     supabase.from('departments').select('store_erpid, store_name').in('store_erpid', stores),
-    supabase.from('store_month_reports').select('store_erpid, ym, closed_at, snapshot').in('store_erpid', stores).eq('status', 'closed').order('ym', { ascending: false }).limit(400),
+    supabase.from('store_month_reports').select('store_erpid, ym, closed_at, snapshot').in('store_erpid', stores).eq('status', 'closed').order('ym', { ascending: false }).limit(viewer ? 3000 : 400),
   ]);
   const nm = new Map((deps || []).map((d) => [d.store_erpid, d.store_name]));
   const out = stores.map((st) => {
     const mine = rows.filter((r) => r.store_erpid === st);
-    const months = (reps || []).filter((r) => r.store_erpid === st && mine.some((h) => h.from_ym <= r.ym && (!h.to_ym || h.to_ym >= r.ym)))
+    const months = (reps || []).filter((r) => r.store_erpid === st && (viewer || mine.some((h) => h.from_ym <= r.ym && (!h.to_ym || h.to_ym >= r.ym))))
       .slice(0, 24).map((r) => {
         const t = (r.snapshot && r.snapshot.totals) || {};
         const me = ((r.snapshot && r.snapshot.shareholders) || []).find((h) => mine.some((x) => x.erpid && String(x.erpid) === String(h.erpid)));
@@ -120,21 +136,22 @@ router.get('/investor', async (req, res) => {
       });
     return { store: st, store_name: nm.get(st) || st, holdings: mine.map((h) => ({ shares: h.shares, from_ym: h.from_ym, to_ym: h.to_ym })), months };
   });
-  res.json({ success: true, data: { name: rows[0].name, stores: out } });
+  if (viewer) out.sort((a, b) => (b.holdings.length - a.holdings.length) || String(a.store_name).localeCompare(String(b.store_name), 'zh-Hant'));
+  res.json({ success: true, data: { name: rows[0] ? rows[0].name : null, stores: out, viewer } });
 });
 router.get('/investor/report', async (req, res) => {
   const app = String(req.query.app || ''), store = String(req.query.store || ''), ym = String(req.query.ym || '');
   if (!/^\d{4,20}$/.test(app) || !store || !YM.test(ym)) return bad(res, '缺客編／門市／月份');
   const { rows } = await holdingsOf(app);
   const mine = rows.filter((r) => r.store_erpid === store && r.from_ym <= ym && (!r.to_ym || r.to_ym >= ym));
-  if (!mine.length) return bad(res, '你在這家店這個月沒有股份', 403);
+  if (!mine.length && !(await isViewer(app))) return bad(res, '你在這家店這個月沒有股份', 403);
   const { data: rep, error } = await supabase.from('store_month_reports').select('*').eq('store_erpid', store).eq('ym', ym).maybeSingle();
   if (error) return bad(res, error.message, 500);
   if (!rep || rep.status !== 'closed' || !rep.snapshot) return res.json({ success: true, data: { closed: false, status: rep ? rep.status : 'draft' } });
   const v = managerView(rep.snapshot, rep);
   delete v.manager_note; delete v.manager_note_at;
   const me = (rep.snapshot.shareholders || []).find((h) => mine.some((x) => x.erpid && String(x.erpid) === String(h.erpid)));
-  res.json({ success: true, data: { closed: true, ...v, my: { shares: mine.reduce((a, h) => a + Number(h.shares), 0), amount: me ? r0(me.amount) : null } } });
+  res.json({ success: true, data: { closed: true, ...v, my: mine.length ? { shares: mine.reduce((a, h) => a + Number(h.shares), 0), amount: me ? r0(me.amount) : null } : null } });
 });
 
 // 即時月報（店長工具，2026-11-17）：GET /api/external/store-report/live?store=&ym=  最新一天的快照＋本月趨勢（店長、總部都能看，含淨利）
