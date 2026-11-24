@@ -42,7 +42,15 @@ router.post('/import', edit, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) throw new Error('請選檔案');
     const fileName = Buffer.from(req.file.originalname || 'file', 'latin1').toString('utf8');
-    ok(res, await svc.importFile({ buffer: req.file.buffer, fileName, account_id: (req.body || {}).account_id || null, by: who(req) }));
+    const r = await svc.importFile({ buffer: req.file.buffer, fileName, account_id: (req.body || {}).account_id || null, by: who(req) });
+    // 匯入的是現金銀存專用本子 → 順手跟門市上繳回報對帳（2026-11-24）
+    if (r && r.account && r.import_id) {
+      try {
+        const CD = require('../services/cashDepositReview');
+        if ((await CD.cashBooks()).some((b) => b.id === r.account.id)) r.cash_reconcile = await CD.reconcile(who(req) ? `匯入後自動對帳（${who(req)}）` : '匯入後自動對帳');
+      } catch (e) { r.cash_reconcile = { error: e.message }; }
+    }
+    ok(res, r);
   } catch (e) { bad(res, e); }
 });
 router.get('/imports', view, async (req, res) => { try { ok(res, await svc.listImports(req.query.account_id)); } catch (e) { bad(res, e); } });

@@ -187,6 +187,7 @@ app.use('/api/regulations-review', require('./routes/regulationsReview'));   // 
 app.use('/api/regulations', authenticate, require('./routes/regulations'));
 app.use('/api/petty-cash', authenticate, require('./routes/pettyCash'));
 app.use('/api/bank-ledger', authenticate, require('./routes/bankLedger'));
+app.use('/api/cash-deposit', authenticate, require('./routes/cashDepositReview'));   // 金流 → 銀存審核（2026-11-24）
 
 // ── 內部同步觸發（部署初期用，確認正常後可移除）──────
 app.post('/api/internal/sync', async (req, res) => {
@@ -263,6 +264,7 @@ app.use((err, req, res, next) => {
   startBillingScheduledSync();
   startChiLensSyncJob();             // 每天 02:30 路奇鏡片帳單（上月＋本月）
   startHubPoller();                  // 每 5 分鐘自動掃 Hub 收件匣
+  require('./services/cashDepositReview').startCron();   // 銀存審核：每小時 :40 跟現金專用本子自動對帳
   require('./jobs/liveReportDaily').startLiveReportDaily();   // 即時月報 03:30
   startCheckNotifyJob();             // 每天 10:00 支票到期通知
   require('./services/resignClient').startBlockedSync();   // 離職停權名單（每 5 分鐘）
