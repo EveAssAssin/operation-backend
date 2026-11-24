@@ -18,7 +18,9 @@ const ok = (res, data) => res.json({ success: true, data });
 const bad = (res, e) => res.status(400).json({ success: false, message: (e && e.message) || String(e) });
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
-router.get('/meta', view, async (req, res) => { try { ok(res, { categories: svc.CATS, stores: await svc.stores() }); } catch (e) { bad(res, e); } });
+router.get('/meta', view, async (req, res) => { try { const c = await svc.categories(); ok(res, { categories: c.all, custom_categories: c.custom, stores: await svc.stores() }); } catch (e) { bad(res, e); } });
+router.post('/categories', edit, async (req, res) => { try { ok(res, await svc.addCategory((req.body || {}).name)); } catch (e) { bad(res, e); } });
+router.delete('/categories/:name', edit, async (req, res) => { try { ok(res, await svc.removeCategory(req.params.name)); } catch (e) { bad(res, e); } });
 router.get('/stores', view, async (req, res) => { try { ok(res, await svc.stores()); } catch (e) { bad(res, e); } });
 
 router.get('/accounts', view, async (req, res) => { try { ok(res, await svc.listAccounts()); } catch (e) { bad(res, e); } });

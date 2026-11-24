@@ -48,6 +48,30 @@ function storeFromText(text, list) {
 
 // ── 分類 ──
 const CATS = ['現金存入', '刷卡撥款', 'LINE Pay', '一卡通/iPASS', '票據存入', '內部轉帳', '手續費', '貨款/付款', '其他存入', '其他支出'];
+// 自訂類別（2026-11-24 營運）：存在 report_settings.bank_categories { list:[...] }，接在內建類別後面
+async function customCats() {
+  const { data } = await supabase.from('report_settings').select('value').eq('key', 'bank_categories').maybeSingle();
+  return (data && data.value && Array.isArray(data.value.list) ? data.value.list : []).map(String).filter(Boolean);
+}
+async function categories() { const c = await customCats(); return { all: [...CATS, ...c.filter((x) => !CATS.includes(x))], custom: c }; }
+async function addCategory(name) {
+  const n = String(name || '').trim().slice(0, 20);
+  if (!n) throw new Error('類別名稱不能空白');
+  const c = await customCats();
+  if (CATS.includes(n) || c.includes(n)) throw new Error('已經有這個類別了');
+  const { error } = await supabase.from('report_settings').upsert({ key: 'bank_categories', value: { list: [...c, n] } }, { onConflict: 'key' });
+  if (error) throw new Error(error.message);
+  return categories();
+}
+async function removeCategory(name) {
+  const n = String(name || '');
+  if (CATS.includes(n)) throw new Error('內建類別不能刪');
+  const { count } = await supabase.from('bank_txns').select('id', { count: 'exact', head: true }).eq('category', n).eq('status', 'active');
+  if (count) throw new Error(`還有 ${count} 筆交易用這個類別，先改成別的類別再刪`);
+  const c = (await customCats()).filter((x) => x !== n);
+  await supabase.from('report_settings').upsert({ key: 'bank_categories', value: { list: c } }, { onConflict: 'key' });
+  return categories();
+}
 function autoCategory(t, accTails) {
   const text = [t.summary, t.memo, t.memo2, t.counter_account].filter(Boolean).join(' ');
   const isIn = Number(t.in_amt) > 0;
@@ -489,6 +513,6 @@ async function dailySummary({ from, to }) {
 
 module.exports = {
   createManual, updateManual, deleteManual,
-  CATS, stores, listAccounts, verifyAccount, saveAccount, importFile, undoImport, listImports, listTxns, updateTxn, bulkUpdate,
+  CATS, categories, addCategory, removeCategory, stores, listAccounts, verifyAccount, saveAccount, importFile, undoImport, listImports, listTxns, updateTxn, bulkUpdate,
   listRules, addRule, deleteRule, reapply, storeDeposits, dailySummary, storeFromText, autoCategory, accountMatches,
 };
