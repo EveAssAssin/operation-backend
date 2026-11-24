@@ -9,6 +9,7 @@
 const supabase = require('../config/supabase');
 const { insertRequest } = require('./requestNo');
 const LP = require('./ledgerPost');
+const RB = require('./vendorRebate');
 const { notifyMarketStatus } = require('./marketWebhook');
 const { notifyChiLensStatus } = require('./chiLensWebhook');
 
@@ -124,6 +125,13 @@ async function getRequest(id) {
   data.allocations = allocs || [];
   data.alloc_total = Math.round((allocs || []).reduce((a, x) => a + Number(x.amount || 0), 0) * 100) / 100;
   data.allowed_subjects = await allowedSubjects(data.source_id);
+  // 廠商回饋（2026-11-24）：帳面／回饋／出款；還沒算過（舊單或還沒送審）就照目前廠商設定先算給畫面看
+  if (data.rebate_mode) data.rebate = { pct: Number(data.rebate_pct), mode: data.rebate_mode, gross: Number(data.gross_amount), rebate: Number(data.rebate_amount), payout: Number(data.payout_amount) };
+  else if (data.status !== 'paid') {
+    const { data: src } = await supabase.from('billing_sources').select('rebate_pct, rebate_mode').eq('id', data.source_id).maybeSingle();
+    const c = RB.compute(data.alloc_total || data.total_amount, src && src.rebate_pct, src && src.rebate_mode);
+    if (c.rebate_mode) data.rebate = { pct: c.rebate_pct, mode: c.rebate_mode, gross: c.gross_amount, rebate: c.rebate_amount, payout: c.payout_amount, preview: true };
+  }
 
   // 發票
   const { data: invoices } = await supabase.from('vendor_invoices')
@@ -253,6 +261,7 @@ async function submitRequest(id, { actorType, actorId }) {
     .update({ status: 'submitted', submitted_at: new Date().toISOString(), rejection_reason: null })
     .eq('id', id).select().single();
   if (error) throw new Error(error.message);
+  try { Object.assign(data, await refreshRebate(id) || {}); } catch (e) { console.warn('[vendorPayment] 回饋計算', e.message); }
   return data;
 }
 
@@ -476,6 +485,7 @@ async function approveRequest(id, actorSystemId, acct, actorName) {
       await supabase.from('vendor_payment_requests').update({ subject_id: top.subject_id, ledger_code: sj ? sj.ledger_code : null }).eq('id', id);
     }
   }
+  try { await refreshRebate(id); } catch (e) { console.warn('[vendorPayment] 回饋計算', e.message); }
   const { data, error } = await supabase.from('vendor_payment_requests')
     .update({
       status: 'approved',
@@ -678,6 +688,21 @@ async function listTargets() {
  * 廠商：只能改自己的草稿／被退回的；會計：送審中／已通過都能改（付款後不能改），改過的列記 adjusted_by，保留廠商原本填的。
  * 請款總額＝分配合計。
  */
+// 廠商回饋（2026-11-24）：請款金額變了就重算；還沒付款前照廠商目前設定，付款後不動
+async function rebateFor(request_id, source_id, total) {
+  const { data: r } = await supabase.from('vendor_payment_requests').select('status, rebate_pct, rebate_mode').eq('id', request_id).maybeSingle();
+  if (r && r.status === 'paid') return RB.compute(total, r.rebate_pct, r.rebate_mode);
+  const { data: src } = await supabase.from('billing_sources').select('rebate_pct, rebate_mode').eq('id', source_id).maybeSingle();
+  return RB.compute(total, src && src.rebate_pct, src && src.rebate_mode);
+}
+async function refreshRebate(request_id) {
+  const { data: r } = await supabase.from('vendor_payment_requests').select('id, source_id, total_amount, status').eq('id', request_id).maybeSingle();
+  if (!r || r.status === 'paid') return null;
+  const rb = await rebateFor(r.id, r.source_id, r.total_amount);
+  await supabase.from('vendor_payment_requests').update(rb).eq('id', r.id);
+  return rb;
+}
+
 async function saveAllocations(request_id, rows, { actorType, actorId, actorName }) {
   const { data: req } = await supabase.from('vendor_payment_requests').select('id, status, created_by_vendor, source_id').eq('id', request_id).maybeSingle();
   if (!req) throw new Error('找不到請款單');
@@ -741,8 +766,9 @@ async function saveAllocations(request_id, rows, { actorType, actorId, actorName
   const { error: iErr } = await supabase.from('vendor_payment_allocations').insert(ins);
   if (iErr) throw new Error(iErr.message);
   const total = r2(clean.reduce((a, c) => a + c.amount, 0));
-  await supabase.from('vendor_payment_requests').update({ total_amount: total }).eq('id', request_id);
-  return { total, rows: ins.length };
+  const rb = await rebateFor(request_id, req.source_id, total);
+  await supabase.from('vendor_payment_requests').update({ total_amount: total, ...rb }).eq('id', request_id);
+  return { total, rows: ins.length, rebate: rb };
 }
 
 /** 上傳附件到私有 bucket（廠商／會計共用） */
@@ -781,8 +807,11 @@ async function removeStoredFile(id) {
 /** 付款完成 → 照分配門市產生帳單（confirmed）＋分攤；列入月報月份＝請款月份＋付款日依截止日決定（bills.received_at＝付款時間） */
 async function billFromAllocations(row) {
   if (!row || row.linked_bill_id) return row && row.linked_bill_id;
-  const { data: al } = await supabase.from('vendor_payment_allocations').select('*').eq('request_id', row.id).order('seq');
-  if (!al || !al.length) return null;
+  const { data: al0 } = await supabase.from('vendor_payment_allocations').select('*').eq('request_id', row.id).order('seq');
+  if (!al0 || !al0.length) return null;
+  // 廠商回饋「帳單外加」：廠商帳單 90 → 門市照帳面 100 分帳（每列照比例放大）；內含不用動
+  const { data: rbRow } = await supabase.from('vendor_payment_requests').select('rebate_mode, gross_amount, rebate_amount, rebate_pct').eq('id', row.id).maybeSingle();
+  const al = rbRow && rbRow.rebate_mode === 'exclusive' && rbRow.gross_amount != null ? RB.scaleRows(al0, Number(rbRow.gross_amount)) : al0;
   // 每個「門市 × 科目」一列；列有科目時月報格子跟著科目（2026-11 廠商指定科目）
   const subs = await require('./ledgerSubjects').all();
   const byStore = new Map();
@@ -799,7 +828,7 @@ async function billFromAllocations(row) {
   const paidAt = row.paid_at || new Date().toISOString();
   const { data: bill, error } = await supabase.from('bills').insert({
     source_id: row.source_id, period: row.period, title: row.title, total_amount: total, status: 'confirmed', items,
-    description: `由廠商請款 ${row.request_no || row.id} 付款後自動建立`, source_ref: row.request_no,
+    description: `由廠商請款 ${row.request_no || row.id} 付款後自動建立${rbRow && rbRow.rebate_mode ? `（廠商回饋 ${rbRow.rebate_pct}%${rbRow.rebate_mode === 'exclusive' ? '外加' : '內含'}：帳面 ${Number(rbRow.gross_amount).toLocaleString()}、回饋 ${Number(rbRow.rebate_amount).toLocaleString()}）` : ''}`, source_ref: row.request_no,
     submitted_at: row.submitted_at || paidAt, confirmed_at: paidAt, received_at: paidAt, created_by_type: 'system', source_system: 'vendor_portal',
   }).select('id, bill_no').single();
   if (error) { console.error('[vendorPayment] 付款後建帳單失敗：', error.message); return null; }
@@ -815,6 +844,7 @@ async function billFromAllocations(row) {
 }
 
 module.exports = {
+  refreshRebate,
   listTargets, allowedSubjects, saveAllocations, uploadRequestFile, signFiles, removeStoredFile, billFromAllocations,
   // 銀行帳號
   listBankAccounts, createBankAccount, updateBankAccount, deleteBankAccount,

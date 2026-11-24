@@ -1,3 +1,4 @@
+const RB = require('./vendorRebate');
 // services/paymentBatchService.js
 // 匯款批次模組
 //   - 列出「可加入批次」的請款（status=approved + 還沒在批次裡）
@@ -45,7 +46,7 @@ async function get(id) {
 async function listEligibleRequests({ period } = {}) {
   // 1) 撈所有 approved 請款
   let q = supabase.from('vendor_payment_requests')
-    .select('id, request_no, period, title, total_amount, source_id, bank_account_id, remit_memo, approved_at, source:billing_sources(name, short_name), bank_account:vendor_bank_accounts(*)')
+    .select('id, request_no, period, title, total_amount, payout_amount, source_id, bank_account_id, remit_memo, approved_at, source:billing_sources(name, short_name), bank_account:vendor_bank_accounts(*)')
     .eq('status', 'approved')
     .order('approved_at', { ascending: true });
   if (period) q = q.eq('period', period);
@@ -103,7 +104,7 @@ async function createBatch({ payment_date, request_ids, note }, actorId) {
     }
   }
 
-  const totalAmount = requests.reduce((s, r) => s + Number(r.total_amount || 0), 0);
+  const totalAmount = requests.reduce((s, r) => s + RB.payAmt(r), 0);
 
   // 3) 建批次主檔
   const { data: batch, error: bErr } = await supabase.from('payment_batches').insert([{
@@ -131,7 +132,7 @@ async function createBatch({ payment_date, request_ids, note }, actorId) {
     branch_code:     r.bank_account.branch_code,
     account_no:      r.bank_account.account_no,
     account_name:    r.bank_account.account_name,
-    amount:          r.total_amount,
+    amount:          RB.payAmt(r),
     memo:            r.remit_memo || null,
     fee_burden_code: profile?.default_fee_burden    || '15',
     notify_method:   profile?.default_notify_method || '0',

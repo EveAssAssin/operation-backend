@@ -36,7 +36,7 @@ router.use(authorize('operation_accounting', 'operation_lead', 'super_admin', 'd
 router.get('/', async (req, res) => {
   try {
     const [{ data: src, error }, { data: acc }, { data: banks }] = await Promise.all([
-      supabase.from('billing_sources').select('id, name, code, tax_id, contact_name, contact_phone, contact_email, notes, is_active, created_at, allowed_subject_ids, sort_order').eq('source_type', 'vendor').order('is_active', { ascending: false }).order('sort_order', { ascending: true, nullsFirst: false }).order('name'),
+      supabase.from('billing_sources').select('id, name, code, tax_id, contact_name, contact_phone, contact_email, notes, is_active, created_at, allowed_subject_ids, sort_order, rebate_pct, rebate_mode').eq('source_type', 'vendor').order('is_active', { ascending: false }).order('sort_order', { ascending: true, nullsFirst: false }).order('name'),
       supabase.from('vendor_accounts').select('id, source_id, username, is_active, last_login_at'),
       supabase.from('vendor_bank_accounts').select('*').order('is_default', { ascending: false }).order('created_at'),
     ]);
@@ -121,9 +121,22 @@ router.patch('/:id', authorize('operation_accounting', 'operation_lead', 'super_
       }
       patch.allowed_subject_ids = ids;
     }
+    // 廠商回饋（2026-11-24）：rebate_pct（0～100，空＝沒有回饋）、rebate_mode inclusive（帳單內含）／exclusive（帳單外加）
+    if (b.rebate_pct !== undefined || b.rebate_mode !== undefined) {
+      const pct = b.rebate_pct === '' || b.rebate_pct == null ? null : Number(b.rebate_pct);
+      if (pct != null && !(pct > 0 && pct < 100)) throw new Error('回饋 % 要在 0～100 之間');
+      const mode = pct == null ? null : (b.rebate_mode === 'exclusive' ? 'exclusive' : b.rebate_mode === 'inclusive' ? 'inclusive' : null);
+      if (pct != null && !mode) throw new Error('請選帳單內含或帳單外加');
+      patch.rebate_pct = pct; patch.rebate_mode = mode;
+    }
     if (patch.name === null) throw new Error('廠商名稱不能空白');
     const { data, error } = await supabase.from('billing_sources').update(patch).eq('id', req.params.id).eq('source_type', 'vendor').select('*').single();
     if (error) throw error;
+    if ('rebate_pct' in patch) {   // 改了回饋 → 還沒核准的請款跟著重算（已核准／已付款的照原本）
+      const VP = require('../services/vendorPaymentService');
+      const { data: reqs } = await supabase.from('vendor_payment_requests').select('id').eq('source_id', req.params.id).in('status', ['draft', 'submitted', 'rejected']);
+      for (const r of reqs || []) await VP.refreshRebate(r.id).catch(() => {});
+    }
     ok(res, data);
   } catch (e) { bad(res, e); }
 });

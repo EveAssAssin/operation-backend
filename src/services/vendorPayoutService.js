@@ -1,3 +1,4 @@
+const RB = require('./vendorRebate');
 // services/vendorPayoutService.js —— 廠商請款排出款（2026-10-20，migration 028）
 // 會計分配好、通過的請款 → 設出款日期＋出款銀行（公司哪個帳戶付）
 // → 當天（含之前沒出的）列在「今日出款」、LINE 提醒（jobs/vendorPayoutNotify）
@@ -72,7 +73,7 @@ async function allocSums(ids) {
 
 // ── 設定／取消出款日 ─────────────────────────────────────
 async function setPayout(id, { payout_date, payout_bank_id } = {}, actor) {
-  const { data: r, error } = await supabase.from('vendor_payment_requests').select('id, status, total_amount, request_no').eq('id', id).maybeSingle();
+  const { data: r, error } = await supabase.from('vendor_payment_requests').select('id, status, total_amount, payout_amount, request_no').eq('id', id).maybeSingle();
   if (error) throw new Error(error.message);
   if (!r) throw new Error('找不到請款');
   if (r.status !== 'approved') throw new Error('先按「通過」才能排出款日（目前：' + r.status + '）');
@@ -96,7 +97,7 @@ async function setPayout(id, { payout_date, payout_bank_id } = {}, actor) {
   return data;
 }
 
-const SEL = 'id, request_no, title, period, total_amount, status, source_id, payout_date, payout_bank_id, payout_exported_at, bank_snapshot, remit_memo, source:billing_sources(name, tax_id), bank_account:vendor_bank_accounts(*)';
+const SEL = 'id, request_no, title, period, total_amount, payout_amount, gross_amount, rebate_amount, status, source_id, payout_date, payout_bank_id, payout_exported_at, bank_snapshot, remit_memo, source:billing_sources(name, tax_id), bank_account:vendor_bank_accounts(*)';
 
 // ── 某天要出的款（含之前排了還沒出的＝逾期）──────────────
 async function day(date) {
@@ -110,7 +111,7 @@ async function day(date) {
   const bankById = Object.fromEntries(banks.map(b => [b.id, b]));
   const items = reqs.map(r => ({
     id: r.id, request_no: r.request_no, title: r.title, period: r.period,
-    vendor: r.source?.name || null, amount: Number(r.total_amount || 0),
+    vendor: r.source?.name || null, amount: RB.payAmt(r), billed: Number(r.total_amount || 0), rebate: r.rebate_amount != null ? Number(r.rebate_amount) : null,
     payout_date: r.payout_date, overdue: r.payout_date < d, exported_at: r.payout_exported_at,
     bank_id: r.payout_bank_id, bank_label: bankById[r.payout_bank_id]?.label || '（沒選出款銀行）',
     payee: payees[r.id] ? { bank_code: payees[r.id].bank_code, branch_code: payees[r.id].branch_code, account_no_tail: String(payees[r.id].account_no || '').slice(-5), account_name: payees[r.id].account_name, from: payees[r.id].from, problem: payees[r.id].problem } : null,
@@ -133,18 +134,18 @@ async function day(date) {
 async function upcoming(days = 14) {
   const from = twToday();
   const to = new Date(Date.now() + days * 86400000).toLocaleDateString('sv-SE', { timeZone: 'Asia/Taipei' });
-  const { data, error } = await supabase.from('vendor_payment_requests').select('id, request_no, title, total_amount, payout_date, payout_bank_id, source:billing_sources(name)')
+  const { data, error } = await supabase.from('vendor_payment_requests').select('id, request_no, title, total_amount, payout_amount, payout_date, payout_bank_id, source:billing_sources(name)')
     .eq('status', 'approved').gt('payout_date', from).lte('payout_date', to).order('payout_date');
   if (error) throw new Error(error.message);
-  return (data || []).map(r => ({ id: r.id, request_no: r.request_no, title: r.title, vendor: r.source?.name || null, amount: Number(r.total_amount || 0), payout_date: r.payout_date, bank_id: r.payout_bank_id }));
+  return (data || []).map(r => ({ id: r.id, request_no: r.request_no, title: r.title, vendor: r.source?.name || null, amount: RB.payAmt(r), payout_date: r.payout_date, bank_id: r.payout_bank_id }));
 }
 
 // 通過了但還沒排出款日
 async function unscheduled() {
-  const { data, error } = await supabase.from('vendor_payment_requests').select('id, request_no, title, total_amount, approved_at, source:billing_sources(name)')
+  const { data, error } = await supabase.from('vendor_payment_requests').select('id, request_no, title, total_amount, payout_amount, approved_at, source:billing_sources(name)')
     .eq('status', 'approved').is('payout_date', null).order('approved_at');
   if (error) throw new Error(error.message);
-  return (data || []).map(r => ({ id: r.id, request_no: r.request_no, title: r.title, vendor: r.source?.name || null, amount: Number(r.total_amount || 0), approved_at: r.approved_at }));
+  return (data || []).map(r => ({ id: r.id, request_no: r.request_no, title: r.title, vendor: r.source?.name || null, amount: RB.payAmt(r), approved_at: r.approved_at }));
 }
 
 // ── 匯出元大網銀 Excel ───────────────────────────────────
@@ -169,13 +170,13 @@ async function exportYuanta({ date, bank_id, request_ids } = {}, actor) {
     ok.push({ r, p });
   }
   if (!ok.length) throw new Error('全部都缺廠商收款帳號：' + skipped.map(s => `${s.request_no}（${s.reason}）`).join('、'));
-  const total = ok.reduce((s, x) => s + Number(x.r.total_amount || 0), 0);
+  const total = ok.reduce((s, x) => s + RB.payAmt(x.r), 0);
   const buffer = buildYuantaXlsx({
     payment_date: d,
     payer_account_no: bank.account_no, payer_account_name: bank.account_name,
     payer_bank_code: bank.bank_code, payer_branch_code: bank.branch_code,
     items: ok.map(({ r, p }) => ({
-      amount: Math.round(Number(r.total_amount || 0)),
+      amount: Math.round(RB.payAmt(r)),
       account_no: p.account_no, account_name: p.account_name,
       bank_code: p.bank_code, branch_code: p.branch_code || '',
       fee_burden_code: '15', notify_method: '0',
