@@ -390,15 +390,18 @@ router.patch('/profile', authenticateVendor, async (req, res) => {
   } catch (e) { vpFail(res, e); }
 });
 
+// 廠商端不給看我們內部的拆分（回饋、帳面、出款、門市開帳）（2026-11-24 營運）
+const INTERNAL_KEYS = ['rebate', 'rebate_pct', 'rebate_mode', 'gross_amount', 'rebate_amount', 'payout_amount', 'split'];
+const hideInternal = (r) => { if (!r || typeof r !== 'object') return r; const o = { ...r }; for (const k of INTERNAL_KEYS) delete o[k]; return o; };
 // 廠商請款單（只看自己的）
 router.get('/requests', authenticateVendor, async (req, res) => {
   try {
-    vpOk(res, await vpSvc.listRequests({
+    vpOk(res, (await vpSvc.listRequests({
       source_id: req.vendor.source_id,
       period:    req.query.period,
       status:    req.query.status,
       keyword:   req.query.keyword,
-    }));
+    })).map(hideInternal));
   } catch (e) { vpFail(res, e); }
 });
 
@@ -408,7 +411,7 @@ router.get('/requests/:id', authenticateVendor, async (req, res) => {
     if (r.source_id !== req.vendor.source_id) {
       return res.status(403).json({ success: false, message: '無權檢視' });
     }
-    vpOk(res, r);
+    vpOk(res, hideInternal(r));
   } catch (e) { vpFail(res, e); }
 });
 
@@ -460,7 +463,7 @@ router.get('/targets', authenticateVendor, async (req, res) => { try { vpOk(res,
 router.put('/requests/:id/allocations', authenticateVendor, async (req, res) => {
   try {
     if (!(await ownEditable(req, res))) return;
-    vpOk(res, await vpSvc.saveAllocations(req.params.id, (req.body || {}).rows, { actorType: 'vendor', actorId: req.vendor.id }));
+    vpOk(res, hideInternal(await vpSvc.saveAllocations(req.params.id, (req.body || {}).rows, { actorType: 'vendor', actorId: req.vendor.id })));
   } catch (e) { res.status(400).json({ success: false, message: e.message }); }
 });
 
