@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 // services/bankLedgerService.js —— 金流 → 銀存彙整（2026-11）
 //   匯入：解析網銀檔 → 找帳戶（檔案有帳號就自動對；沒有就請使用者選）→ 指紋去重
 //         同一段期間重匯：檔案裡沒有、但系統有的 → 標「已校正（removed）」；之前校正掉、這次又出現 → 還原
@@ -168,7 +169,7 @@ async function importFile({ buffer, fileName, account_id, by }) {
   }
 
   const fps = fingerprints(p.rows);
-  const existing = await fetchAll(() => supabase.from('bank_txns').select('id, fingerprint, status, ord')
+  const existing = await fetchAll(() => supabase.from('bank_txns').select('id, fingerprint, status, ord, source')
     .eq('account_id', acc.id).gte('txn_date', p.period_from).lte('txn_date', p.period_to));
   const byFp = new Map(existing.map((e) => [e.fingerprint, e]));
   const fileFps = new Set(fps);
@@ -197,7 +198,7 @@ async function importFile({ buffer, fileName, account_id, by }) {
     });
   }
   // 自動校正：同期間系統有、這次檔案沒有
-  const removeIds = existing.filter((e) => e.status === 'active' && !fileFps.has(e.fingerprint)).map((e) => e.id);
+  const removeIds = existing.filter((e) => e.status === 'active' && e.source !== 'manual' && !fileFps.has(e.fingerprint)).map((e) => e.id);
 
   for (let i = 0; i < toInsert.length; i += 500) {
     const { error } = await supabase.from('bank_txns').insert(toInsert.slice(i, i + 500));
@@ -206,13 +207,15 @@ async function importFile({ buffer, fileName, account_id, by }) {
   if (restoreIds.length) await supabase.from('bank_txns').update({ status: 'active', removed_import_id: null, updated_at: now() }).in('id', restoreIds);
   if (removeIds.length) await supabase.from('bank_txns').update({ status: 'removed', removed_import_id: imp.id, updated_at: now() }).in('id', removeIds);
 
+  // 手動建立的交易：檔案裡有同一天、同方向、同金額的 → 手動那筆標成被取代（一筆檔案交易只取代一筆手動）
+  const superseded = await supersedeManual(acc.id, p.period_from, p.period_to, imp.id);
   const breaks = await balanceBreaks(acc.id, p.period_from, p.period_to);
   const verify = await verifyAccount({ ...acc, ...(await supabase.from('bank_accounts').select('opening_date, opening_balance').eq('id', acc.id).single()).data });
   await supabase.from('bank_imports').update({
     rows_new: toInsert.length, rows_dup: dup, rows_removed: removeIds.length, rows_restored: restoreIds.length, balance_breaks: breaks,
   }).eq('id', imp.id);
   return { import_id: imp.id, account: { id: acc.id, alias: acc.alias }, bank: p.bank, period_from: p.period_from, period_to: p.period_to,
-    rows_total: p.rows.length, rows_new: toInsert.length, rows_dup: dup, rows_removed: removeIds.length, rows_restored: restoreIds.length, balance_breaks: breaks,
+    rows_total: p.rows.length, rows_new: toInsert.length, rows_dup: dup, rows_removed: removeIds.length, rows_restored: restoreIds.length, balance_breaks: breaks, manual_superseded: superseded,
     verify: { status: verify.status, mismatches: verify.mismatches.slice(0, 5), reported_end: verify.reported_end, computed_end: verify.computed_end, last_date: verify.last_date } };
 }
 
@@ -263,11 +266,90 @@ async function undoImport(importId, by, silent) {
   const { data: imp } = await supabase.from('bank_imports').select('*').eq('id', importId).maybeSingle();
   if (!imp) throw new Error('找不到這次匯入');
   if (imp.undone_at && !silent) throw new Error('已經撤銷過了');
-  await supabase.from('bank_txns').update({ status: 'active', removed_import_id: null, updated_at: now() }).eq('removed_import_id', importId);
+  await supabase.from('bank_txns').update({ status: 'active', removed_import_id: null, superseded_by: null, updated_at: now() }).eq('removed_import_id', importId);
   const { error } = await supabase.from('bank_txns').delete().eq('import_id', importId);
   if (error) throw new Error(error.message);
   await supabase.from('bank_imports').update({ undone_at: now(), undone_by: by }).eq('id', importId);
   return { undone: importId };
+}
+
+// ── 手動建立（2026-11-24）──
+async function supersedeManual(accountId, from, to, importId) {
+  const manual = await fetchAll(() => supabase.from('bank_txns').select('id, txn_date, in_amt, out_amt')
+    .eq('account_id', accountId).eq('source', 'manual').eq('status', 'active').gte('txn_date', from).lte('txn_date', to));
+  if (!manual.length) return [];
+  const fileRows = await fetchAll(() => supabase.from('bank_txns').select('id, txn_date, in_amt, out_amt')
+    .eq('account_id', accountId).eq('import_id', importId).eq('status', 'active'));
+  const used = new Set();
+  const out = [];
+  for (const m of manual) {
+    const f = fileRows.find((x) => !used.has(x.id) && x.txn_date === m.txn_date && Number(x.in_amt) === Number(m.in_amt) && Number(x.out_amt) === Number(m.out_amt));
+    if (!f) continue;
+    used.add(f.id);
+    await supabase.from('bank_txns').update({ status: 'removed', removed_import_id: importId, superseded_by: f.id, updated_at: now() }).eq('id', m.id);
+    // 手動那筆標過的類別／門市／說明，檔案那筆還沒有的就帶過去
+    const { data: mm } = await supabase.from('bank_txns').select('category, store_erpid, note').eq('id', m.id).single();
+    const { data: ff } = await supabase.from('bank_txns').select('category, store_erpid, note').eq('id', f.id).single();
+    const up = {};
+    if (mm && mm.store_erpid && !ff.store_erpid) up.store_erpid = mm.store_erpid;
+    if (mm && mm.category && !ff.category) up.category = mm.category;
+    if (mm && mm.note && !ff.note) up.note = mm.note;
+    if (Object.keys(up).length) await supabase.from('bank_txns').update(up).eq('id', f.id);
+    out.push({ manual_id: m.id, file_id: f.id, date: m.txn_date, amount: Number(m.in_amt) || -Number(m.out_amt) });
+  }
+  return out;
+}
+
+function cleanManual(b) {
+  const txn_date = String(b.txn_date || '').slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(txn_date)) throw new Error('日期不對');
+  const amt = Math.abs(Number(b.amount));
+  if (!Number.isFinite(amt) || amt <= 0) throw new Error('金額要大於 0');
+  const dir = b.direction === 'out' ? 'out' : b.direction === 'in' ? 'in' : null;
+  if (!dir) throw new Error('請選存入或支出');
+  const bal = b.balance === '' || b.balance == null ? null : Number(b.balance);
+  if (bal != null && !Number.isFinite(bal)) throw new Error('餘額不對');
+  const time = b.txn_time ? String(b.txn_time).slice(0, 8) : null;
+  return { txn_date, txn_time: time, in_amt: dir === 'in' ? r2(amt) : 0, out_amt: dir === 'out' ? r2(amt) : 0, balance: bal,
+    summary: String(b.summary || '').trim().slice(0, 100) || '手動', memo: String(b.memo || '').trim().slice(0, 200) || null,
+    counter_account: String(b.counter_account || '').trim().slice(0, 50) || null,
+    category: b.category || null, store_erpid: b.store_erpid || null, note: String(b.note || '').trim().slice(0, 200) || null };
+}
+async function createManual(b, by) {
+  if (!b.account_id) throw new Error('請選帳戶');
+  const { data: acc } = await supabase.from('bank_accounts').select('id').eq('id', b.account_id).maybeSingle();
+  if (!acc) throw new Error('找不到帳戶');
+  const v = cleanManual(b);
+  if (!v.category) {   // 沒選類別 → 跟匯入一樣自動分類
+    const tg = await tag({ ...v, account_id: acc.id }, { rules: await loadRules(), tails: await accountTails(acc.id), stores: await stores() });
+    v.category = tg.category; if (!v.store_erpid) v.store_erpid = tg.store_erpid;
+  }
+  const { data, error } = await supabase.from('bank_txns').insert({
+    account_id: acc.id, import_id: null, fingerprint: `manual|${crypto.randomUUID()}`, ord: Date.now() * 1000,
+    ...v, source: 'manual', tag_source: 'manual', created_by: by, updated_by: by,
+  }).select('*, account:bank_accounts(alias, bank_name)').single();
+  if (error) throw new Error(error.message);
+  return data;
+}
+async function updateManual(id, b, by) {
+  const { data: t } = await supabase.from('bank_txns').select('id, source, status').eq('id', id).maybeSingle();
+  if (!t) throw new Error('找不到交易');
+  if (t.source !== 'manual') throw new Error('匯入的交易不能改金額／日期，只能改類別、門市、說明');
+  if (t.status !== 'active') throw new Error('這筆已經被匯入的交易取代了');
+  const v = cleanManual(b);
+  if (b.account_id) v.account_id = b.account_id;
+  const { data, error } = await supabase.from('bank_txns').update({ ...v, updated_at: now(), updated_by: by })
+    .eq('id', id).select('*, account:bank_accounts(alias, bank_name)').single();
+  if (error) throw new Error(error.message);
+  return data;
+}
+async function deleteManual(id) {
+  const { data: t } = await supabase.from('bank_txns').select('id, source').eq('id', id).maybeSingle();
+  if (!t) throw new Error('找不到交易');
+  if (t.source !== 'manual') throw new Error('匯入的交易不能刪，要撤銷那次匯入');
+  const { error } = await supabase.from('bank_txns').delete().eq('id', id);
+  if (error) throw new Error(error.message);
+  return { deleted: id };
 }
 
 async function listImports(accountId) {
@@ -406,6 +488,7 @@ async function dailySummary({ from, to }) {
 }
 
 module.exports = {
+  createManual, updateManual, deleteManual,
   CATS, stores, listAccounts, verifyAccount, saveAccount, importFile, undoImport, listImports, listTxns, updateTxn, bulkUpdate,
   listRules, addRule, deleteRule, reapply, storeDeposits, dailySummary, storeFromText, autoCategory, accountMatches,
 };

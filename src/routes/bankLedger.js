@@ -49,6 +49,9 @@ router.get('/imports', view, async (req, res) => { try { ok(res, await svc.listI
 router.delete('/imports/:id', edit, async (req, res) => { try { ok(res, await svc.undoImport(req.params.id, who(req))); } catch (e) { bad(res, e); } });
 
 router.get('/txns', view, async (req, res) => { try { ok(res, await svc.listTxns(req.query || {})); } catch (e) { bad(res, e); } });
+router.post('/txns', edit, async (req, res) => { try { ok(res, await svc.createManual(req.body || {}, who(req))); } catch (e) { bad(res, e); } });
+router.put('/txns/:id', edit, async (req, res) => { try { ok(res, await svc.updateManual(req.params.id, req.body || {}, who(req))); } catch (e) { bad(res, e); } });
+router.delete('/txns/:id', edit, async (req, res) => { try { ok(res, await svc.deleteManual(req.params.id)); } catch (e) { bad(res, e); } });
 router.patch('/txns/:id', edit, async (req, res) => { try { ok(res, await svc.updateTxn(req.params.id, req.body || {}, who(req))); } catch (e) { bad(res, e); } });
 router.post('/txns/bulk', edit, async (req, res) => { try { ok(res, await svc.bulkUpdate((req.body || {}).ids, req.body || {}, who(req))); } catch (e) { bad(res, e); } });
 
