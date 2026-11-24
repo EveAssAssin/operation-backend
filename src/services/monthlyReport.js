@@ -433,6 +433,8 @@ async function build(ym, store, opts = {}) {
       store_erpid: store, ledger_code: code, amount: Number(l.amount) || 0, fee_ym: ym, source: 'storehouse',
       ref_id: `sh-${l.src}-${l.id}`,
       ref_title: `倉庫｜${l.date} ${what}：${items}${l.src === 'ship' && l.cost ? `（總部成本 ${r0(l.cost)}）` : ''}${l.stamped ? '［倉庫已標開帳］' : ''}`,
+      // 完整品項（標題只放前 4 項；畫面點「全部 N 項」展開，2026-11-24 Louis）
+      detail_items: (l.items || []).length > 4 ? l.items.map((i) => ({ name: String(i.name || ''), qty: i.qty, amount: i.amount != null ? Number(i.amount) : (i.subtotal != null ? Number(i.subtotal) : null) })) : undefined,
     });
   }
   // 愛民鏡框進貨（2026-11-03）：IMING 採購單（公司總倉→門市，200／支）→ 總部出貨（鏡框）frame_hq
