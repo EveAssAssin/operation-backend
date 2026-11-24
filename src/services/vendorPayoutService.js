@@ -63,6 +63,18 @@ async function payeeMap(reqs) {
   return out;
 }
 
+// 中間商回饋（2026-11-24 寄銷對帳單拆分）：跟廠商請款一起出款；收款資料用請款當時的快照，沒有就用廠商目前設定
+function interPayee(r) {
+  const amt = Math.round(Number(r.intermediary_amount) || 0);
+  if (!amt) return null;
+  const cur = (r.source && r.source.intermediary) || null;
+  const m = (r.intermediary_snapshot && r.intermediary_snapshot.account_no ? r.intermediary_snapshot : cur) || r.intermediary_snapshot || null;
+  const p = m ? { name: m.name, bank_code: m.bank_code, branch_code: m.branch_code, account_no: digits(m.account_no), account_name: m.account_name } : {};
+  p.amount = amt;
+  p.problem = !m ? '沒有設中間商出款資料' : !p.account_no ? '中間商沒有帳號' : !/^\d{3}$/.test(String(p.bank_code || '')) ? '中間商總行代碼不是 3 碼' : !p.account_name ? '中間商沒有戶名' : null;
+  return p;
+}
+
 async function allocSums(ids) {
   if (!ids.length) return {};
   const { data } = await supabase.from('vendor_payment_allocations').select('request_id, amount').in('request_id', ids);
@@ -97,7 +109,7 @@ async function setPayout(id, { payout_date, payout_bank_id } = {}, actor) {
   return data;
 }
 
-const SEL = 'id, request_no, title, period, total_amount, payout_amount, gross_amount, rebate_amount, status, source_id, payout_date, payout_bank_id, payout_exported_at, bank_snapshot, remit_memo, source:billing_sources(name, tax_id), bank_account:vendor_bank_accounts(*)';
+const SEL = 'id, request_no, title, period, total_amount, payout_amount, gross_amount, rebate_amount, intermediary_amount, intermediary_snapshot, status, source_id, payout_date, payout_bank_id, payout_exported_at, bank_snapshot, remit_memo, source:billing_sources(name, tax_id, intermediary), bank_account:vendor_bank_accounts(*)';
 
 // ── 某天要出的款（含之前排了還沒出的＝逾期）──────────────
 async function day(date) {
@@ -112,6 +124,7 @@ async function day(date) {
   const items = reqs.map(r => ({
     id: r.id, request_no: r.request_no, title: r.title, period: r.period,
     vendor: r.source?.name || null, amount: RB.payAmt(r), billed: Number(r.total_amount || 0), rebate: r.rebate_amount != null ? Number(r.rebate_amount) : null,
+    intermediary: interPayee(r) ? { name: interPayee(r).name, amount: interPayee(r).amount, problem: interPayee(r).problem } : null,
     payout_date: r.payout_date, overdue: r.payout_date < d, exported_at: r.payout_exported_at,
     bank_id: r.payout_bank_id, bank_label: bankById[r.payout_bank_id]?.label || '（沒選出款銀行）',
     payee: payees[r.id] ? { bank_code: payees[r.id].bank_code, branch_code: payees[r.id].branch_code, account_no_tail: String(payees[r.id].account_no || '').slice(-5), account_name: payees[r.id].account_name, from: payees[r.id].from, problem: payees[r.id].problem } : null,
@@ -119,12 +132,13 @@ async function day(date) {
   const groups = {};
   for (const it of items) {
     const g = groups[it.bank_id || 'none'] = groups[it.bank_id || 'none'] || { bank_id: it.bank_id, bank_label: it.bank_label, count: 0, amount: 0, overdue: 0, missing_payee: 0, exported: 0 };
-    g.count++; g.amount += it.amount; if (it.overdue) g.overdue++;
+    g.count++; g.amount += it.amount + (it.intermediary ? it.intermediary.amount : 0); if (it.overdue) g.overdue++;
+    if (it.intermediary && it.intermediary.problem) g.missing_payee++;
     if (!it.payee || it.payee.problem) g.missing_payee++;
     if (it.exported_at) g.exported++;
   }
   return {
-    date: d, total: items.length, amount: items.reduce((s, x) => s + x.amount, 0),
+    date: d, total: items.length, amount: items.reduce((s, x) => s + x.amount + (x.intermediary ? x.intermediary.amount : 0), 0),
     today_count: items.filter(x => !x.overdue).length, overdue_count: items.filter(x => x.overdue).length,
     groups: Object.values(groups), items,
   };
@@ -167,27 +181,34 @@ async function exportYuanta({ date, bank_id, request_ids } = {}, actor) {
   for (const r of reqs) {
     const p = payees[r.id];
     if (!p || p.problem) { skipped.push({ request_no: r.request_no, vendor: r.source?.name, reason: p ? p.problem : '廠商沒有收款帳號' }); continue; }
-    ok.push({ r, p });
+    const ip = interPayee(r);
+    if (ip && ip.problem) { skipped.push({ request_no: r.request_no, vendor: r.source?.name, reason: ip.problem }); continue; }   // 中間商要一起出，缺資料就整張先不出
+    ok.push({ r, p, ip });
   }
   if (!ok.length) throw new Error('全部都缺廠商收款帳號：' + skipped.map(s => `${s.request_no}（${s.reason}）`).join('、'));
-  const total = ok.reduce((s, x) => s + RB.payAmt(x.r), 0);
+  const total = ok.reduce((s, x) => s + RB.payAmt(x.r) + (x.ip ? x.ip.amount : 0), 0);
   const buffer = buildYuantaXlsx({
     payment_date: d,
     payer_account_no: bank.account_no, payer_account_name: bank.account_name,
     payer_bank_code: bank.bank_code, payer_branch_code: bank.branch_code,
-    items: ok.map(({ r, p }) => ({
+    items: ok.flatMap(({ r, p, ip }) => [{
       amount: Math.round(RB.payAmt(r)),
       account_no: p.account_no, account_name: p.account_name,
       bank_code: p.bank_code, branch_code: p.branch_code || '',
       fee_burden_code: '15', notify_method: '0',
       memo: (r.remit_memo || r.request_no || '').slice(0, 30),
-    })),
+    }].concat(ip ? [{
+      amount: ip.amount, account_no: ip.account_no, account_name: ip.account_name,
+      bank_code: ip.bank_code, branch_code: ip.branch_code || '', fee_burden_code: '15', notify_method: '0',
+      memo: (`${r.period || ''}回饋-${r.request_no || ''}`).slice(0, 30),
+    }] : [])),
   });
   const ids = ok.map(x => x.r.id);
   const now = new Date().toISOString();
   await supabase.from('vendor_payment_requests').update({ payout_exported_at: now }).in('id', ids);
   await supabase.from('vendor_payout_exports').insert([{ payout_date: d, bank_id, request_ids: ids, total_amount: total, exported_by: actor || null }]);
-  const filename = `廠商出款_${d.replace(/-/g, '')}_${bank.label}_${ok.length}筆.xlsx`;
+  const lines = ok.reduce((n, x) => n + (x.ip ? 2 : 1), 0);
+  const filename = `廠商出款_${d.replace(/-/g, '')}_${bank.label}_${lines}筆.xlsx`;
   return { buffer, filename, count: ok.length, total, skipped };
 }
 

@@ -125,6 +125,7 @@ async function getRequest(id) {
   data.allocations = allocs || [];
   data.alloc_total = Math.round((allocs || []).reduce((a, x) => a + Number(x.amount || 0), 0) * 100) / 100;
   data.allowed_subjects = await allowedSubjects(data.source_id);
+  { const src0 = await splitSource(data.source_id); data.statement_mode = isSplitVendor(src0); if (data.statement_mode) data.intermediary_info = src0.intermediary || null; }
   // 廠商回饋（2026-11-24）：帳面／回饋／出款；還沒算過（舊單或還沒送審）就照目前廠商設定先算給畫面看
   if (data.rebate_mode) data.rebate = { pct: Number(data.rebate_pct), mode: data.rebate_mode, gross: Number(data.gross_amount), rebate: Number(data.rebate_amount), payout: Number(data.payout_amount) };
   else if (data.status !== 'paid') {
@@ -252,16 +253,20 @@ async function submitRequest(id, { actorType, actorId }) {
   if (actorType === 'vendor') {
     const [{ data: al }, { data: fl }] = await Promise.all([
       supabase.from('vendor_payment_allocations').select('amount').eq('request_id', id),
-      supabase.from('vendor_payment_files').select('id').eq('request_id', id),
+      supabase.from('vendor_payment_files').select('id, file_name').eq('request_id', id),
     ]);
-    if (!(al || []).length) throw new Error('請先填「項目名稱／金額／門市」至少一列');
-    if (!(fl || []).length) throw new Error('請先上傳帳單照片或 Excel');
+    const { data: rq } = await supabase.from('vendor_payment_requests').select('source_id').eq('id', id).maybeSingle();
+    const splitV = isSplitVendor(await splitSource(rq && rq.source_id));
+    if (!(fl || []).length) throw new Error(splitV ? '請先上傳對帳單 Excel' : '請先上傳帳單照片或 Excel');
+    if (!splitV && !(al || []).length) throw new Error('請先填「項目名稱／金額／門市」至少一列');
   }
   const { data, error } = await supabase.from('vendor_payment_requests')
     .update({ status: 'submitted', submitted_at: new Date().toISOString(), rejection_reason: null })
     .eq('id', id).select().single();
   if (error) throw new Error(error.message);
   try { Object.assign(data, await refreshRebate(id) || {}); } catch (e) { console.warn('[vendorPayment] 回饋計算', e.message); }
+  try { if (isSplitVendor(await splitSource(data.source_id))) await applySplit(id, { by: '送審自動拆分' }); }
+  catch (e) { console.warn('[vendorPayment] 對帳單拆分', e.message); await supabase.from('vendor_payment_requests').update({ split: { error: e.message, at: new Date().toISOString() } }).eq('id', id); }
   return data;
 }
 
@@ -486,6 +491,13 @@ async function approveRequest(id, actorSystemId, acct, actorName) {
     }
   }
   try { await refreshRebate(id); } catch (e) { console.warn('[vendorPayment] 回饋計算', e.message); }
+  {
+    const { data: cur0 } = await supabase.from('vendor_payment_requests').select('source_id, split').eq('id', id).maybeSingle();
+    if (cur0 && isSplitVendor(await splitSource(cur0.source_id))) {
+      if (!cur0.split || cur0.split.error) throw new Error('對帳單還沒拆分成功：' + ((cur0.split && cur0.split.error) || '請按「重新拆分」'));
+      if ((cur0.split.unmapped || []).length) throw new Error(`對帳單還有 ${cur0.split.unmapped.length} 個店號沒對到門市，請先設定`);
+    }
+  }
   const { data, error } = await supabase.from('vendor_payment_requests')
     .update({
       status: 'approved',
@@ -688,11 +700,64 @@ async function listTargets() {
  * 廠商：只能改自己的草稿／被退回的；會計：送審中／已通過都能改（付款後不能改），改過的列記 adjusted_by，保留廠商原本填的。
  * 請款總額＝分配合計。
  */
+// ── 寄銷對帳單拆分（2026-11-24；services/vendorSplit.js）──
+// 廠商有設 split_rules：廠商只要上傳對帳單 Excel → 系統讀檔拆成 廠商請款／中間商回饋／總部收入／門市開帳
+// 請款金額＝對帳單匯款金額合計；門市都對到了 → 分配列自動照對帳單（每店一列，金額＝匯款金額）
+const SPLIT_XLS = /\.(xlsx|xls)$/i;
+async function splitSource(source_id) {
+  const { data } = await supabase.from('billing_sources').select('id, name, split_rules, split_store_map, intermediary').eq('id', source_id).maybeSingle();
+  return data;
+}
+const isSplitVendor = (src) => !!(src && Array.isArray(src.split_rules) && src.split_rules.length);
+async function applySplit(request_id, { by } = {}) {
+  const { data: req } = await supabase.from('vendor_payment_requests').select('id, source_id, status, period, linked_bill_id').eq('id', request_id).maybeSingle();
+  if (!req) throw new Error('找不到請款單');
+  if (req.status === 'paid') throw new Error('已付款的請款不能重新拆分');
+  const src = await splitSource(req.source_id);
+  if (!isSplitVendor(src)) throw new Error('這家廠商沒有設對帳單拆分規則');
+  const { data: files } = await supabase.from('vendor_payment_files').select('id, file_name, storage_path, uploaded_at').eq('request_id', request_id).order('uploaded_at', { ascending: false });
+  const f = (files || []).find((x) => x.storage_path && SPLIT_XLS.test(x.file_name || x.storage_path));
+  if (!f) throw new Error('沒有找到對帳單 Excel（.xlsx／.xls）');
+  const { data: blob, error: dErr } = await supabase.storage.from(FILE_BUCKET).download(f.storage_path);
+  if (dErr || !blob) throw new Error('對帳單下載失敗：' + (dErr && dErr.message));
+  const SP = require('./vendorSplit');
+  const parsed = SP.parseStatement(Buffer.from(await blob.arrayBuffer()));
+  const split = SP.computeSplit(parsed, src.split_rules, src.split_store_map || {}, await listTargets());
+  split.file = { id: f.id, name: f.file_name };
+  split.by = by || null;
+  const up = { split, total_amount: split.totals.payout, intermediary_amount: split.totals.intermediary, hq_amount: split.totals.hq,
+    intermediary_snapshot: src.intermediary || null, rebate_pct: null, rebate_mode: null, gross_amount: null, rebate_amount: null, payout_amount: null };
+  const { error } = await supabase.from('vendor_payment_requests').update(up).eq('id', request_id);
+  if (error) throw new Error(error.message);
+  if (!split.unmapped.length) {   // 分配列照對帳單：每店一列（金額＝廠商請款）；保留之前選好的科目
+    const { data: old } = await supabase.from('vendor_payment_allocations').select('subject_id').eq('request_id', request_id).not('subject_id', 'is', null).limit(1);
+    const sid = old && old[0] ? old[0].subject_id : null;
+    await supabase.from('vendor_payment_allocations').delete().eq('request_id', request_id);
+    const rows = split.rows.filter((r) => r.payout).map((r, i) => ({ request_id, seq: i + 1, item_name: `${req.period || ''} 對帳單 ${r.code}`.trim(), store_erpid: r.store_erpid, store_name: r.store_name,
+      amount: r.payout, vendor_amount: r.payout, vendor_store: r.store_erpid, subject_id: sid }));
+    if (rows.length) { const { error: iErr } = await supabase.from('vendor_payment_allocations').insert(rows); if (iErr) throw new Error(iErr.message); }
+  }
+  return split;
+}
+async function setSplitStore(request_id, code, store_erpid, by) {
+  const { data: req } = await supabase.from('vendor_payment_requests').select('source_id').eq('id', request_id).maybeSingle();
+  if (!req) throw new Error('找不到請款單');
+  const src = await splitSource(req.source_id);
+  const map = { ...((src && src.split_store_map) || {}) };
+  if (store_erpid) {
+    if (!(await listTargets()).some((t) => String(t.store_erpid) === String(store_erpid))) throw new Error('門市不對');
+    map[String(code)] = String(store_erpid);
+  } else delete map[String(code)];
+  await supabase.from('billing_sources').update({ split_store_map: map }).eq('id', req.source_id);
+  return applySplit(request_id, { by });
+}
+
 // 廠商回饋（2026-11-24）：請款金額變了就重算；還沒付款前照廠商目前設定，付款後不動
 async function rebateFor(request_id, source_id, total) {
   const { data: r } = await supabase.from('vendor_payment_requests').select('status, rebate_pct, rebate_mode').eq('id', request_id).maybeSingle();
   if (r && r.status === 'paid') return RB.compute(total, r.rebate_pct, r.rebate_mode);
-  const { data: src } = await supabase.from('billing_sources').select('rebate_pct, rebate_mode').eq('id', source_id).maybeSingle();
+  const { data: src } = await supabase.from('billing_sources').select('rebate_pct, rebate_mode, split_rules').eq('id', source_id).maybeSingle();
+  if (isSplitVendor(src)) return {};   // 對帳單拆分的廠商不走回饋％
   return RB.compute(total, src && src.rebate_pct, src && src.rebate_mode);
 }
 async function refreshRebate(request_id) {
@@ -811,7 +876,15 @@ async function billFromAllocations(row) {
   if (!al0 || !al0.length) return null;
   // 廠商回饋「帳單外加」：廠商帳單 90 → 門市照帳面 100 分帳（每列照比例放大）；內含不用動
   const { data: rbRow } = await supabase.from('vendor_payment_requests').select('rebate_mode, gross_amount, rebate_amount, rebate_pct').eq('id', row.id).maybeSingle();
-  const al = rbRow && rbRow.rebate_mode === 'exclusive' && rbRow.gross_amount != null ? RB.scaleRows(al0, Number(rbRow.gross_amount)) : al0;
+  let al = rbRow && rbRow.rebate_mode === 'exclusive' && rbRow.gross_amount != null ? RB.scaleRows(al0, Number(rbRow.gross_amount)) : al0;
+  // 對帳單拆分：門市開帳＝廠商請款＋中間商回饋＋總部收入（每店）
+  const { data: spRow } = await supabase.from('vendor_payment_requests').select('split').eq('id', row.id).maybeSingle();
+  const sp = spRow && spRow.split && Array.isArray(spRow.split.rows) && !(spRow.split.unmapped || []).length ? spRow.split : null;
+  if (sp) {
+    const sid = (al0.find((a) => a.subject_id) || {}).subject_id || null;
+    al = sp.rows.filter((r) => r.store_cost).map((r) => ({ item_name: `對帳單 ${r.code}（請款 ${Number(r.payout).toLocaleString()}＋中間商 ${Number(r.intermediary).toLocaleString()}＋總部 ${Number(r.hq).toLocaleString()}）`,
+      store_erpid: r.store_erpid, store_name: r.store_name, amount: r.store_cost, subject_id: sid }));
+  }
   // 每個「門市 × 科目」一列；列有科目時月報格子跟著科目（2026-11 廠商指定科目）
   const subs = await require('./ledgerSubjects').all();
   const byStore = new Map();
@@ -828,7 +901,7 @@ async function billFromAllocations(row) {
   const paidAt = row.paid_at || new Date().toISOString();
   const { data: bill, error } = await supabase.from('bills').insert({
     source_id: row.source_id, period: row.period, title: row.title, total_amount: total, status: 'confirmed', items,
-    description: `由廠商請款 ${row.request_no || row.id} 付款後自動建立${rbRow && rbRow.rebate_mode ? `（廠商回饋 ${rbRow.rebate_pct}%${rbRow.rebate_mode === 'exclusive' ? '外加' : '內含'}：帳面 ${Number(rbRow.gross_amount).toLocaleString()}、回饋 ${Number(rbRow.rebate_amount).toLocaleString()}）` : ''}`, source_ref: row.request_no,
+    description: `由廠商請款 ${row.request_no || row.id} 付款後自動建立${sp ? `（對帳單拆分：廠商請款 ${sp.totals.payout.toLocaleString()}＋中間商回饋 ${sp.totals.intermediary.toLocaleString()}＋總部收入 ${sp.totals.hq.toLocaleString()}＝門市開帳 ${sp.totals.store_cost.toLocaleString()}）` : ''}${rbRow && rbRow.rebate_mode ? `（廠商回饋 ${rbRow.rebate_pct}%${rbRow.rebate_mode === 'exclusive' ? '外加' : '內含'}：帳面 ${Number(rbRow.gross_amount).toLocaleString()}、回饋 ${Number(rbRow.rebate_amount).toLocaleString()}）` : ''}`, source_ref: row.request_no,
     submitted_at: row.submitted_at || paidAt, confirmed_at: paidAt, received_at: paidAt, created_by_type: 'system', source_system: 'vendor_portal',
   }).select('id, bill_no').single();
   if (error) { console.error('[vendorPayment] 付款後建帳單失敗：', error.message); return null; }
@@ -844,7 +917,7 @@ async function billFromAllocations(row) {
 }
 
 module.exports = {
-  refreshRebate,
+  refreshRebate, applySplit, setSplitStore,
   listTargets, allowedSubjects, saveAllocations, uploadRequestFile, signFiles, removeStoredFile, billFromAllocations,
   // 銀行帳號
   listBankAccounts, createBankAccount, updateBankAccount, deleteBankAccount,

@@ -391,7 +391,7 @@ router.patch('/profile', authenticateVendor, async (req, res) => {
 });
 
 // 廠商端不給看我們內部的拆分（回饋、帳面、出款、門市開帳）（2026-11-24 營運）
-const INTERNAL_KEYS = ['rebate', 'rebate_pct', 'rebate_mode', 'gross_amount', 'rebate_amount', 'payout_amount', 'split'];
+const INTERNAL_KEYS = ['rebate', 'rebate_pct', 'rebate_mode', 'gross_amount', 'rebate_amount', 'payout_amount', 'split', 'intermediary_amount', 'hq_amount', 'intermediary_snapshot', 'intermediary_info'];
 const hideInternal = (r) => { if (!r || typeof r !== 'object') return r; const o = { ...r }; for (const k of INTERNAL_KEYS) delete o[k]; return o; };
 // 廠商請款單（只看自己的）
 router.get('/requests', authenticateVendor, async (req, res) => {

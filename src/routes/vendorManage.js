@@ -36,7 +36,7 @@ router.use(authorize('operation_accounting', 'operation_lead', 'super_admin', 'd
 router.get('/', async (req, res) => {
   try {
     const [{ data: src, error }, { data: acc }, { data: banks }] = await Promise.all([
-      supabase.from('billing_sources').select('id, name, code, tax_id, contact_name, contact_phone, contact_email, notes, is_active, created_at, allowed_subject_ids, sort_order, rebate_pct, rebate_mode').eq('source_type', 'vendor').order('is_active', { ascending: false }).order('sort_order', { ascending: true, nullsFirst: false }).order('name'),
+      supabase.from('billing_sources').select('id, name, code, tax_id, contact_name, contact_phone, contact_email, notes, is_active, created_at, allowed_subject_ids, sort_order, rebate_pct, rebate_mode, split_rules, split_store_map, intermediary').eq('source_type', 'vendor').order('is_active', { ascending: false }).order('sort_order', { ascending: true, nullsFirst: false }).order('name'),
       supabase.from('vendor_accounts').select('id, source_id, username, is_active, last_login_at'),
       supabase.from('vendor_bank_accounts').select('*').order('is_default', { ascending: false }).order('created_at'),
     ]);
@@ -128,6 +128,25 @@ router.patch('/:id', authorize('operation_accounting', 'operation_lead', 'super_
       const mode = pct == null ? null : (b.rebate_mode === 'exclusive' ? 'exclusive' : b.rebate_mode === 'inclusive' ? 'inclusive' : null);
       if (pct != null && !mode) throw new Error('請選帳單內含或帳單外加');
       patch.rebate_pct = pct; patch.rebate_mode = mode;
+    }
+    // 寄銷對帳單拆分（2026-11-24）：split_rules [{ match, rate, intermediary, hq }]；中間商出款資料 intermediary { name, bank_code, branch_code, account_no, account_name }
+    if (b.split_rules !== undefined) {
+      const raw = Array.isArray(b.split_rules) ? b.split_rules : [];
+      const R = require('../services/vendorSplit').cleanRules(raw);
+      if (R.length !== raw.filter((x) => x && String(x.match || '').trim()).length) throw new Error('拆分規則不對：中間商＋總部要大於 0、小於抽成％');
+      patch.split_rules = R.length ? R : null;
+    }
+    if (b.intermediary !== undefined) {
+      const m = b.intermediary || {};
+      const name = String(m.name || '').trim();
+      if (!name) patch.intermediary = null;
+      else {
+        const bank = String(m.bank_code || '').replace(/\D/g, ''); const br = String(m.branch_code || '').replace(/\D/g, ''); const acc = String(m.account_no || '').replace(/\D/g, '');
+        if (bank && !/^\d{3}$/.test(bank)) throw new Error('中間商總行代碼要 3 碼');
+        if (br && !/^\d{4}$/.test(br)) throw new Error('中間商分行代碼要 4 碼');
+        if (acc && acc.length < 8) throw new Error('中間商帳號至少 8 碼');
+        patch.intermediary = { name: name.slice(0, 60), bank_code: bank || null, branch_code: br || null, account_no: acc || null, account_name: String(m.account_name || '').trim().slice(0, 60) || null, tax_id: String(m.tax_id || '').replace(/\D/g, '').slice(0, 8) || null };
+      }
     }
     if (patch.name === null) throw new Error('廠商名稱不能空白');
     const { data, error } = await supabase.from('billing_sources').update(patch).eq('id', req.params.id).eq('source_type', 'vendor').select('*').single();

@@ -91,6 +91,9 @@ router.delete('/requests/:id',
   async (req, res) => { try { ok(res, await svc.deleteRequest(req.params.id, actorSys(req))); } catch (e) { fail(res, e); } });
 
 router.post('/requests/:id/submit',  async (req, res) => { try { ok(res, await svc.submitRequest(req.params.id, actorSys(req))); }                catch (e) { fail(res, e); } });
+// 寄銷對帳單拆分（2026-11-24）：重新讀對帳單拆分；店號對門市（存在廠商，下個月自動套用）
+router.post('/requests/:id/split', async (req, res) => { try { ok(res, await svc.applySplit(req.params.id, { by: req.user?.name || null })); } catch (e) { fail(res, e); } });
+router.put('/requests/:id/split-store', async (req, res) => { try { ok(res, await svc.setSplitStore(req.params.id, (req.body || {}).code, (req.body || {}).store_erpid, req.user?.name || null)); } catch (e) { fail(res, e); } });
 router.post('/requests/:id/approve', async (req, res) => { try { ok(res, await svc.approveRequest(req.params.id, req.user?.id, (req.body || {}).accounting, req.user?.name || req.user?.member_id)); }              catch (e) { fail(res, e); } });
 router.post('/requests/:id/reject',  async (req, res) => { try { ok(res, await svc.rejectRequest(req.params.id, req.body?.reason, req.user?.id)); } catch (e) { fail(res, e); } });
 router.patch('/requests/:id/accounting', async (req, res) => { try { ok(res, await svc.setAccounting(req.params.id, req.body || {}, req.user?.name || req.user?.member_id)); } catch (e) { fail(res, e); } });
