@@ -542,12 +542,15 @@ async function build(ym, store, opts = {}) {
   const bookG = plus(bk ? bk.glasses : null, aPaid);
   const bookC = bk && bk.split ? r0(bk.contact) : null;
   const bookTotal = bookG == null && bookC == null ? null : r0((bookG || 0) + (bookC || 0));
+  // 2026-11-24 營運：隱眼業績調帳／改值 → 眼鏡業績要跟著反向變（眼鏡＝ERP 總業績 − API PAY − 隱眼，總業績不變）
+  const cS = sysOr('contact_sales', cSys);
+  const cShift = so && cS.amount != null && cSys != null ? r0(cS.amount - cSys) : 0;
+  if (cShift) erpGlasses = r0(erpGlasses - cShift);
   const gSys = plus(erpGlasses, aSales);
   const gS = sysOr('glasses_sales', gSys);
-  const cS = sysOr('contact_sales', cSys);
   const revenue = {
     glasses_sales: { name: '眼鏡業績（帳上）', kind: 'sales', amount: gS.amount, from: gS.from, erp: gSys, basis: salesBasis,
-      refs: [so ? { label: `ERP 總業績 ${r0(so.total).toLocaleString()} − API PAY ${apiSys == null ? '?' : apiSys.toLocaleString()} − 隱眼 ${cSys.toLocaleString()}`, amount: r0(erpGlasses) } : (erp ? { label: 'ERP 帳上（標籤）', amount: r0(erp.glasses) } : null),
+      refs: [so ? { label: `ERP 總業績 ${r0(so.total).toLocaleString()} − API PAY ${apiSys == null ? '?' : apiSys.toLocaleString()} − 隱眼 ${(cSys + cShift).toLocaleString()}${cShift ? `（含隱眼調帳 ${cShift > 0 ? '+' : ''}${cShift.toLocaleString()}）` : ''}`, amount: r0(erpGlasses) } : (erp ? { label: 'ERP 帳上（標籤）', amount: r0(erp.glasses) } : null),
         am ? { label: '愛民系統訂單', amount: r0(aSales) } : null].filter(Boolean) },
     contact_sales: { name: '隱眼業績（帳上）', kind: 'sales', amount: cS.amount, from: cS.from, erp: cSys, basis: salesBasis,
       refs: so ? [{ label: '隱形眼鏡物料', amount: r0(so.contact_lens) }, { label: '護理產品物料', amount: r0(so.care) }] : (erp ? [{ label: 'ERP 帳上（標籤）', amount: cSys }] : []) },
