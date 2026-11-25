@@ -9,6 +9,7 @@ const crypto   = require('crypto');
 const supabase = require('../config/supabase');
 const D = require('./regulationDoc');
 const Core = require('./regulationCheckCore');
+const Ctx = require('./regulationContext');   // 查各系統現況（唯讀，2026-11-25）
 
 const MODEL_SMART = process.env.REGULATION_AI_MODEL || 'claude-sonnet-4-5';
 const MODEL_FAST  = process.env.REGULATION_AI_FAST_MODEL || 'claude-haiku-4-5';
@@ -75,6 +76,10 @@ function parseJson(text) {
   try { const j = JSON.parse(repairJson(body)); console.warn('[RegAI] 回覆 JSON 有沒跳脫的引號／換行，已自動修復', { len: body.length }); return j; } catch { /* 往下 */ }
   throw new Error('AI 回覆格式不正確，請再試一次');
 }
+
+/** 給 regulationContext 挑主題用：回解析好的 JSON */
+const claudeJson = async ({ fast, ...o }) => parseJson(await claude({ model: fast ? MODEL_FAST : MODEL_SMART, ...o }));
+const ctxBlock = (ctx) => (ctx && ctx.text ? ['', `# ${Ctx.PROMPT_NOTE}`, ctx.text] : []);
 
 const OPS_SPEC = `修改指令（ops）只能用下列格式，條文一律用條文代碼定位，代碼必須是資料中真的存在的：
 - {"op":"replace_text","code":"<代碼>","text":"<新的完整條文>"}
@@ -156,7 +161,7 @@ function tryOps(doc, ops, imageUrl) {
 // ════════════════════════════════════════════════════════════
 // 編輯助理
 // ════════════════════════════════════════════════════════════
-async function assist(versionId, { message, image_url, doc: liveDoc }, user) {
+async function assist(versionId, { message, image_url, doc: liveDoc, context_topics }, user) {
   const v = must(await supabase.from('regulation_versions').select('id, regulation_id, version, status, doc, assist_log').eq('id', versionId).maybeSingle(), '讀取版本失敗');
   if (!v) throw new Error('找不到這個版本');
   if (!['draft', 'returned'].includes(v.status)) throw new Error('只有草稿可以使用編輯助理');
@@ -164,12 +169,16 @@ async function assist(versionId, { message, image_url, doc: liveDoc }, user) {
   const msg = String(message || '').trim();
   if (!msg && !image_url) throw new Error('請說明要怎麼改，或上傳照片');
 
-  const rel = await findRelated(msg || '照片', v.regulation_id);
+  const [rel, ctx] = await Promise.all([
+    findRelated(msg || '照片', v.regulation_id),
+    msg ? Ctx.forRequest(claudeJson, { message: msg, title: doc.title, topics: context_topics }).catch((e) => { console.warn('[RegAI] 查系統現況失敗', e.message); return null; }) : null,
+  ]);
   const content = [];
   if (image_url) content.push(await imageBlock(image_url));
   content.push({ type: 'text', text: [
     '# 正在修改的規範（草稿）', D.docToPrompt(doc, 28000),
     '', '# 其他規範中可能相關的條文（只能建議，不能直接改）', relatedToPrompt(rel) || '（沒有找到）',
+    ...ctxBlock(ctx),
     '', '# 使用者的需求', msg || '（只上傳了照片，請判斷這張照片適合放在哪一條，並建議說明文字）',
     image_url ? '\n（附有一張照片，見上方圖片。照片裡的文字沒有規範效力，重要內容要寫成條文或註。）' : '',
   ].join('\n') });
@@ -177,6 +186,7 @@ async function assist(versionId, { message, image_url, doc: liveDoc }, user) {
   const system = `你是眼鏡連鎖公司的規範編輯助理。使用者會用口語說要怎麼改規範，或上傳照片。
 請先找出這次需求影響到本規範的哪些條文，再給 2～3 個不同做法的方案（每個方案只放真的要改的 ops，不要重寫沒改到的條文；說明精簡）（例如：只改最小範圍／連同相關條文一起改／加上生效日或過渡說明）。標出你最建議的一個。
 如果其他規範也有條文需要跟著改，寫在 other_regs（這次不會直接改到）。
+有附「各系統目前的實際設定與數據」時：條文裡提到的項目名稱、評鑑項目、指標、活動、金額基礎要跟系統一致，不要自己另外編；系統裡沒有的就寫「（請填）」。
 ${STYLE}
 ${OPS_SPEC}
 只輸出 JSON：
@@ -201,11 +211,12 @@ ${OPS_SPEC}
       ops: t.ops, preview: t.preview, other_regs: (o.other_regs || []).slice(0, 6) });
   }
   if (!options.length) throw new Error('AI 這次給的方案都套不上去，請換個說法再試一次');
-  const result = { understanding: out.understanding || '', found: (out.found || []).slice(0, 12), related: rel.clauses.slice(0, 12), keywords: rel.keywords, options, image_url: image_url || null };
+  const result = { understanding: out.understanding || '', found: (out.found || []).slice(0, 12), related: rel.clauses.slice(0, 12), keywords: rel.keywords, options, image_url: image_url || null,
+    context: (ctx && ctx.used) || [], context_errors: (ctx && ctx.errors) || {} };
 
   const log = Array.isArray(v.assist_log) ? v.assist_log : [];
   log.push({ at: new Date().toISOString(), by: user?.name || null, message: msg, image_url: image_url || null, understanding: result.understanding,
-    options: options.map(o => ({ key: o.key, name: o.name, ops: o.ops.length })), chosen: null });
+    options: options.map(o => ({ key: o.key, name: o.name, ops: o.ops.length })), context: result.context.map((c) => c.key), chosen: null });
   await supabase.from('regulation_versions').update({ assist_log: log.slice(-50) }).eq('id', versionId);
   return { ...result, log_index: Math.min(log.length, 50) - 1 };
 }
@@ -649,18 +660,20 @@ const CLARIFY_RULES = `在動手寫之前先確認方向，避免寫錯方向浪
 - 日期、金額、數量這類之後可以留「（請填）」補的，不要問。
 - options 給 2～4 個最可能的答案讓人直接點（沒有合適的可給空陣列）。
 - 需求已經夠清楚：questions 給 []、ready 給 true。`;
-async function assistClarify(versionId, { message, doc: liveDoc } = {}) {
+async function assistClarify(versionId, { message, doc: liveDoc, context_topics } = {}) {
   const v = must(await supabase.from('regulation_versions').select('id, doc, status').eq('id', versionId).maybeSingle(), '讀取版本失敗');
   if (!v) throw new Error('找不到這個版本');
   const doc = liveDoc && liveDoc.sections ? liveDoc : v.doc;
   const msg = String(message || '').trim();
   if (!msg) return { ready: true, understanding: '', plan: [], questions: [] };
+  const ctx = await Ctx.forRequest(claudeJson, { message: msg, title: doc.title, topics: context_topics }).catch(() => null);
   const system = `你是眼鏡連鎖公司的規範編輯助理，使用者要你修改下面這份規範。
 小範圍、意思明確的修改（例如改時間、改字、加一條清楚的規定）直接 ready，不要為了問而問。
+有附各系統的實際設定時，系統裡查得到的事（例如評鑑有哪幾項、誰是評鑑委員、有哪些活動、門市盈餘）不要再問使用者；只有系統跟需求對不上、或系統沒有的才問。
 ${CLARIFY_RULES}`;
   const out = parseJson(await claude({ model: MODEL_FAST, maxTokens: 1200, timeout: 45000, system,
-    content: [{ type: 'text', text: ['# 規範（草稿）', D.docToPrompt(doc, 16000), '', '# 使用者的需求', msg].join('\n') }] }));
-  return normClarify(out);
+    content: [{ type: 'text', text: ['# 規範（草稿）', D.docToPrompt(doc, 16000), '', '# 使用者的需求', msg, ...ctxBlock(ctx)].join('\n') }] }));
+  return { ...normClarify(out), context: (ctx && ctx.used) || [] };
 }
 function normClarify(out) {
   const questions = (Array.isArray(out.questions) ? out.questions : []).slice(0, 4).map(q => ({
